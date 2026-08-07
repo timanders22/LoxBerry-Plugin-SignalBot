@@ -210,7 +210,9 @@ function sg_config_write($cfg)
     $p = sg_paths();
     @mkdir($p['configdir'], 0775, true);
     $js = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (@file_put_contents($p['config'], $js) === false) { return false; }
+    // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
+    // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
+    if ($js === false || @file_put_contents($p['config'], $js) === false) { return false; }
     // Token, PIN und die Liste der erlaubten Rufnummern - nicht fuer alle.
     @chmod($p['config'], 0600);
     @copy($p['config'], $p['sicherung']);
