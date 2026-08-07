@@ -1,0 +1,18 @@
+#!/bin/bash
+# Laeuft als ROOT beim Entfernen des Plugins.
+echo "<INFO> Halte den Dienst an und entferne ihn"
+systemctl disable --now signal-cli-loxberry >/dev/null 2>&1
+rm -f /etc/systemd/system/signal-cli-loxberry.service
+systemctl daemon-reload >/dev/null 2>&1
+rm -f /etc/sudoers.d/loxberry-signalbot
+
+# Die Signal-Schluessel werden BEWUSST NICHT geloescht. Wer sie loescht,
+# meldet das Zweitgeraet ab und muss neu verknuepfen - das soll niemand aus
+# Versehen ausloesen.
+echo "<INFO> signal-cli selbst und die Signal-Schluessel bleiben erhalten."
+echo "<INFO> Wer auch die entfernen will:"
+echo "<INFO>   sudo rm -rf /var/lib/signal-cli /opt/signal-cli-*"
+echo "<INFO>   sudo rm -f /usr/local/bin/signal-cli"
+echo "<INFO>   sudo userdel signalcli"
+echo "<INFO> Danach im Handy unter Signal - Gekoppelte Geraete das Geraet loeschen."
+exit 0

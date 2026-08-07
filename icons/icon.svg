@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Eigene Zeichnung: Sprechblase mit Schloss. Bewusst ohne fremde
+     Wortmarken oder Logos - insbesondere ohne das Signal-Logo. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="24" fill="#6dac20"/>
+  <path d="M26 34h76a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H62l-22 18v-18h-14a8 8 0 0 1-8-8V42a8 8 0 0 1 8-8z"
+        fill="#ffffff"/>
+  <g transform="translate(48 46)">
+    <path d="M8 14V9a8 8 0 0 1 16 0v5" fill="none" stroke="#6dac20" stroke-width="5" stroke-linecap="round"/>
+    <rect x="3" y="14" width="26" height="20" rx="4" fill="#6dac20"/>
+    <circle cx="16" cy="23" r="3" fill="#ffffff"/>
+    <rect x="14.5" y="24" width="3" height="6" rx="1.5" fill="#ffffff"/>
+  </g>
+</svg>

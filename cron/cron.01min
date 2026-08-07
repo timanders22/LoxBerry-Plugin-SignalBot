@@ -1,0 +1,7 @@
+#!/bin/bash
+# Weckt den Bot, falls er nicht laeuft. Das Skript selbst haelt die Verbindung
+# zum Ereignisstrom dauerhaft offen und sichert sich mit einer Sperrdatei -
+# dieser Aufruf ist also ein Wiederbeleber, kein Taktgeber.
+# Ueber den Interpreter aufgerufen, nicht ueber die Raute-Zeile: geht beim
+# Entpacken das Ausfuehrungsrecht verloren, laeuft der Bot trotzdem an.
+/usr/bin/php REPLACELBPBINDIR/sg_bot.php >/dev/null 2>&1 &
