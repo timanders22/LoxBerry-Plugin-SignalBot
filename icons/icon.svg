@@ -1,14 +1,62 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Eigene Zeichnung: Sprechblase mit Schloss. Bewusst ohne fremde
-     Wortmarken oder Logos - insbesondere ohne das Signal-Logo. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <rect width="128" height="128" rx="24" fill="#6dac20"/>
-  <path d="M26 34h76a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H62l-22 18v-18h-14a8 8 0 0 1-8-8V42a8 8 0 0 1 8-8z"
-        fill="#ffffff"/>
-  <g transform="translate(48 46)">
-    <path d="M8 14V9a8 8 0 0 1 16 0v5" fill="none" stroke="#6dac20" stroke-width="5" stroke-linecap="round"/>
-    <rect x="3" y="14" width="26" height="20" rx="4" fill="#6dac20"/>
-    <circle cx="16" cy="23" r="3" fill="#ffffff"/>
-    <rect x="14.5" y="24" width="3" height="6" rx="1.5" fill="#ffffff"/>
+<svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="50%" fx="35%" fy="35%">
+      <stop offset="0%" stop-color="#7dc424" />
+      <stop offset="65%" stop-color="#6dac20" />
+      <stop offset="100%" stop-color="#568819" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Badge Ring -->
+  <circle cx="256" cy="256" r="246" fill="url(#bg-grad)" />
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" />
+
+  <g filter="url(#shadow)" fill="#ffffff">
+    <!-- Main Center Icon: Signal Chat Bubble with Robot Face / Antenna -->
+    <!-- Chat Bubble Body (Signal Messenger Style) -->
+    <path d="M 256 80 C 185 80 130 130 130 190 C 130 225 152 255 186 274 L 175 305 C 173 311 180 316 185 312 L 226 292 C 236 295 246 297 256 297 C 327 297 382 247 382 187 C 382 127 327 80 256 80 Z" fill="#ffffff" />
+
+    <!-- Robot Antenna on Top -->
+    <rect x="251" y="62" width="10" height="20" rx="4" fill="#ffffff" />
+    <circle cx="256" cy="56" r="8" fill="#ffffff" />
+
+    <!-- Cutout inside Chat Bubble: Robot Face -->
+    <!-- Robot Eyes -->
+    <rect x="180" y="145" width="152" height="42" rx="14" fill="#6dac20" />
+    <circle cx="215" cy="166" r="11" fill="#ffffff" />
+    <circle cx="297" cy="166" r="11" fill="#ffffff" />
+    <circle cx="218" cy="166" r="5" fill="#6dac20" />
+    <circle cx="294" cy="166" r="5" fill="#6dac20" />
+
+    <!-- Robot Mouth / Signal Command Lines -->
+    <rect x="210" y="208" width="92" height="8" rx="4" fill="#6dac20" />
+    <rect x="225" y="226" width="62" height="6" rx="3" fill="#6dac20" />
+
+    <!-- Flanking Left Symbol: Message / Chat Command -->
+    <g transform="translate(112, 175)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <path d="M -10 -6 Q 0 -12 10 -6 L 10 4 C 10 7 7 9 4 9 L -6 9 L -11 13 L -10 6 C -11 4 -11 -4 -10 -6 Z" fill="#6dac20" />
+      <circle cx="-4" cy="1" r="2" fill="#ffffff" />
+      <circle cx="0" cy="1" r="2" fill="#ffffff" />
+      <circle cx="4" cy="1" r="2" fill="#ffffff" />
+    </g>
+
+    <!-- Flanking Right Symbol: Loxone Smart Control -->
+    <g transform="translate(400, 175)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <path d="M -9 2 L 0 -7 L 9 2 L 9 9 C 9 10.5 7.5 11 6 11 L -6 11 C -7.5 11 -9 10.5 -9 9 Z" fill="#6dac20" />
+      <rect x="-3" y="4" width="6" height="7" fill="#ffffff" />
+    </g>
+
+    <!-- Dashed Line -->
+    <path d="M 150 345 L 362 345" stroke="#ffffff" stroke-width="4" stroke-dasharray="6 8" opacity="0.8" />
   </g>
+
+  <!-- Typography -->
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="0.5">Signal-Bot</text>
+  <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
 </svg>

@@ -44,7 +44,7 @@ if ($sg_post && isset($_POST['vorlage'])) {
 if ($sg_post && isset($_POST['clearlog'])) {
     $sg_lf = sg_paths()['log'];
     @mkdir(dirname($sg_lf), 0775, true);
-    @file_put_contents($sg_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
+    sg_log_setzen($sg_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
     $sg_tab = 'tab-log';
 }
 
@@ -98,11 +98,32 @@ if ($sg_post && isset($_POST['testaktion'])) {
 if ($sg_post && isset($_POST['speichern'])) {
     $sg_cfg = sg_config();
 
+    /* Die Adresse ist Rechner und Port - KEIN Pfad.
+     *
+     * Bis 0.9.0 liess das Muster einen beliebigen Pfad zu ((/\S*)?). Das
+     * hatte zwei Folgen, und die zweite ist die haeufigere:
+     *
+     * 1. sg_rpc() haengt selbst '/api/v1/rpc' an. Wer die Adresse aus der
+     *    Anleitung von signal-cli abschreibt und dabei den Pfad mitnimmt,
+     *    bekommt 'http://127.0.0.1:8095/api/v1/rpc/api/v1/rpc' - und eine
+     *    Fehlermeldung, die nicht sagt warum.
+     * 2. Ein Pfad im Feld liesse Abrufe an andere oertliche Dienste
+     *    zusammenbauen. Das setzt zwar einen angemeldeten LoxBerry-Verwalter
+     *    voraus, der ohnehin mehr darf - ein Eingabefeld, das nur eine Sache
+     *    annimmt, ist trotzdem das bessere Feld.
+     *
+     * Ein versehentlich mitgeschriebener Pfad wird nicht abgewiesen, sondern
+     * abgeschnitten: Das ist die haeufigste Eingabe, und eine Fehlermeldung
+     * dafuer waere unfreundlich.
+     */
     $sg_url = trim((string) (isset($_POST['rpc_url']) ? $_POST['rpc_url'] : ''));
-    if ($sg_url === '' || !preg_match('#^https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?(/\S*)?$#', $sg_url)) {
+    if (preg_match('#^(https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?)(/.*)?$#', $sg_url, $sg_tr)) {
+        $sg_url = $sg_tr[1];
+    }
+    if ($sg_url === '' || !preg_match('#^https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?$#', $sg_url)) {
         $sg_fehler[] = sg_t('EINST.FEHLER_URL');
     } else {
-        $sg_cfg['rpc_url'] = rtrim($sg_url, '/');
+        $sg_cfg['rpc_url'] = $sg_url;
     }
 
     $sg_k = preg_replace('/[^0-9+]/', '', (string) (isset($_POST['konto']) ? $_POST['konto'] : ''));
@@ -177,8 +198,8 @@ if ($sg_post && isset($_POST['befehle_speichern'])) {
             $a = isset($_POST[$feld]) ? (array) $_POST[$feld] : array();
             return isset($a[$sg_i]) ? $a[$sg_i] : $def;
         };
-        $sg_wort = mb_strtolower(trim(preg_replace('/\s+/', ' ',
-            preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wort')))), 'UTF-8');
+        $sg_wort = sg_klein(trim(preg_replace('/\s+/', ' ',
+            preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wort')))));
         $sg_stufe = (string) $sg_g('b_stufe', 'sofort');
         $sg_b = array(
             'aktiv' => (int) $sg_g('b_aktiv', 0) ? 1 : 0,
@@ -313,17 +334,38 @@ if (class_exists('LBWeb', false)) {
 <!-- Reiterleiste: echte Links, JavaScript faengt den Klick ab. Der Link
      traegt die Adresse - jeder Reiter ist verlinkbar, die Zurueck-Taste tut
      das Erwartete, und faellt das Skript aus, bleibt die Seite bedienbar. -->
+<?php
+/*
+ * Die Reiter waren schon echte Verweise - was fehlte, war die Klasse
+ * sm-active AUF DEM SERVER.
+ *
+ * .sm-seite steht auf display:none, sichtbar wird eine Flaeche erst durch
+ * .sm-active. Diese Klasse vergab bis 0.9.0 ausschliesslich das JavaScript
+ * am Seitenende; im ausgelieferten HTML kam sm-active gar nicht vor. Ohne
+ * JavaScript standen Kopfzeile und Reiterleiste da, darunter nichts.
+ *
+ * $sg_tab wurde serverseitig laengst ermittelt und nur ans JavaScript
+ * weitergereicht. Diese Liste, die Positivliste in $sg_muster und die id
+ * der Flaechen muessen deckungsgleich bleiben - alle drei.
+ */
+$sg_reiter = array(
+    'tab-settings' => sg_t('REITER.EINSTELLUNGEN'),
+    'tab-befehle'  => sg_t('REITER.BEFEHLE'),
+    'tab-mqtt'     => sg_t('REITER.MQTT'),
+    'tab-loxone'   => sg_t('REITER.LOXONE'),
+    'tab-test'     => sg_t('REITER.TEST'),
+    'tab-log'      => sg_t('REITER.LOG'),
+);
+?>
 <div class="sm-tabs">
-	<a class="sm-tab" data-ziel="tab-settings" href="index.php?form=settings"><?= sg_e(sg_t('REITER.EINSTELLUNGEN')) ?></a>
-	<a class="sm-tab" data-ziel="tab-befehle"  href="index.php?form=befehle"><?= sg_e(sg_t('REITER.BEFEHLE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-mqtt"     href="index.php?form=mqtt"><?= sg_e(sg_t('REITER.MQTT')) ?></a>
-	<a class="sm-tab" data-ziel="tab-loxone"   href="index.php?form=loxone"><?= sg_e(sg_t('REITER.LOXONE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-test"     href="index.php?form=test"><?= sg_e(sg_t('REITER.TEST')) ?></a>
-	<a class="sm-tab" data-ziel="tab-log"      href="index.php?form=log"><?= sg_e(sg_t('REITER.LOG')) ?></a>
+<?php foreach ($sg_reiter as $sg_id => $sg_bez) { ?>
+	<a class="sm-tab<?= $sg_tab === $sg_id ? ' sm-active' : '' ?>" data-ziel="<?= sg_e($sg_id) ?>"
+	   href="index.php?form=<?= sg_e(substr($sg_id, 4)) ?>"><?= sg_e($sg_bez) ?></a>
+<?php } ?>
 </div>
 
 <!-- ================= Reiter: Einstellungen ================= -->
-<div class="sm-seite" id="tab-settings">
+<div class="sm-seite<?= $sg_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
 <?php $sg_lebt = sg_daemon_lebt(); $sg_konten = $sg_lebt ? sg_konten() : array(); ?>
 <div class="sm-kacheln">
   <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.DIENST')) ?>
@@ -434,7 +476,7 @@ if (class_exists('LBWeb', false)) {
 </div>
 
 <!-- ================= Reiter: Befehle ================= -->
-<div class="sm-seite" id="tab-befehle">
+<div class="sm-seite<?= $sg_tab === 'tab-befehle' ? ' sm-active' : '' ?>" id="tab-befehle">
 <h2><?= sg_e(sg_t('BEF.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('BEF.ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= sg_t('BEF.STUFEN') ?></div>
@@ -476,7 +518,7 @@ if (class_exists('LBWeb', false)) {
 </div>
 
 <!-- ================= Reiter: MQTT ================= -->
-<div class="sm-seite" id="tab-mqtt">
+<div class="sm-seite<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
 <h2><?= sg_e(sg_t('MQTT.H_TITEL')) ?></h2>
 <?php $sg_m = sg_mqtt_zustand(); ?>
 <?php if (!$sg_m['gefunden']) { ?>
@@ -509,7 +551,7 @@ if (class_exists('LBWeb', false)) {
 </div>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
-<div class="sm-seite" id="tab-loxone">
+<div class="sm-seite<?= $sg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
 <h2><?= sg_e(sg_t('LOX.H_RICHTUNGEN')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.RICHTUNGEN_TEXT') ?></div>
 
@@ -559,7 +601,7 @@ if (class_exists('LBWeb', false)) {
 </div>
 
 <!-- ================= Reiter: Test ================= -->
-<div class="sm-seite" id="tab-test">
+<div class="sm-seite<?= $sg_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
 <h2><?= sg_e(sg_t('TEST.H_SELBSTTEST')) ?></h2>
 <p class="sm-hilfe"><?= sg_t('TEST.SELBSTTEST_TEXT') ?></p>
 <?php
@@ -624,7 +666,7 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 </div>
 
 <!-- ================= Reiter: Logdateien ================= -->
-<div class="sm-seite" id="tab-log">
+<div class="sm-seite<?= $sg_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
 <h2><?= sg_e(sg_t('LOG.H_TITEL')) ?></h2>
 <div class="sm-hilfe"><?= sg_t('LOG.MASKE_HINWEIS') ?></div>
 <?php

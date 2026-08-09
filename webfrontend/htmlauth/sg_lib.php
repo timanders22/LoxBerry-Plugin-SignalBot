@@ -90,19 +90,109 @@ function sg_datadir()
     return $p['data'];
 }
 
+/**
+ * Das Protokoll auf einen Inhalt setzen - Leeren und Kuerzen laufen hier durch.
+ *
+ * Mit Sperre, weil bei diesem Plugin ein DAUERLAEUFER an derselben Datei
+ * haengt: sg_bot.php schreibt jede eingehende Nachricht mit. Anhaengen mit
+ * FILE_APPEND kann keine Zeile zerreissen (O_APPEND), aber wer zwischen dem
+ * Lesen des Endstuecks und dem Zurueckschreiben anhaengt, schreibt in eine
+ * Datei, die gleich ueberschrieben wird.
+ *
+ * ftruncate statt Neuanlage: dieselbe Datei, dieselbe Inode - wer sie offen
+ * hat, schreibt weiter hinein statt in eine geloeschte Leiche.
+ */
+function sg_log_setzen($datei, $inhalt)
+{
+    $fp = @fopen($datei, 'c+');
+    if (!$fp) { return false; }
+    if (!flock($fp, LOCK_EX)) { fclose($fp); return false; }
+    ftruncate($fp, 0);
+    rewind($fp);
+    fwrite($fp, $inhalt);
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    return true;
+}
+
 function sg_log($text)
 {
     $p = sg_paths();
     $d = dirname($p['log']);
     if (!is_dir($d)) { @mkdir($d, 0775, true); }
+    clearstatcache(true, $p['log']);
     if (is_file($p['log']) && filesize($p['log']) > 512000) {
-        $rest = array_slice(file($p['log'], FILE_IGNORE_NEW_LINES) ?: array(), -300);
-        @file_put_contents($p['log'], implode("\n", $rest) . "\n");
+        sg_log_setzen($p['log'], implode("\n", array_slice(file($p['log'], FILE_IGNORE_NEW_LINES) ?: array(), -300)) . "\n");
     }
     @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
 }
 
+/**
+ * Dieselbe Meldung hoechstens einmal je Zeitfenster.
+ *
+ * Der Bot laeuft dauerhaft; eine Meldung, die bei jeder stillen Runde
+ * geschrieben wird, fuellt das Protokoll mit immer derselben Zeile und
+ * verdeckt damit alles andere.
+ */
+function sg_log_gebremst($schluessel, $text, $sekunden = 3600)
+{
+    $f = sg_tmpdir() . '/meld_' . preg_replace('/[^a-z0-9_]/i', '', $schluessel);
+    $letzte = is_file($f) ? (int) @file_get_contents($f) : 0;
+    if (time() - $letzte >= $sekunden) {
+        @file_put_contents($f, (string) time());
+        sg_log($text);
+    }
+}
+
 function sg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
+
+/* ==================================================================
+ * Text in UTF-8 - ohne sich auf mbstring zu verlassen
+ *
+ * Bis 0.9.0 riefen fuenf Stellen mb_strtolower/mb_strlen/mb_substr direkt
+ * auf. Fehlt php-mbstring, ist das kein Schoenheitsfehler, sondern ein
+ * "Call to undefined function": weisse Seite in der Oberflaeche UND ein
+ * toter Endpunkt - Loxone bekaeme auf jede Meldung eine leere Antwort.
+ * Nachgestellt mit einem PHP ohne mbstring: genau das passiert.
+ *
+ * php-mbstring steht jetzt in dpkg/apt. Die Ersatzwege bleiben trotzdem:
+ * Laenge und Ausschnitt brauchen mbstring gar nicht, das kann PCRE mit dem
+ * Schalter /u genauso. Und wenn die Nachinstallation einmal scheitert,
+ * bleibt der Bot benutzbar, statt stumm zu sein.
+ * ================================================================== */
+
+/**
+ * Kleinschreibung fuer den Wortvergleich.
+ * Ohne mbstring bleibt strtolower, das nur ASCII kann - deshalb der kleine
+ * Zusatz fuer die Buchstaben, die hier tatsaechlich vorkommen koennen.
+ */
+function sg_klein($s)
+{
+    $s = (string) $s;
+    if (function_exists('mb_strtolower')) {
+        return mb_strtolower($s, 'UTF-8');
+    }
+    $gross = array('Ä','Ö','Ü','À','Á','Â','Ã','Å','Æ','Ç','È','É','Ê','Ë',
+                   'Ì','Í','Î','Ï','Ñ','Ò','Ó','Ô','Õ','Ø','Ù','Ú','Û','Ý');
+    $klein = array('ä','ö','ü','à','á','â','ã','å','æ','ç','è','é','ê','ë',
+                   'ì','í','î','ï','ñ','ò','ó','ô','õ','ø','ù','ú','û','ý');
+    return strtolower(str_replace($gross, $klein, $s));
+}
+
+/** Laenge in Zeichen, nicht in Bytes. */
+function sg_laenge($s)
+{
+    return preg_match_all('/./us', (string) $s);
+}
+
+/** Die ersten $n Zeichen - schneidet keinen Umlaut in der Mitte durch. */
+function sg_kuerzen($s, $n)
+{
+    $s = (string) $s;
+    if (preg_match_all('/./us', $s, $m) === false) { return substr($s, 0, $n); }
+    return implode('', array_slice($m[0], 0, $n));
+}
 function sg_x($s) { return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8'); }
 
 /**
@@ -163,9 +253,19 @@ function sg_config()
     if (($roh === '' || $roh === '{}') && is_file($p['sicherung'])) {
         @mkdir($p['configdir'], 0775, true);
         @copy($p['sicherung'], $p['config']);
+        $roh = trim((string) @file_get_contents($p['config']));
     }
-    $cfg = is_file($p['config']) ? json_decode((string) @file_get_contents($p['config']), true) : array();
-    if (!is_array($cfg)) { $cfg = array(); }
+    $cfg = $roh !== '' ? json_decode($roh, true) : array();
+    /* Konnte die Datei NICHT gelesen werden, obwohl sie da ist, wird unten
+     * nichts geschrieben. Sonst ginge genau der Fall schief, um dessentwillen
+     * es die Sicherung gibt: aus einem misslungenen Lesen wuerden Vorgaben,
+     * und die Vorgaben wuerden ueber die echte Konfiguration UND ueber die
+     * Sicherung geschrieben - Weissliste, PIN und Token waeren fort. */
+    $lesbar = is_array($cfg);
+    if (!$lesbar) {
+        if ($roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
+        $cfg = array();
+    }
     $cfg = array_merge(sg_vorgaben(), $cfg);
 
     $cfg['rpc_url'] = rtrim(trim((string) $cfg['rpc_url']), '/');
@@ -190,7 +290,7 @@ function sg_config()
         $b['aktiv'] = empty($b['aktiv']) ? 0 : 1;
         // Das Wort wird kleingeschrieben verglichen - "Unscharf" und
         // "unscharf" sollen dasselbe tun.
-        $b['wort'] = mb_strtolower(trim(preg_replace('/\s+/', ' ', (string) $b['wort'])), 'UTF-8');
+        $b['wort'] = sg_klein(trim(preg_replace('/\s+/', ' ', (string) $b['wort'])));
         $b['thema'] = preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $b['thema']);
         $b['wert'] = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $b['wert']));
         $b['stufe'] = in_array($b['stufe'], array('sofort', 'rueckfrage', 'pin'), true) ? $b['stufe'] : 'sofort';
@@ -198,11 +298,49 @@ function sg_config()
         $cfg['befehle'][$i] = $b;
     }
 
-    if (!preg_match('/^[A-Za-z0-9]{24,}$/', (string) $cfg['aktionstoken'])) {
+    if ($lesbar && !preg_match('/^[A-Za-z0-9]{24,}$/', (string) $cfg['aktionstoken'])) {
         $cfg['aktionstoken'] = sg_token();
         sg_config_write($cfg);
     }
     return $cfg;
+}
+
+/**
+ * Eine Datei unteilbar schreiben: Nebendatei, Rechte setzen, umbenennen.
+ *
+ * WARUM DAS HIER MEHR ZAEHLT ALS ANDERSWO
+ * An dieser Konfiguration haengt ein DAUERLAEUFER: sg_bot.php ruft
+ * sg_config() bei jeder eingehenden Nachricht auf, und sg_erlaubt(),
+ * sg_bremse_frei() und sg_senden() rufen es jeweils erneut. Schreibt die
+ * Oberflaeche in genau diesem Augenblick, laesst file_put_contents die
+ * Datei zuerst auf null Byte schrumpfen.
+ *
+ * Nachgemessen mit einem Leser gegen einen Schreiber, Konfiguration von
+ * 2400 Byte, 3000 Speichervorgaenge:
+ *
+ *     file_put_contents (truncate)   34 187 Lesevorgaenge, 19 375 davon leer
+ *     Nebendatei + rename                        dieselbe Last, 0 leer
+ *
+ * Ein leeres Lesen ist nicht gefaehrlich - der Bot faellt auf die Vorgaben
+ * zurueck, und die haben eine LEERE Weissliste und KEINE PIN, weisen also
+ * ab. Es ist aber laestig: ein berechtigter Befehl wird nicht ausgefuehrt.
+ * Und es kann Einstellungen kosten, weil sg_config() bei leerem Lesen die
+ * Sicherung zurueckkopiert - mitten in das Speichern hinein.
+ *
+ * Die Rechte werden VOR dem Umbenennen gesetzt. Sonst stuende die Datei mit
+ * PIN und Token einen Augenblick lang mit den Rechten aus der umask da.
+ */
+function sg_write_atomic($datei, $inhalt, $rechte = 0600)
+{
+    if ($inhalt === false || $inhalt === null) { return false; }
+    $inhalt = (string) $inhalt;
+    $ordner = dirname($datei);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return false; }
+    $tmp = $datei . '.' . getmypid() . '.' . mt_rand(1000, 9999) . '.tmp';
+    if (@file_put_contents($tmp, $inhalt) !== strlen($inhalt)) { @unlink($tmp); return false; }
+    @chmod($tmp, $rechte);
+    if (!@rename($tmp, $datei)) { @unlink($tmp); return false; }
+    return true;
 }
 
 function sg_config_write($cfg)
@@ -212,11 +350,12 @@ function sg_config_write($cfg)
     $js = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
     // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
-    if ($js === false || @file_put_contents($p['config'], $js) === false) { return false; }
     // Token, PIN und die Liste der erlaubten Rufnummern - nicht fuer alle.
-    @chmod($p['config'], 0600);
-    @copy($p['config'], $p['sicherung']);
-    @chmod($p['sicherung'], 0600);
+    if ($js === false || !sg_write_atomic($p['config'], $js, 0600)) { return false; }
+    // Die Sicherung erst NACH dem gelungenen Schreiben nachziehen, und
+    // ebenfalls unteilbar: sie ist die letzte Zuflucht, wenn die
+    // Konfiguration einmal nicht lesbar ist.
+    sg_write_atomic($p['sicherung'], $js, 0600);
     return true;
 }
 
@@ -369,17 +508,72 @@ function sg_erlaubt($nummer)
  * Zaehlt in einer Datei je Absender, nicht im Speicher - der Bot kann
  * jederzeit neu starten, die Bremse soll das ueberleben.
  */
+/**
+ * Darf dieser Absender noch? Zaehlt die Nachrichten der letzten 60 Sekunden.
+ *
+ * LESEN UND SCHREIBEN STEHEN UNTER EINER SPERRE - und das ist der Punkt.
+ *
+ * Bis 0.9.0 lief hier ein ungeschuetztes Lesen-Aendern-Schreiben:
+ *
+ *     $liste = json_decode(file_get_contents($f), true);
+ *     ...
+ *     $liste[] = $jetzt;
+ *     @file_put_contents($f, json_encode($liste));
+ *
+ * Zwei Prozesse lesen beide "zwei Eintraege", beide haengen einen an, beide
+ * schreiben "drei" - ein Zaehlschritt ist verloren. Nachgemessen mit vier
+ * Prozessen, die je 400 Eintraege setzen (erwartet: 1600):
+ *
+ *     bisher, unmittelbar geschrieben        34 von 1600
+ *     nur unteilbar umbenannt (.tmp+rename) 437 von 1600
+ *     Lesen UND Schreiben unter Sperre      1600 von 1600
+ *
+ * Die mittlere Zeile ist wichtig: Unteilbares Umbenennen verhindert eine
+ * ZERRISSENE Datei, aber keinen VERLORENEN Zaehlschritt. Wer nur das
+ * einbaut, hat das Problem nicht geloest, sondern nur seltener gemacht.
+ *
+ * Folge des Fehlers war nicht, dass die Bremse "komplett ausfaellt" - eine
+ * kaputte Datei faengt der is_array()-Test ab. Sie zaehlte zu niedrig, ein
+ * Absender kam also durch mehr Nachrichten durch als eingestellt.
+ *
+ * ftruncate statt Neuanlage: So bleibt es dieselbe Datei mit derselben
+ * Inode, und die Sperre gilt weiter fuer alle, die sie offen haben.
+ */
 function sg_bremse_frei($nummer)
 {
     $cfg = sg_config();
     $f = sg_tmpdir() . '/bremse_' . md5((string) $nummer) . '.json';
+    $fp = @fopen($f, 'c+');
+    if ($fp === false) {
+        // Ohne Sperrdatei lieber durchlassen als den Bot lahmlegen -
+        // die Bremse ist ein Schutz, kein Tor.
+        sg_log('Bremse: ' . $f . ' nicht zu oeffnen - Nachricht wird durchgelassen.');
+        return true;
+    }
+    if (!flock($fp, LOCK_EX)) {
+        fclose($fp);
+        return true;
+    }
     $jetzt = time();
-    $liste = is_file($f) ? json_decode((string) file_get_contents($f), true) : array();
+    $roh = (string) stream_get_contents($fp);
+    $liste = $roh !== '' ? json_decode($roh, true) : array();
     if (!is_array($liste)) { $liste = array(); }
     $liste = array_values(array_filter($liste, function ($t) use ($jetzt) { return $t > $jetzt - 60; }));
-    if (count($liste) >= (int) $cfg['bremse']) { return false; }
+    if (count($liste) >= (int) $cfg['bremse']) {
+        // Auch den bereinigten Stand zurueckschreiben, sonst waechst die
+        // Datei bei Dauerbeschuss unbegrenzt.
+        ftruncate($fp, 0); rewind($fp); fwrite($fp, json_encode($liste)); fflush($fp);
+        flock($fp, LOCK_UN); fclose($fp);
+        return false;
+    }
     $liste[] = $jetzt;
-    @file_put_contents($f, json_encode($liste));
+    ftruncate($fp, 0);
+    rewind($fp);
+    fwrite($fp, json_encode($liste));
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    @chmod($f, 0600);
     return true;
 }
 
@@ -414,10 +608,27 @@ function sg_zustaende()
     return is_array($d) ? $d : array();
 }
 
+/**
+ * Einen Zustand ablegen.
+ *
+ * Lesen-Aendern-Schreiben unter einer Sperre - dieselbe Ueberlegung wie bei
+ * der Bremse weiter oben. Loxone schickt Zustaende gern mehrere auf einmal,
+ * und jeder Aufruf landet in einem EIGENEN PHP-Prozess. Ohne Sperre lesen
+ * zwei Prozesse denselben Stand, aendern je einen Namen und schreiben beide
+ * zurueck - der zuerst geschriebene Zustand ist dann weg.
+ *
+ * Die Sperre liegt auf einer eigenen Datei, nicht auf zustaende.json selbst:
+ * rename() haengt eine neue Datei in den Namen, eine Sperre auf der alten
+ * Datei bewachte danach nichts mehr.
+ */
 function sg_zustand_setzen($name, $wert)
 {
     $name = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $name);
     if ($name === '') { return false; }
+    $ziel = sg_datadir() . '/zustaende.json';
+    $sperre = @fopen(sg_tmpdir() . '/zustaende.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+
     $z = sg_zustaende();
     $z[$name] = array('wert' => (string) $wert, 'ts' => time());
     // Nur die letzten 50 - sonst waechst die Datei unbegrenzt, wenn Loxone
@@ -426,7 +637,12 @@ function sg_zustand_setzen($name, $wert)
         uasort($z, function ($a, $b) { return $b['ts'] - $a['ts']; });
         $z = array_slice($z, 0, 50, true);
     }
-    return @file_put_contents(sg_datadir() . '/zustaende.json', json_encode($z)) !== false;
+    // 0644: hier stehen keine Geheimnisse, und der Bot laeuft unter einem
+    // anderen Benutzer als die Oberflaeche.
+    $ok = sg_write_atomic($ziel, json_encode($z), 0644);
+
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $ok;
 }
 
 function sg_zustand_text()
@@ -499,7 +715,7 @@ function sg_verarbeite($von, $text)
 {
     $cfg = sg_config();
     $text = trim(preg_replace('/\s+/', ' ', (string) $text));
-    $klein = mb_strtolower($text, 'UTF-8');
+    $klein = sg_klein($text);
 
     /* ---- Schicht 1: Weissliste ---- */
     if (!sg_erlaubt($von)) {

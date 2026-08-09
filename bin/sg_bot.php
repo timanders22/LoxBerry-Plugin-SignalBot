@@ -103,7 +103,33 @@ function sg_lauschen($ende)
         $zeile = fgets($fp);
         if ($zeile === false) {
             $st = stream_get_meta_data($fp);
-            if (!empty($st['timed_out'])) { continue; }   // nur Stille
+            if (!empty($st['timed_out'])) {
+                /* Bis 0.9.0 stand hier "continue" - weiterhoeren, es war ja
+                 * nur Stille.
+                 *
+                 * Die Sorge, das ergebe eine rasende Schleife mit voller
+                 * Prozessorlast, hat sich NICHT bestaetigt: nachgemessen mit
+                 * einer Zeitgrenze von einer Sekunde gegen ein Gegenstueck,
+                 * das die Kopfzeilen schickt und dann schweigt, lief die
+                 * Schleife genau EINE Runde je Sekunde - fgets blockiert nach
+                 * einer Zeitgrenze erneut, in PHP 7.4 wie in 8.1. Der Socket
+                 * bleibt brauchbar.
+                 *
+                 * Neu verbunden wird trotzdem, aus einem anderen Grund: Der
+                 * Strom kann tot sein, ohne dass das Betriebssystem es merkt
+                 * - signal-cli neu gestartet, Container weg, eine NAT-Tabelle
+                 * abgelaufen. Dann liegt hier ein Socket, aus dem nie wieder
+                 * etwas kommt, und der Bot wartet stumm weiter. Genau das
+                 * waere der schlimmste Fall: Der Kopf dieser Datei sagt, dass
+                 * Nachrichten verloren gehen, wenn niemand am Strom hoert.
+                 *
+                 * Fuenf Minuten ohne ein einziges Byte sind ein hinreichender
+                 * Verdacht. Neu verbinden kostet nichts.
+                 */
+                sg_log_gebremst('strom_still',
+                    'Ereignisstrom fuenf Minuten still - Verbindung wird erneuert.');
+                break;
+            }
             break;
         }
         $zeile = trim($zeile);

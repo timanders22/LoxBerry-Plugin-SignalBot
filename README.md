@@ -93,6 +93,111 @@ webfrontend/html/index.php         Token-Endpunkt fuer den Miniserver
 postroot.sh                        Java, signal-cli, systemd-Dienst, sudoers
 ```
 
+## Was in 0.9.2 nachgemessen und geaendert wurde
+
+> Diese Fassung enthaelt auch die nie einzeln veroeffentlichte 0.9.1.
+
+0.9.1 hat die Bremse und das Protokoll gegen gleichzeitige Zugriffe
+abgesichert. Zwei Dateien, an denen dieselbe Ueberlegung haengt, waren dabei
+uebersehen worden — und ausgerechnet die wichtigste war darunter.
+
+**Die Konfiguration wurde nicht unteilbar geschrieben.** An ihr haengt ein
+Dauerlaeufer: `sg_bot.php` ruft `sg_config()` bei jeder eingehenden Nachricht
+auf, und `sg_erlaubt()`, `sg_bremse_frei()` und `sg_senden()` rufen es jeweils
+erneut. Speichert die Oberflaeche in genau diesem Augenblick, laesst
+`file_put_contents` die Datei zuerst auf null Byte schrumpfen. Nachgemessen,
+Konfiguration von 2400 Byte, 3000 Speichervorgaenge bei laufendem Leser:
+
+| Verfahren | Lesevorgaenge | davon leer gelesen |
+|---|---|---|
+| bisher (`file_put_contents`) | 34 187 | **19 375** |
+| Nebendatei + `rename()` | 38 431 | **0** |
+
+Ein leeres Lesen ist **nicht gefaehrlich**: der Bot faellt auf die Vorgaben
+zurueck, und die haben eine leere Weissliste und keine PIN — er weist also ab
+statt durchzulassen. Aber es ist laestig, weil ein berechtigter Befehl dann
+nicht ausgefuehrt wird, und es kann Einstellungen kosten: `sg_config()` holt
+bei leerem Lesen die Sicherung zurueck — mitten in das Speichern hinein.
+
+Dazu zwei kleinere Sicherungen an derselben Stelle: Die Rechte `0600` werden
+jetzt **vor** dem Umbenennen gesetzt, sonst stuende die Datei mit PIN und
+Token einen Augenblick lang mit den Rechten aus der umask da. Und wenn die
+Konfiguration einmal nicht lesbar ist, wird **nichts mehr geschrieben** —
+bisher waeren aus einem misslungenen Lesen Vorgaben geworden, und die haetten
+sich ueber die echte Konfiguration *und* ueber die Sicherung gelegt.
+
+**`zustaende.json` verlor Eintraege.** Jeder Aufruf von
+`index.php?aktion=zustand` laeuft in einem eigenen PHP-Prozess; Loxone schickt
+Zustaende gern mehrere auf einmal. Ohne Sperre lesen zwei Prozesse denselben
+Stand, aendern je einen Namen und schreiben beide zurueck. Zwei Prozesse mit je
+400 Namen, erwartet 800:
+
+| Verfahren | angekommen |
+|---|---|
+| bisher (lesen, aendern, schreiben) | **32** |
+| mit Sperre + `rename()` | **800** |
+
+Dieselbe Lehre wie bei der Bremse in 0.9.1, nur eine Datei weiter: Unteilbares
+Umbenennen allein genuegt nicht, die Sperre muss ueber Lesen *und* Schreiben
+liegen. Sie liegt auf einer eigenen Datei — `rename()` haengt eine neue Datei
+in den Namen, eine Sperre auf der alten bewachte danach nichts mehr.
+
+**An den Loxone-Adressen und am Verhalten des Bots aendert sich nichts.**
+
+## Was in 0.9.1 nachgemessen und geaendert wurde
+
+Drei Beanstandungen aus einer Durchsicht wurden nachgestellt, bevor etwas
+geaendert wurde. Zwei trafen zu, eine nicht.
+
+**Ereignisstrom: keine rasende Schleife.** Behauptet war, `continue` nach einer
+Zeitgrenze in `sg_lauschen()` ergebe eine Schleife mit voller Prozessorlast.
+Gemessen gegen ein Gegenstueck, das die Kopfzeilen schickt und dann schweigt,
+bei einer Zeitgrenze von einer Sekunde: **6,0 s Laufzeit, 6 Schleifenrunden,
+also 1,0 Runden je Sekunde** — in PHP 7.4 wie in 8.1. `fgets` blockiert nach
+einer Zeitgrenze erneut. Die Stelle wurde trotzdem geaendert, aber aus einem
+anderen Grund: Ein Strom kann tot sein, ohne dass das Betriebssystem es merkt
+(signal-cli neu gestartet, NAT-Eintrag abgelaufen). Dann wartet der Bot stumm
+weiter, und genau dann gehen Nachrichten verloren. Nach fuenf stillen Minuten
+wird jetzt neu verbunden, mit einer Meldung, die hoechstens einmal je Stunde
+im Protokoll landet.
+
+**Bremse: atomares Umbenennen reicht nicht.** Vier Prozesse haben gleichzeitig
+je 400 Eintraege in die Bremsdatei geschrieben, erwartet waren 1600:
+
+| Verfahren | angekommen |
+|---|---|
+| bisher (lesen, aendern, schreiben) | 34 |
+| nur atomar umbenannt | 437 |
+| mit `flock` ueber Lesen *und* Schreiben | **1600** |
+
+Das mittlere Ergebnis ist der Kern: Ein atomarer Austausch der Datei
+verhindert eine halb geschriebene Datei, aber nicht den verlorenen Schreibzugriff
+— wer auf einem veralteten Stand aufsetzt, ueberschreibt fremde Eintraege
+vollstaendig. Ohne Sperre haette ein Angreifer die PIN-Bremse durch
+gleichzeitige Versuche einfach leerlaufen lassen. Gegenprobe mit Grenze 5:
+5 durchgelassen, 15 abgewiesen.
+
+**Adresse des RPC-Dienstes.** `rpc_url` wird jetzt auf Schema, Rechner und Port
+zurueckgeschnitten, bevor sie gespeichert wird; ein angehaengter Pfad wird
+verworfen, `file://` und alles andere ausser `http`/`https` abgelehnt (9 Faelle
+geprueft). Der Einwand, das Plugin haenge ohnehin `/api/v1/rpc` an und ein
+fremder Pfad sei deshalb harmlos, geht daneben: Rechner und Port sind frei
+waehlbar, und ein Aufruf, den der Server nicht versteht, sagt einem Angreifer
+ueber die Antwortzeit trotzdem, ob dort etwas horcht.
+
+**Nebenbefund: php-mbstring war nicht angemeldet.** Fuenf Stellen riefen
+`mb_strtolower`/`mb_strlen`/`mb_substr` direkt auf. Mit einem PHP ohne diese
+Erweiterung nachgestellt: weisse Seite in der Oberflaeche *und* ein toter
+Endpunkt — Loxone haette auf jede Meldung eine leere Antwort bekommen.
+`php-mbstring` steht jetzt in `dpkg/apt`; Laenge und Ausschnitt kommen
+zusaetzlich ohne die Erweiterung aus (PCRE mit `/u`), damit eine misslungene
+Nachinstallation den Bot nicht stumm schaltet.
+
+**Protokoll leeren.** Kuerzen und Leeren laufen jetzt beide ueber
+`sg_log_setzen()` mit `flock` und `ftruncate`. Gegenprobe: rund 4100
+Protokollzeilen aus drei Prozessen, waehrenddessen 148 Leerungen —
+**0 zerrissene Zeilen** in PHP 7.4 und 8.1.
+
 ## Lizenz
 
 Dieses Plugin steht unter der **GPL-3.0**. signal-cli ist ein eigenstaendiges

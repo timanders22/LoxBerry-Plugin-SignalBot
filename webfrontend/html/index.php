@@ -79,7 +79,7 @@ if ($aktion === 'zustand') {
     if ($name === '' || $wert === '') {
         sg_ende(400, 'SIGNAL;OK=0;GRUND=NAME_ODER_WERT_FEHLT');
     }
-    if (mb_strlen($wert, 'UTF-8') > 120) { $wert = mb_substr($wert, 0, 120, 'UTF-8'); }
+    if (sg_laenge($wert) > 120) { $wert = sg_kuerzen($wert, 120); }
     if (!sg_zustand_setzen($name, $wert)) {
         sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
     }
@@ -97,7 +97,7 @@ $text = trim($text);
 if ($text === '') {
     sg_ende(400, 'SIGNAL;OK=0;GRUND=TEXT_FEHLT');
 }
-if (mb_strlen($text, 'UTF-8') > 2000) { $text = mb_substr($text, 0, 2000, 'UTF-8'); }
+if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); }
 
 $an = isset($_GET['an']) ? preg_replace('/[^0-9+]/', '', (string) $_GET['an']) : '';
 if ($an !== '') {
