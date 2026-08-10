@@ -470,7 +470,7 @@ $sg_reiter = array(
 </div>
 
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 </div>
@@ -508,8 +508,11 @@ $sg_reiter = array(
 </tr>
 <?php } ?>
 </table>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i><?= sg_t('LEGENDE.AKTION') ?></span>
+</div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 

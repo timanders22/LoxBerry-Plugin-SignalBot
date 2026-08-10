@@ -1,41 +1,20 @@
-<p>Dieses Plugin macht aus <b>Signal</b> eine Fernbedienung f&uuml;r das Haus:
-Befehle per Chat an den Miniserver, Meldungen aus Loxone zur&uuml;ck in den
-Chat. Beide Richtungen.</p>
+<p><TMPL_VAR HILFE.K01></p>
 
-<p><b>Reihenfolge beim Einrichten:</b></p>
+<p><TMPL_VAR HILFE.K02></p>
 <ol>
-<li><i>Einstellungen</i> &rarr; <b>Verkn&uuml;pfung starten</b>. Der QR-Code
-wird am Handy unter Signal &rarr; Einstellungen &rarr; Gekoppelte Ger&auml;te
-gescannt. Der Bot h&auml;ngt sich als Zweitger&auml;t an das eigene Konto,
-eine zweite Rufnummer braucht es nicht.</li>
-<li>Die <b>erlaubten Absender</b> eintragen &mdash; eine Rufnummer je Zeile.
-Wer nicht daraufsteht, bekommt keine Antwort.</li>
-<li>Eine <b>PIN</b> vergeben, wenn kritische Befehle geplant sind.</li>
-<li><i>Befehle</i> &rarr; die Tabelle f&uuml;llen. Je Zeile: das Wort, das
-MQTT-Thema und die Stufe.</li>
-<li><i>MQTT</i> &rarr; das Abo ins Gateway eintragen. Ohne diesen Eintrag
-kommt am Miniserver nichts an.</li>
-<li><i>Einbindung in Loxone</i> &rarr; virtuelle Eing&auml;nge auf die Themen
-legen und die Adresse f&uuml;r Meldungen kopieren.</li>
-<li><i>Test</i> &rarr; Selbstpr&uuml;fung ansehen und einen Befehl trocken
-durchspielen.</li>
+<li><TMPL_VAR HILFE.K03></li>
+<li><TMPL_VAR HILFE.K04></li>
+<li><TMPL_VAR HILFE.K05></li>
+<li><TMPL_VAR HILFE.K06></li>
+<li><TMPL_VAR HILFE.K07></li>
+<li><TMPL_VAR HILFE.K08></li>
+<li><TMPL_VAR HILFE.K09></li>
 </ol>
 
-<p><b>Zu den Stufen:</b> <i>Sofort</i> f&uuml;hrt ohne R&uuml;ckfrage aus.
-<i>R&uuml;ckfrage</i> l&auml;sst den Bot nachfragen. <i>PIN</i> verlangt
-zus&auml;tzlich die PIN. F&uuml;r Alarmanlage und Haust&uuml;r geh&ouml;rt die
-Stufe <i>PIN</i>.</p>
+<p><TMPL_VAR HILFE.K10></p>
 
-<p><b>Wenn nichts ankommt:</b> Der Reiter <i>Test</i> geht die Kette von unten
-nach oben durch &mdash; ist signal-cli installiert, ist Java neu genug, passt
-die native Bibliothek zur Architektur, l&auml;uft der Dienst, antwortet die
-Schnittstelle, ist ein Konto verkn&uuml;pft, lauscht der Bot. Der erste
-Kreuz-Eintrag ist meist die Ursache.</p>
+<p><TMPL_VAR HILFE.K11></p>
 
-<p><b>Auf dem Raspberry Pi:</b> signal-cli bringt seine native Bibliothek nur
-f&uuml;r x86_64 mit. Auf ARM muss sie getrennt beschafft werden, oder
-signal-cli l&auml;uft in einem Docker-Abbild mit ARM-Unterst&uuml;tzung und das
-Plugin bindet nur dessen Adresse ein.</p>
+<p><TMPL_VAR HILFE.K12></p>
 
-<p>Dokumentation zu signal-cli:
-<a href="https://github.com/AsamK/signal-cli/wiki" target="_blank">signal-cli-Wiki</a></p>
+<p><TMPL_VAR HILFE.K13></p>
