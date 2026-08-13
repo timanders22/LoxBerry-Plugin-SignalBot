@@ -318,6 +318,12 @@ if (class_exists('LBWeb', false)) {
 .sm-aus { color: #b00000; font-weight: 700; }
 .sm-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .sm-row > div { flex: 1; min-width: 200px; }
+
+/* Nachgetragene Definitionen (CSS-Luecken-Durchgang 13.08.2026):
+   benutzt, aber nie definiert - wortgleich aus der Hausstandard-Vorlage
+   bzw. der Referenzimplementierung uebernommen. */
+.sm-alert { border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
+.sm-warn { background: #fdf3e3; border: 1px solid #e0620d; }
 </style>
 
 <div class="sm-wrap">
