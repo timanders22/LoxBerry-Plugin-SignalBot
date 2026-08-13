@@ -523,6 +523,7 @@ $sg_reiter = array(
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
 <h2><?= sg_e(sg_t('MQTT.H_TITEL')) ?></h2>
+<?php if (!function_exists('sg_hs_autostart')) { function sg_hs_autostart() { $h = getenv('LBHOMEDIR') ?: '/opt/loxberry'; $g = $h . '/config/system/general.json'; if (!is_file($g)) { return null; } $j = json_decode((string) @file_get_contents($g), true); if (!is_array($j) || !isset($j['Mqtt'])) { return null; } return !empty($j['Mqtt']['Gatewayautostart']); } } if (sg_hs_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo sg_t('MQTT.W_AUTOSTART'); ?></div><?php } ?>
 <?php $sg_m = sg_mqtt_zustand(); ?>
 <?php if (!$sg_m['gefunden']) { ?>
 <div class="sm-fehler"><?= sg_t('MQTT.KEIN_ABSCHNITT') ?></div>
