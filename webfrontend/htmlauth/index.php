@@ -169,15 +169,12 @@ if ($sg_post && isset($_POST['speichern'])) {
         $sg_cfg['bremse'] = $sg_br;
     }
 
-    $sg_topic = preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : ''));
-    if ($sg_topic === '') {
-        $sg_fehler[] = sg_t('EINST.FEHLER_TOPIC');
-    } else {
-        $sg_cfg['mqtt_topic'] = trim($sg_topic, '/');
-    }
+    /* mqtt_ein und mqtt_topic werden hier NICHT mehr angefasst: sie
+     * wohnen im Reiter MQTT und haben dort ein eigenes Formular. Die
+     * Konfiguration kommt aus sg_config(), die Werte ueberleben also
+     * unveraendert. */
 
     $sg_cfg['stille'] = isset($_POST['stille']) ? 1 : 0;
-    $sg_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     $sg_cfg['zustand_ein'] = isset($_POST['zustand_ein']) ? 1 : 0;
 
     if (!$sg_fehler) {
@@ -185,6 +182,30 @@ if ($sg_post && isset($_POST['speichern'])) {
         else { $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config'])); }
     }
     $sg_tab = 'tab-settings';
+}
+
+/* ---------------- MQTT (eigener Reiter, eigenes Formular) ----------------
+ *
+ * Eigenes Formular UND eigener Handler gehoeren zusammen. Loesten beide
+ * Formulare denselben Handler aus, setzte dieser die Haken des jeweils
+ * nicht abgeschickten Formulars per isset() auf 0 - der Benutzer verloere
+ * Werte, die er nie gesehen hat. */
+if ($sg_post && isset($_POST['save_mqtt'])) {
+    $sg_mcfg = sg_config();
+    $sg_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
+    $sg_mtopic = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
+        (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
+    if ($sg_mtopic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $sg_mtopic)) {
+        $sg_fehler[] = sg_t('EINST.FEHLER_TOPIC');
+    } else {
+        $sg_mcfg['mqtt_topic'] = trim($sg_mtopic, '/');
+    }
+    if (!$sg_fehler) {
+        if (sg_config_write($sg_mcfg)) {
+            $sg_meldungen[] = sg_t('EINST.GESPEICHERT');
+        }
+    }
+    $sg_tab = 'tab-mqtt';
 }
 
 /* ================= Befehlstabelle speichern ================= */
@@ -464,16 +485,8 @@ $sg_reiter = array(
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_ZUSTAND') ?></div>
 </div>
-<div class="sm-feld">
-  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($sg_cfg['mqtt_ein']) ? 'checked' : '' ?>>
-    <?= sg_e(sg_t('EINST.L_MQTT_EIN')) ?>
-  </label>
-</div>
-<div class="sm-feld">
-  <label for="mqtt_topic"><?= sg_e(sg_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sg_e($sg_cfg['mqtt_topic']) ?>" placeholder="signalbot">
-</div>
+<?php /* MQTT stand hier bis zu dieser Fassung. Es wohnt jetzt
+         vollstaendig im Reiter MQTT - eine Sache, eine Stelle. */ ?>
 
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
@@ -528,6 +541,26 @@ $sg_reiter = array(
 
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+
+<h2>MQTT</h2>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="save_mqtt" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($sg_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_MQTT_EIN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="mqtt_topic"><?= sg_e(sg_t('EINST.L_MQTT_TOPIC')) ?></label>
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sg_e($sg_cfg['mqtt_topic']) ?>" placeholder="signalbot">
+</div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
+</div>
+</form>
 <h2><?= sg_e(sg_t('MQTT.H_TITEL')) ?></h2>
 <?php if (!function_exists('sg_hs_autostart')) { function sg_hs_autostart() { $h = getenv('LBHOMEDIR') ?: '/opt/loxberry'; $g = $h . '/config/system/general.json'; if (!is_file($g)) { return null; } $j = json_decode((string) @file_get_contents($g), true); if (!is_array($j) || !isset($j['Mqtt'])) { return null; } return !empty($j['Mqtt']['Gatewayautostart']); } } if (sg_hs_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo sg_t('MQTT.W_AUTOSTART'); ?></div><?php } ?>
 <?php $sg_m = sg_mqtt_zustand(); ?>

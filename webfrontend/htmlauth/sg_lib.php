@@ -88,7 +88,16 @@ function sg_paths()
         return array(
             'home' => $home, 'plugin' => $plugin,
             'config'    => $home . '/config/plugins/' . $plugin . '/signalbot.json',
-            'sicherung' => $home . '/config/plugins/' . $plugin . '/signalbot.backup.json',
+            /* Die Zweitschrift liegt NEBEN dem Plugin-Ordner, nicht darin.
+             * LoxBerry entfernt config/plugins/<ordner>/ bei Deinstallation
+             * und Neuinstallation - eine Sicherung im Ordner stirbt also
+             * genau in dem Fall mit, fuer den es sie gibt. So halten es auch
+             * Weissware, Kodi und die uebrigen 18 Linien mit Zweitschrift.
+             * 'sicherung_alt' ist der frueher benutzte Ort; er wird beim
+             * Heilen weiter gelesen, damit bestehende Anlagen ihre
+             * vorhandene Sicherung nicht verlieren. */
+            'sicherung' => $home . '/config/plugins/' . $plugin . '.backup.signalbot.json',
+            'sicherung_alt' => $home . '/config/plugins/' . $plugin . '/signalbot.backup.json',
             'configdir' => $home . '/config/plugins/' . $plugin,
             'data'      => $home . '/data/plugins/' . $plugin,
             'log'       => $home . '/log/plugins/' . $plugin . '/signalbot.log',
@@ -99,6 +108,7 @@ function sg_paths()
     return array('home' => '', 'plugin' => 'signalbot',
         'config' => $eigen . '/config/signalbot.json',
         'sicherung' => $eigen . '/config/signalbot.backup.json',
+        'sicherung_alt' => $eigen . '/config/signalbot.backup.json',
         'configdir' => $eigen . '/config',
         'data' => sys_get_temp_dir() . '/signalbot',
         'log' => sys_get_temp_dir() . '/signalbot/signalbot.log',
@@ -278,11 +288,19 @@ function sg_vorgaben()
 function sg_config()
 {
     $p = sg_paths();
+    /* Selbstheilung: zuerst am heutigen Ort (neben dem Plugin-Ordner), dann
+     * am frueheren Ort darin - sonst verloere eine bestehende Anlage beim
+     * Update ihre vorhandene Sicherung. */
     $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
-    if (($roh === '' || $roh === '{}') && is_file($p['sicherung'])) {
-        @mkdir($p['configdir'], 0775, true);
-        @copy($p['sicherung'], $p['config']);
-        $roh = trim((string) @file_get_contents($p['config']));
+    if ($roh === '' || $roh === '{}') {
+        foreach (array($p['sicherung'], $p['sicherung_alt']) as $sg_quelle) {
+            if ($sg_quelle !== '' && is_file($sg_quelle)) {
+                @mkdir($p['configdir'], 0775, true);
+                @copy($sg_quelle, $p['config']);
+                $roh = trim((string) @file_get_contents($p['config']));
+                break;
+            }
+        }
     }
     $cfg = $roh !== '' ? json_decode($roh, true) : array();
     /* Konnte die Datei NICHT gelesen werden, obwohl sie da ist, wird unten
