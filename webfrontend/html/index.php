@@ -27,7 +27,58 @@ ini_set('display_errors', '0');
 header('Cache-Control: no-store');
 header('Content-Type: text/plain; charset=utf-8');
 
-require_once dirname(__DIR__) . '/htmlauth/sg_lib.php';
+/* Die Bibliothek ueber eine Kandidatenliste finden - NICHT ueber eine feste
+ * Zahl von ".." nach oben.
+ *
+ * Im entpackten Archiv liegen html/ und htmlauth/ nebeneinander, auf dem
+ * installierten LoxBerry in GETRENNTEN Baeumen:
+ *
+ *     <home>/webfrontend/html/plugins/<ordner>/index.php
+ *     <home>/webfrontend/htmlauth/plugins/<ordner>/sg_lib.php
+ *
+ * dirname(__DIR__) ergab dort .../webfrontend/html/plugins - gesucht wurde
+ * also .../webfrontend/html/plugins/htmlauth/sg_lib.php, und die gibt es
+ * nicht. Der Endpunkt antwortete deshalb auf JEDEN Aufruf des Miniservers
+ * mit HTTP 500 und leerem Rumpf: ini_set('display_errors', '0') weiter oben
+ * unterdrueckt die Meldung. In Loxone sieht das aus wie "kein Wert" und
+ * nicht wie ein Defekt - der virtuelle Eingang behaelt seinen letzten Stand,
+ * in der App wirkt alles normal. Damit war die ganze Richtung
+ * Loxone -> Chat tot: senden, zustand und status gleichermassen.
+ *
+ * bin/sg_bot.php hat dieselbe Klasse seit 0.9.10 geloest, hier stand sie
+ * noch. Nachgemessen am nachgebauten Installationsstand am 16.08.2026:
+ * "Failed opening required '.../webfrontend/html/plugins/htmlauth/sg_lib.php'".
+ */
+$sg_ordner = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
+$sg_kandidaten = array();
+$sg_lb = getenv('LBHOMEDIR');
+if ($sg_lb) {
+    $sg_kandidaten[] = $sg_lb . '/webfrontend/htmlauth/plugins/' . $sg_ordner . '/sg_lib.php';
+}
+// installiert, ohne dass die Umgebungsvariablen gesetzt waeren:
+// .../webfrontend/html/plugins/<ordner>  ->  .../webfrontend/htmlauth/plugins/<ordner>
+$sg_kandidaten[] = dirname(dirname(dirname(__DIR__)))
+                 . '/htmlauth/plugins/' . basename(__DIR__) . '/sg_lib.php';
+// entpacktes Archiv: html/ und htmlauth/ liegen nebeneinander
+$sg_kandidaten[] = dirname(__DIR__) . '/htmlauth/sg_lib.php';
+
+$sg_lib = '';
+foreach ($sg_kandidaten as $sg_kand) {
+    if (is_file($sg_kand)) { $sg_lib = $sg_kand; break; }
+}
+if ($sg_lib === '') {
+    /* Abweisen und sagen, woran es liegt - nicht schweigen. Die durchsuchten
+     * Pfade gehen in das Fehlerprotokoll des Webservers, nicht in die
+     * Antwort: der Aufrufer hat sich an dieser Stelle noch nicht ueber das
+     * Token ausgewiesen. */
+    error_log('SignalBot: sg_lib.php nicht gefunden. Gesucht wurde in: '
+              . implode(', ', $sg_kandidaten));
+    http_response_code(500);
+    echo "SIGNAL;OK=0;GRUND=BIBLIOTHEK_FEHLT
+";
+    exit;
+}
+require_once $sg_lib;
 
 function sg_ende($code, $text)
 {
@@ -41,8 +92,26 @@ $cfg = sg_config();
 /* ---------------- Token ---------------- */
 $soll = (string) $cfg['aktionstoken'];
 $ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
+
+/* Ein Token muss sich pruefen lassen, ohne dass etwas passiert.
+ *
+ * Ohne diesen Zweig gibt es nur zwei schlechte Moeglichkeiten: entweder man
+ * schickt wirklich eine Nachricht an alle Erlaubten, oder man erfaehrt nie,
+ * ob die Adresse im Miniserver noch stimmt. Beides ist unbrauchbar, wenn man
+ * eine Anlage pruefen will.
+ *
+ *     ?selftest=1&token=<TOKEN>
+ *     richtiges Token:  SELFTEST;OK=1;TOKEN=OK
+ *     falsches Token:   HTTP 403, SELFTEST;OK=0;ERR=TOKEN
+ */
+$sg_selftest = isset($_GET['selftest']) && (string) $_GET['selftest'] !== '0';
+
 if ($soll === '' || !hash_equals($soll, $ist)) {
+    if ($sg_selftest) { sg_ende(403, 'SELFTEST;OK=0;ERR=TOKEN'); }
     sg_ende(403, 'SIGNAL;OK=0;GRUND=TOKEN');
+}
+if ($sg_selftest) {
+    sg_ende(200, 'SELFTEST;OK=1;TOKEN=OK');
 }
 
 $erlaubte_aktionen = array('senden', 'zustand', 'status');
@@ -99,7 +168,22 @@ if ($text === '') {
 }
 if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); }
 
-$an = isset($_GET['an']) ? preg_replace('/[^0-9+]/', '', (string) $_GET['an']) : '';
+/* Ein gesetztes, aber unbrauchbares &an= wird ABGEWIESEN.
+ *
+ * Bis 0.9.11 fiel es hier durch preg_replace auf '' und landete im
+ * else-Zweig: aus einem Tippfehler in der Loxone-Adresse ("&an=Papa") wurde
+ * ein Rundruf an ALLE freigegebenen Nummern, und die Antwort lautete
+ * OK=1;EMPFAENGER=4. Eine vertrauliche Meldung ging damit an den ganzen
+ * Haushalt, ohne dass irgendetwas darauf hinwies.
+ *
+ * Ein LEERES &an= bleibt der ausdrueckliche Rundruf - dieser Fall steht so
+ * in der Anleitung und in bestehenden Projektdateien. */
+$sg_an_roh = isset($_GET['an']) ? trim((string) $_GET['an']) : '';
+$an = preg_replace('/[^0-9+]/', '', $sg_an_roh);
+if ($sg_an_roh !== '' && !preg_match('/^\+[0-9]{6,20}$/', $an)) {
+    sg_log('Senden abgewiesen: "' . sg_maske($sg_an_roh) . '" ist keine gueltige Rufnummer');
+    sg_ende(400, 'SIGNAL;OK=0;GRUND=EMPFAENGER_UNGUELTIG');
+}
 if ($an !== '') {
     // Auch beim Senden gilt die Weissliste. Sonst waere der Endpunkt ein
     // offener Nachrichtenversand: wer das Token kennt, koennte ueber das

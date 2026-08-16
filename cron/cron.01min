@@ -2,6 +2,14 @@
 # Weckt den Bot, falls er nicht laeuft. Das Skript selbst haelt die Verbindung
 # zum Ereignisstrom dauerhaft offen und sichert sich mit einer Sperrdatei -
 # dieser Aufruf ist also ein Wiederbeleber, kein Taktgeber.
-# Ueber den Interpreter aufgerufen, nicht ueber die Raute-Zeile: geht beim
-# Entpacken das Ausfuehrungsrecht verloren, laeuft der Bot trotzdem an.
-/usr/bin/php REPLACELBPBINDIR/sg_bot.php >/dev/null 2>&1 &
+#
+# Ueber den Interpreter aufgerufen und NICHT nach /dev/null geschrieben:
+# LoxBerry leitet die Ausgabe seiner Cron-Zeile bereits dorthin um, ein
+# zweites Mal macht jeden Startfehler unsichtbar. Genau daran ist der
+# Hintergrunddienst einer anderen Linie acht Fassungen lang gescheitert.
+LOG=REPLACELBPLOGDIR/cron.log
+# Nicht unbegrenzt wachsen lassen; hier steht nur, was schiefgeht.
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    : > "$LOG"
+fi
+/usr/bin/php REPLACELBPBINDIR/sg_bot.php >> "$LOG" 2>&1 &

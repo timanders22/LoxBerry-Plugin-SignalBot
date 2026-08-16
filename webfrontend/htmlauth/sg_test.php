@@ -173,8 +173,10 @@ function sg_test_aktion($was, $zusatz = '')
         case 'trocken':
             // Einen Befehl durchspielen, ohne dass jemand etwas schickt und
             // ohne dass etwas geschaltet wird - die Antwort wird nur gezeigt.
+            // Das dritte Argument ist der Trockenlauf; ohne es hat dieser
+            // Knopf bis 0.9.11 wirklich geschaltet (siehe sg_verarbeite).
             $von = $cfg['erlaubt'] ? $cfg['erlaubt'][0] : '+490000000000';
-            $erg = sg_verarbeite($von, $zusatz);
+            $erg = sg_verarbeite($von, $zusatz, true);
             return array(1, sprintf(sg_t('TEST.M_TROCKEN'), sg_e($zusatz), sg_e($erg['grund']),
                 $erg['antwort'] === '' ? sg_t('TEST.M_TROCKEN_STILL') : nl2br(sg_e($erg['antwort']))));
 

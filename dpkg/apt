@@ -1,1 +1,1 @@
-curl qrencode jq php-mbstring
+curl qrencode jq

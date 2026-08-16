@@ -81,8 +81,25 @@ function sg_paths()
     }
     $plugin = getenv('LBPPLUGINDIR');
     if (!$plugin) {
-        $plugin = basename(dirname(dirname(__DIR__)));
-        if ($home && !is_dir($home . '/config/plugins/' . $plugin)) { $plugin = 'signalbot'; }
+        /* Installiert liegt diese Datei in
+         *     <home>/webfrontend/htmlauth/plugins/<ordner>/sg_lib.php
+         * dort ist basename(__DIR__) der Ordnername. Im entpackten Archiv
+         * liegt sie in webfrontend/htmlauth/, dort ist es der Ordner drei
+         * Ebenen hoeher.
+         *
+         * Bis 0.9.11 stand hier nur der zweite Fall. Installiert ergab er
+         * 'htmlauth'; gerettet hat das allein der feste Rueckfallwert
+         * 'signalbot' - der bricht, sobald LoxBerry wegen einer
+         * Namenskollision auf einen anderen Ordner ausweicht. Und er haette
+         * den Ordner eines fremden Plugins benutzt, wenn es je ein
+         * config/plugins/htmlauth gaebe.
+         */
+        $plugin = '';
+        foreach (array(basename(__DIR__), basename(dirname(dirname(__DIR__)))) as $sg_kand) {
+            if ($sg_kand === '' || in_array($sg_kand, array('htmlauth', 'html', 'plugins', 'webfrontend'), true)) { continue; }
+            if (!$home || is_dir($home . '/config/plugins/' . $sg_kand)) { $plugin = $sg_kand; break; }
+        }
+        if ($plugin === '') { $plugin = 'signalbot'; }
     }
     if ($home) {
         return array(
@@ -270,7 +287,10 @@ function sg_vorgaben()
         'konto'          => '',        // die verknuepfte Rufnummer
         // Absender
         'erlaubt'        => array(),   // Liste erlaubter Rufnummern
-        'pin'            => '',        // gemeinsame PIN fuer Stufe 'pin'
+        'pin'            => '',        // nur noch Altbestand, siehe pin_hash
+        'pin_hash'       => '',        // die PIN als Hash (password_hash)
+        'pin_versuche'   => 3,         // so viele Fehlversuche, dann Sperre
+        'pin_sperre'     => 15,        // Minuten Sperre nach den Fehlversuchen
         'bremse'         => 10,        // Befehle je Minute und Absender
         'stille'         => 1,         // Unbekannte ohne Antwort abweisen
         // Befehle
@@ -291,15 +311,23 @@ function sg_config()
     /* Selbstheilung: zuerst am heutigen Ort (neben dem Plugin-Ordner), dann
      * am frueheren Ort darin - sonst verloere eine bestehende Anlage beim
      * Update ihre vorhandene Sicherung. */
-    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
+    $sg_vorhanden = is_file($p['config']);
+    $roh = $sg_vorhanden ? trim((string) @file_get_contents($p['config'])) : '';
     if ($roh === '' || $roh === '{}') {
+        /* Nur eine BRAUCHBARE Sicherung zurueckholen.
+         *
+         * Bis 0.9.11 brach die Schleife bei der ersten Datei ab, die es GAB -
+         * auch wenn sie leer war. Eine gute Sicherung am frueheren Ort wurde
+         * dann nie gelesen, weil eine leere am heutigen Ort davorstand. */
         foreach (array($p['sicherung'], $p['sicherung_alt']) as $sg_quelle) {
-            if ($sg_quelle !== '' && is_file($sg_quelle)) {
-                @mkdir($p['configdir'], 0775, true);
-                @copy($sg_quelle, $p['config']);
-                $roh = trim((string) @file_get_contents($p['config']));
-                break;
-            }
+            if ($sg_quelle === '' || !is_file($sg_quelle)) { continue; }
+            $sg_probe = trim((string) @file_get_contents($sg_quelle));
+            if ($sg_probe === '' || !is_array(json_decode($sg_probe, true))) { continue; }
+            @mkdir($p['configdir'], 0775, true);
+            @copy($sg_quelle, $p['config']);
+            $roh = trim((string) @file_get_contents($p['config']));
+            $sg_vorhanden = true;
+            break;
         }
     }
     $cfg = $roh !== '' ? json_decode($roh, true) : array();
@@ -307,8 +335,34 @@ function sg_config()
      * nichts geschrieben. Sonst ginge genau der Fall schief, um dessentwillen
      * es die Sicherung gibt: aus einem misslungenen Lesen wuerden Vorgaben,
      * und die Vorgaben wuerden ueber die echte Konfiguration UND ueber die
-     * Sicherung geschrieben - Weissliste, PIN und Token waeren fort. */
-    $lesbar = is_array($cfg);
+     * Sicherung geschrieben - Weissliste, PIN und Token waeren fort.
+     *
+     * DIE LEERE DATEI ZAEHLT DAZU. Bis 0.9.11 hing der Schutz allein an
+     * is_array($cfg) - und bei leerer Datei entsteht array(), was ein Feld
+     * IST. Der Schutz griff also nur bei kaputtem JSON, nicht bei der
+     * abgeschnittenen Datei. Nachgemessen am 16.08.2026 mit einer
+     * Konfiguration von 0 Byte und einer ebenso leeren Sicherung: Weissliste
+     * leer, PIN fort, NEUES Token - und beides ueber die Sicherung
+     * geschrieben. Damit waren alle Adressen im Miniserver tot, und die
+     * letzte Zuflucht war mit ueberschrieben. Ausloesen konnte das jeder
+     * unangemeldete Aufruf des Endpunkts, denn der ruft sg_config() vor der
+     * Token-Pruefung.
+     *
+     * Die Neuinstallation muss davon unberuehrt bleiben: dort gibt es die
+     * Datei GAR NICHT, und dann soll das Token angelegt werden. Die
+     * Unterscheidung haengt deshalb an is_file(), nicht am Inhalt.
+     * Der Aktualisierungsfall (Datei enthaelt nur "{}") gilt weiter als
+     * lesbar - das ist der Zustand jeder bestehenden Anlage nach einem
+     * Update. */
+    if ($roh === '' && $sg_vorhanden) {
+        sg_log_gebremst('config_leer',
+            'Konfiguration ist leer und es gibt keine brauchbare Sicherung - '
+            . 'es wird nichts geschrieben. Weissliste, PIN und Token bleiben unangetastet, '
+            . 'bis die Datei wieder Inhalt hat.');
+        $lesbar = false;
+    } else {
+        $lesbar = is_array($cfg);
+    }
     if (!$lesbar) {
         if ($roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
         $cfg = array();
@@ -318,6 +372,8 @@ function sg_config()
     $cfg['rpc_url'] = rtrim(trim((string) $cfg['rpc_url']), '/');
     if ($cfg['rpc_url'] === '') { $cfg['rpc_url'] = 'http://127.0.0.1:8095'; }
     $cfg['bremse'] = max(1, min(60, (int) $cfg['bremse']));
+    $cfg['pin_versuche'] = max(1, min(10, (int) $cfg['pin_versuche']));
+    $cfg['pin_sperre'] = max(1, min(1440, (int) $cfg['pin_sperre']));
     $cfg['stille'] = empty($cfg['stille']) ? 0 : 1;
     $cfg['mqtt_ein'] = empty($cfg['mqtt_ein']) ? 0 : 1;
     $cfg['zustand_ein'] = empty($cfg['zustand_ein']) ? 0 : 1;
@@ -474,16 +530,33 @@ function sg_rpc($methode, $params = array(), $zeit = 20)
 }
 
 /** Laeuft der signal-cli-Dienst? Fragt den Lebenszeichen-Endpunkt. */
+/**
+ * Laeuft der signal-cli-Dienst? Fragt den Lebenszeichen-Endpunkt.
+ *
+ * Ausgewertet wird die STATUSZEILE, nicht das blosse Ankommen einer Antwort.
+ * Bis 0.9.11 endete die Funktion auf "return $a !== false;" - und weil zwei
+ * Zeilen darueber schon bei $a === false zurueckgekehrt wird, war das ab
+ * dort IMMER wahr. Mit ignore_errors kommt auch eine 404- oder 500-Seite als
+ * Zeichenkette an: in Loxone stand SIGNAL;OK=1 und im Reiter Test ein gruenes
+ * Haekchen, waehrend keine einzige Nachricht durchging.
+ *
+ * $http_response_header ist innerhalb der Funktion gueltig, die den Strom
+ * oeffnet - in PHP 7.4 wie in 8.x. Bei einer Weiterleitung stehen mehrere
+ * Statuszeilen darin; es gilt die letzte.
+ */
 function sg_daemon_lebt()
 {
     $cfg = sg_config();
     $ctx = stream_context_create(array('http' => array('timeout' => 3, 'ignore_errors' => true)));
     $a = @file_get_contents($cfg['rpc_url'] . '/api/v1/check', false, $ctx);
     if ($a === false) { return false; }
-    foreach ((array) $http_response_header as $z) {
-        if (preg_match('#\s200\s#', $z)) { return true; }
+    $code = 0;
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $z) {
+            if (preg_match('#^HTTP/\S+\s+([0-9]{3})#', $z, $m)) { $code = (int) $m[1]; }
+        }
     }
-    return $a !== false;
+    return $code >= 200 && $code < 300;
 }
 
 function sg_dienst_laeuft()
@@ -592,14 +665,22 @@ function sg_bremse_frei($nummer)
     $f = sg_tmpdir() . '/bremse_' . md5((string) $nummer) . '.json';
     $fp = @fopen($f, 'c+');
     if ($fp === false) {
-        // Ohne Sperrdatei lieber durchlassen als den Bot lahmlegen -
-        // die Bremse ist ein Schutz, kein Tor.
-        sg_log('Bremse: ' . $f . ' nicht zu oeffnen - Nachricht wird durchgelassen.');
-        return true;
+        /* FAIL CLOSED. Bis 0.9.11 wurde hier durchgelassen, mit der
+         * Begruendung "die Bremse ist ein Schutz, kein Tor". Das ist falsch
+         * herum: diese Bremse ist die EINZIGE Begrenzung fuer das
+         * Durchprobieren der PIN (siehe Kopf dieser Datei). Wer den
+         * Sperrordner unbrauchbar macht, haette damit die Begrenzung
+         * abgeschaltet - und die Meldung stand bei jeder Nachricht neu im
+         * Protokoll. Jetzt gilt: keine Sperrdatei, kein Befehl. */
+        sg_log_gebremst('bremse_defekt',
+            'Bremse: ' . $f . ' laesst sich nicht oeffnen - es werden KEINE Befehle mehr '
+            . 'angenommen, bis das behoben ist. Rechte von ' . sg_tmpdir() . ' pruefen.');
+        return false;
     }
     if (!flock($fp, LOCK_EX)) {
         fclose($fp);
-        return true;
+        sg_log_gebremst('bremse_sperre', 'Bremse: Sperre nicht zu bekommen - Befehl abgewiesen.');
+        return false;
     }
     $jetzt = time();
     $roh = (string) stream_get_contents($fp);
@@ -622,6 +703,79 @@ function sg_bremse_frei($nummer)
     fclose($fp);
     @chmod($f, 0600);
     return true;
+}
+
+/**
+ * Stimmt die PIN? Vergleicht in gleichbleibender Zeit.
+ *
+ * Die PIN steht seit 0.9.12 als Hash in der Konfiguration. Eine noch im
+ * Klartext vorliegende PIN aus einer aelteren Fassung wird weiter
+ * angenommen, damit ein Update niemanden aussperrt; sie wird beim naechsten
+ * Speichern in der Oberflaeche in einen Hash umgeschrieben.
+ */
+function sg_pin_stimmt($cfg, $eingabe)
+{
+    $hash = isset($cfg['pin_hash']) ? (string) $cfg['pin_hash'] : '';
+    if ($hash !== '') { return password_verify((string) $eingabe, $hash); }
+    $klar = (string) $cfg['pin'];
+    if ($klar === '') { return false; }
+    return hash_equals($klar, (string) $eingabe);
+}
+
+/** Ist ueberhaupt eine PIN gesetzt - gleich in welcher Form? */
+function sg_pin_gesetzt($cfg)
+{
+    return (isset($cfg['pin_hash']) && (string) $cfg['pin_hash'] !== '')
+        || (string) $cfg['pin'] !== '';
+}
+
+/**
+ * Fehlversuche zaehlen und nach mehreren Versuchen sperren.
+ *
+ * WARUM DAS NOETIG IST
+ * Bis 0.9.11 begrenzte allein die Bremse das Durchprobieren: ein Versuch
+ * kostet zwei Nachrichten, die Vorgabe sind zehn je Minute - also rund fuenf
+ * Versuche je Minute, dauerhaft. Eine vierstellige PIN ist damit in gut einem
+ * Tag durchprobiert, und zwar von einem Absender, der ohnehin auf der
+ * Weissliste steht: genau der Fall "Handy in fremden Haenden", fuer den es
+ * die PIN ueberhaupt gibt. Der Kopf dieser Datei versprach "danach ist Ruhe" -
+ * Ruhe wurde es nie.
+ *
+ * Rueckgabe: verbleibende Sperrzeit in Sekunden, 0 = nicht gesperrt.
+ */
+function sg_pin_fehlversuch($nummer)
+{
+    $cfg = sg_config();
+    $f = sg_tmpdir() . '/pinfehl_' . md5((string) $nummer) . '.json';
+    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
+    if (!is_array($d)) { $d = array(); }
+    $n = isset($d['n']) ? (int) $d['n'] + 1 : 1;
+    $bis = 0;
+    if ($n >= (int) $cfg['pin_versuche']) {
+        $bis = time() + ((int) $cfg['pin_sperre'] * 60);
+        $n = 0;
+        sg_log('PIN-Sperre fuer ' . sg_maske($nummer) . ': ' . (int) $cfg['pin_sperre']
+             . ' Minuten nach ' . (int) $cfg['pin_versuche'] . ' Fehlversuchen.');
+    }
+    @file_put_contents($f, json_encode(array('n' => $n, 'bis' => $bis)));
+    @chmod($f, 0600);
+    return $bis > 0 ? $bis - time() : 0;
+}
+
+/** Verbleibende Sperrzeit in Sekunden, 0 = frei. */
+function sg_pin_gesperrt($nummer)
+{
+    $f = sg_tmpdir() . '/pinfehl_' . md5((string) $nummer) . '.json';
+    if (!is_file($f)) { return 0; }
+    $d = json_decode((string) @file_get_contents($f), true);
+    if (!is_array($d) || empty($d['bis'])) { return 0; }
+    $offen = (int) $d['bis'] - time();
+    return $offen > 0 ? $offen : 0;
+}
+
+function sg_pin_zuruecksetzen($nummer)
+{
+    @unlink(sg_tmpdir() . '/pinfehl_' . md5((string) $nummer) . '.json');
 }
 
 /** Offene Rueckfrage eines Absenders lesen, setzen oder loeschen. */
@@ -723,8 +877,26 @@ function sg_mqtt_zustand()
         foreach (array('Udpinport', 'udpinport') as $pk) {
             if (isset($gen[$k][$pk])) { $out['udpport'] = (int) $gen[$k][$pk]; }
         }
-        foreach (array('Autostart', 'autostart') as $ak) {
-            if (isset($gen[$k][$ak])) { $out['autostart'] = (int) $gen[$k][$ak] ? 1 : 0; }
+        /* Der Schluessel heisst Gatewayautostart.
+         *
+         * Bis 0.9.11 wurde hier 'Autostart' gesucht. Den Namen gibt es in der
+         * general.json nicht - config/system/general.json.default setzt ab
+         * Werk "Gatewayautostart" : 1. Damit stand $out['autostart'] IMMER
+         * auf 0, und zwar auch auf einer einwandfrei eingerichteten Anlage:
+         * im Reiter MQTT erschien dauerhaft "Das MQTT-Gateway ist nicht auf
+         * Autostart gestellt", im Reiter Test ein rotes Kreuz. Eine Anzeige,
+         * die immer dasselbe sagt, sagt nichts - und sie schickt den
+         * Anwender an eine Stelle, an der nichts zu richten ist.
+         *
+         * Nachgemessen am 16.08.2026 gegen eine general.json mit den
+         * Vorgabewerten: 'Autostart' -> 0, 'Gatewayautostart' -> 1.
+         *
+         * Die alten Namen bleiben als Rueckfallebene stehen, kosten nichts
+         * und tragen eine Anlage, die von Hand etwas anderes eingetragen hat.
+         * Der erste vorhandene Schluessel gewinnt, deshalb das break.
+         */
+        foreach (array('Gatewayautostart', 'gatewayautostart', 'Autostart', 'autostart') as $ak) {
+            if (isset($gen[$k][$ak])) { $out['autostart'] = (int) $gen[$k][$ak] ? 1 : 0; break; }
         }
     }
     return $out;
@@ -754,13 +926,47 @@ function sg_mqtt_pulsen($thema, $wert)
         sg_log('MQTT: kein UDP-Eingangsport in der general.json - Gateway eingerichtet?');
         return 0;
     }
-    $s = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-    if (!$s) { return 0; }
     $voll = $cfg['mqtt_topic'] . '/' . ltrim((string) $thema, '/');
     $msg = 'publish ' . $voll . ' ' . sg_mqtt_wert_saeubern($wert);
-    @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
-    socket_close($s);
-    return 1;
+    return sg_udp_senden($z['udpport'], $msg);
+}
+
+/**
+ * Eine Zeile an den UDP-Eingang des Gateways schicken.
+ *
+ * OHNE php-sockets, wenn es sein muss. Bis 0.9.11 stand hier ein blankes
+ * @socket_create(...) - das Klammeraffen-Zeichen faengt aber keinen "Call to
+ * undefined function" ab, und php-sockets stand in keinem dpkg/apt. Fehlt die
+ * Erweiterung, starb der Dauerlaeufer beim ERSTEN ausgefuehrten Befehl mit
+ * einem fatalen Fehler; der Cron startete ihn eine Minute spaeter neu, und
+ * beim naechsten Befehl starb er wieder. Nach aussen sah das aus wie "der Bot
+ * antwortet manchmal nicht". Nachgestellt am 16.08.2026 mit einem PHP ohne
+ * die Erweiterung - genau so trat es ein.
+ *
+ * Ein UDP-Paket braucht die Erweiterung gar nicht; stream_socket_client()
+ * gehoert zum Kern. Der Weg ueber sockets bleibt, wo er vorhanden ist.
+ */
+function sg_udp_senden($port, $msg)
+{
+    $port = (int) $port;
+    if ($port <= 0) { return 0; }
+    if (function_exists('socket_create')) {
+        $s = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if ($s) {
+            $ok = @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $port);
+            @socket_close($s);
+            if ($ok !== false) { return 1; }
+        }
+    }
+    $fehler = 0; $text = '';
+    $fp = @stream_socket_client('udp://127.0.0.1:' . $port, $fehler, $text, 2);
+    if (!$fp) {
+        sg_log_gebremst('udp_zu', 'MQTT: UDP-Eingang 127.0.0.1:' . $port . ' nicht erreichbar (' . $text . ')');
+        return 0;
+    }
+    $ok = @fwrite($fp, $msg);
+    fclose($fp);
+    return $ok === false ? 0 : 1;
 }
 
 /* ==================================================================
@@ -771,9 +977,25 @@ function sg_mqtt_pulsen($thema, $wert)
  *
  * Rueckgabe: array('antwort' => Text oder '', 'grund' => Kurzwort)
  * Ein leerer Antworttext heisst: bewusst schweigen.
+ *
+ * $trocken = true heisst: NUR zeigen, was geschehen wuerde. Dann wird nichts
+ * gesendet, nichts geschaltet, nichts gezaehlt und nichts gemerkt.
+ *
+ * WARUM ES DEN SCHALTER GEBEN MUSS
+ * Bis 0.9.11 hatte diese Funktion ihn nicht, und der Knopf "Durchspielen" im
+ * Reiter Test rief sie trotzdem auf. Ein Befehl der Stufe sofort wurde dabei
+ * WIRKLICH ausgefuehrt - wer "tor auf" ins Testfeld tippte, machte das Tor
+ * auf. Schlimmer: der Reiter benutzt die echte Rufnummer des ersten
+ * erlaubten Absenders. Bei Stufe rueckfrage oder pin legte der Probelauf
+ * fuer DIESE fremde Person eine Wartedatei an - antwortete sie danach aus
+ * einem beliebigen anderen Grund "ja", fuehrte der Bot den Befehl aus, den
+ * der Verwalter ins Testfeld getippt hatte. Nebenbei verbrauchte jeder
+ * Probelauf ihren Bremszaehler und ueberschrieb ihre echte offene
+ * Rueckfrage. Der Kommentar daneben versprach dabei "ohne dass etwas
+ * geschaltet wird".
  * ================================================================== */
 
-function sg_verarbeite($von, $text)
+function sg_verarbeite($von, $text, $trocken = false)
 {
     $cfg = sg_config();
     $text = trim(preg_replace('/\s+/', ' ', (string) $text));
@@ -789,20 +1011,45 @@ function sg_verarbeite($von, $text)
                      'grund' => 'nicht_erlaubt');
     }
 
-    /* ---- Schicht 3 (vorgezogen): Bremse ---- */
-    if (!sg_bremse_frei($von)) {
+    /* ---- Schicht 3 (vorgezogen): Bremse ----
+       Im Trockenlauf wird nicht gezaehlt: der Probelauf des Verwalters darf
+       das Kontingent des Bewohners nicht aufbrauchen. */
+    if (!$trocken && !sg_bremse_frei($von)) {
         sg_log('Gebremst: ' . sg_maske($von) . ' (mehr als ' . (int) $cfg['bremse'] . ' je Minute)');
         return array('antwort' => sg_t('BOT.GEBREMST'), 'grund' => 'gebremst');
     }
 
-    /* ---- Laeuft eine Rueckfrage? ---- */
-    $warte = sg_wartend($von);
+    /* ---- Laeuft eine Rueckfrage? ----
+       Im Trockenlauf uebergangen. Sonst beantwortete der Probelauf eine
+       offene Rueckfrage des Bewohners - oder loeschte sie. */
+    $warte = $trocken ? null : sg_wartend($von);
     if ($warte !== null) {
+        /* Die Rueckfrage haengt am WORT, nicht nur an der Zeilennummer.
+         *
+         * Bis 0.9.11 wurde allein der Tabellenindex gemerkt und beim
+         * Ausfuehren die Stufe aus der Wartedatei genommen. Wer die
+         * Befehlstabelle waehrend der 90 Sekunden umsortierte, liess ein
+         * "ja" einen ANDEREN Befehl ausloesen; wer eine Zeile in dieser Zeit
+         * von rueckfrage auf pin hochstufte, bekam sie trotzdem ohne PIN
+         * ausgefuehrt. Jetzt muessen Wort UND Stufe noch passen, sonst wird
+         * abgebrochen und gesagt, warum. */
         $bi = (int) $warte['befehl'];
         $b = isset($cfg['befehle'][$bi]) ? $cfg['befehle'][$bi] : null;
+        $sg_wort = isset($warte['wort']) ? (string) $warte['wort'] : '';
+        if ($sg_wort !== '' && ($b === null || $b['wort'] !== $sg_wort)) {
+            $b = null;
+            foreach ($cfg['befehle'] as $sg_bb) {
+                if (!empty($sg_bb['aktiv']) && $sg_bb['wort'] === $sg_wort) { $b = $sg_bb; break; }
+            }
+        }
         if ($b === null || empty($b['aktiv'])) {
             sg_wartend($von, false);
             return array('antwort' => sg_t('BOT.ABGEBROCHEN'), 'grund' => 'abgebrochen');
+        }
+        if (isset($warte['stufe']) && $b['stufe'] !== $warte['stufe']) {
+            sg_wartend($von, false);
+            sg_log('Rueckfrage verworfen: Stufe von "' . $b['wort'] . '" hat sich waehrenddessen geaendert.');
+            return array('antwort' => sg_t('BOT.GEAENDERT'), 'grund' => 'geaendert');
         }
         if (in_array($klein, array('nein', 'no', 'abbrechen', 'stop'), true)) {
             sg_wartend($von, false);
@@ -811,16 +1058,22 @@ function sg_verarbeite($von, $text)
         }
         if ($warte['art'] === 'pin') {
             // hash_equals gegen das Erraten ueber die Antwortzeit.
-            if ((string) $cfg['pin'] === '' || !hash_equals((string) $cfg['pin'], $text)) {
+            if (!sg_pin_stimmt($cfg, $text)) {
                 sg_log('Falsche PIN von ' . sg_maske($von) . ' fuer: ' . $b['wort']);
                 sg_wartend($von, false);
+                $sg_offen = sg_pin_fehlversuch($von);
+                if ($sg_offen > 0) {
+                    return array('antwort' => sprintf(sg_t('BOT.PIN_GESPERRT'), (int) ceil($sg_offen / 60)),
+                                 'grund' => 'pin_gesperrt');
+                }
                 return array('antwort' => sg_t('BOT.PIN_FALSCH'), 'grund' => 'pin_falsch');
             }
+            sg_pin_zuruecksetzen($von);
         } elseif (!in_array($klein, array('ja', 'yes', 'ok'), true)) {
             return array('antwort' => sg_t('BOT.BITTE_JA_NEIN'), 'grund' => 'unklar');
         }
         sg_wartend($von, false);
-        return sg_ausfuehren($b, $von);
+        return sg_ausfuehren($b, $von, $trocken);
     }
 
     /* ---- Eingebaute Woerter ---- */
@@ -839,28 +1092,46 @@ function sg_verarbeite($von, $text)
         if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
         if ($klein !== $b['wort']) { continue; }
         if ($b['stufe'] === 'pin') {
-            if ((string) $cfg['pin'] === '') {
+            if (!sg_pin_gesetzt($cfg)) {
                 sg_log('Befehl ' . $b['wort'] . ' verlangt eine PIN, es ist aber keine gesetzt.');
                 return array('antwort' => sg_t('BOT.KEINE_PIN_GESETZT'), 'grund' => 'keine_pin');
             }
-            sg_wartend($von, array('befehl' => $i, 'art' => 'pin'));
+            $sg_offen = sg_pin_gesperrt($von);
+            if ($sg_offen > 0) {
+                return array('antwort' => sprintf(sg_t('BOT.PIN_GESPERRT'), (int) ceil($sg_offen / 60)),
+                             'grund' => 'pin_gesperrt');
+            }
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'])); }
             return array('antwort' => sg_t('BOT.PIN_BITTE'), 'grund' => 'pin_angefordert');
         }
         if ($b['stufe'] === 'rueckfrage') {
-            sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage'));
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage', 'wort' => $b['wort'], 'stufe' => $b['stufe'])); }
             return array('antwort' => sprintf(sg_t('BOT.RUECKFRAGE'), $b['wort']), 'grund' => 'rueckfrage');
         }
-        return sg_ausfuehren($b, $von);
+        return sg_ausfuehren($b, $von, $trocken);
     }
 
     return array('antwort' => sg_t('BOT.UNBEKANNT'), 'grund' => 'unbekannt');
 }
 
-/** Einen freigegebenen Befehl wirklich absetzen. */
-function sg_ausfuehren($b, $von)
+/**
+ * Einen freigegebenen Befehl wirklich absetzen.
+ *
+ * $trocken = true haelt genau hier an: das Thema wird NICHT gepulst, und die
+ * Rueckgabe traegt den Grund 'wuerde_ausfuehren' statt 'ausgefuehrt'. Der
+ * Antworttext ist derselbe, den der Absender bekommen haette - darum geht es
+ * im Probelauf ja.
+ */
+function sg_ausfuehren($b, $von, $trocken = false)
 {
     if ($b['thema'] === '') {
         return array('antwort' => sg_t('BOT.KEIN_THEMA'), 'grund' => 'kein_thema');
+    }
+    if ($trocken) {
+        sg_log('Trockenlauf: "' . $b['wort'] . '" wuerde ' . $b['thema'] . '=' . $b['wert']
+             . ' senden (es wurde nichts gesendet)');
+        $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $b['wort']);
+        return array('antwort' => $antwort, 'grund' => 'wuerde_ausfuehren');
     }
     $ok = sg_mqtt_pulsen($b['thema'], $b['wert']);
     sg_log('Befehl "' . $b['wort'] . '" von ' . sg_maske($von) . ' -> '

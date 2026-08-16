@@ -562,7 +562,13 @@ $sg_reiter = array(
 </div>
 </form>
 <h2><?= sg_e(sg_t('MQTT.H_TITEL')) ?></h2>
-<?php if (!function_exists('sg_hs_autostart')) { function sg_hs_autostart() { $h = getenv('LBHOMEDIR') ?: '/opt/loxberry'; $g = $h . '/config/system/general.json'; if (!is_file($g)) { return null; } $j = json_decode((string) @file_get_contents($g), true); if (!is_array($j) || !isset($j['Mqtt'])) { return null; } return !empty($j['Mqtt']['Gatewayautostart']); } } if (sg_hs_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo sg_t('MQTT.W_AUTOSTART'); ?></div><?php } ?>
+<?php /* Hier stand bis 0.9.11 eine zweite, eigene Autostart-Pruefung mit
+         festem Pfad nach /opt/loxberry. Sie sagte dasselbe wie die Zeilen
+         darunter - nur mit dem richtigen Schluessel, waehrend
+         sg_mqtt_zustand() den falschen las. Zwei Quellen fuer dieselbe
+         Auskunft, die sich widersprechen konnten. Die Pruefung wohnt jetzt
+         allein in sg_mqtt_zustand(); der Text MQTT.W_AUTOSTART ist damit
+         entfallen. */ ?>
 <?php $sg_m = sg_mqtt_zustand(); ?>
 <?php if (!$sg_m['gefunden']) { ?>
 <div class="sm-fehler"><?= sg_t('MQTT.KEIN_ABSCHNITT') ?></div>

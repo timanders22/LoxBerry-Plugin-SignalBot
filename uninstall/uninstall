@@ -1,18 +1,44 @@
 #!/bin/bash
 # Laeuft als ROOT beim Entfernen des Plugins.
+ARGV3=$3
+ARGV5=$5
+
 echo "<INFO> Halte den Dienst an und entferne ihn"
 systemctl disable --now signal-cli-loxberry >/dev/null 2>&1
 rm -f /etc/systemd/system/signal-cli-loxberry.service
 systemctl daemon-reload >/dev/null 2>&1
 rm -f /etc/sudoers.d/loxberry-signalbot
 
+# Den Dauerlaeufer beenden, sonst haengt er bis zum naechsten Neustart am
+# Ereignisstrom und haelt seine Sperrdatei.
+SPERRE="/tmp/$ARGV3/bot.lock"
+if [ -f "$SPERRE" ]; then
+    PID=$(head -c 12 "$SPERRE" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null \
+       && tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | grep -q 'sg_bot.php'; then
+        kill "$PID" 2>/dev/null
+        echo "<OK> Bot-Lauf (PID $PID) beendet."
+    fi
+fi
+rm -rf "/tmp/$ARGV3"
+
+# Die Zweitschrift liegt NEBEN dem Plugin-Ordner, damit sie ein Update
+# ueberlebt. Genau deshalb ueberlebt sie auch die Deinstallation - und darin
+# stehen Zugriffstoken, PIN-Hash und alle erlaubten Rufnummern. Wer neben dem
+# Ordner ablegt, raeumt hier selbst auf.
+if [ -n "$ARGV5" ] && [ -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json" ]; then
+    rm -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json"
+    echo "<OK> Zweitschrift der Konfiguration entfernt (enthielt Token und Rufnummern)."
+fi
+
 # Die Signal-Schluessel werden BEWUSST NICHT geloescht. Wer sie loescht,
 # meldet das Zweitgeraet ab und muss neu verknuepfen - das soll niemand aus
 # Versehen ausloesen.
-echo "<INFO> signal-cli selbst und die Signal-Schluessel bleiben erhalten."
+echo "<INFO> signal-cli, die Signal-Schluessel und die Java-Laufzeit bleiben erhalten."
 echo "<INFO> Wer auch die entfernen will:"
 echo "<INFO>   sudo rm -rf /var/lib/signal-cli /opt/signal-cli-*"
 echo "<INFO>   sudo rm -f /usr/local/bin/signal-cli"
 echo "<INFO>   sudo userdel signalcli"
+echo "<INFO>   sudo apt-get purge openjdk-25-jre-headless   (nur wenn nichts anderes Java braucht)"
 echo "<INFO> Danach im Handy unter Signal - Gekoppelte Geraete das Geraet loeschen."
 exit 0

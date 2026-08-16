@@ -25,6 +25,7 @@
  *   sg_bot.php einmal     30 Sekunden lauschen, dann Schluss - fuer den Test
  *   sg_bot.php test "+49..." "licht an"    eine Nachricht durchspielen,
  *                                          ohne dass jemand etwas schickt
+ *                                          und ohne dass etwas geschaltet wird
  */
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
@@ -76,7 +77,9 @@ $modus = isset($argv[1]) ? (string) $argv[1] : 'dauer';
 if ($modus === 'test') {
     $von = isset($argv[2]) ? (string) $argv[2] : '';
     $text = isset($argv[3]) ? (string) $argv[3] : '';
-    $erg = sg_verarbeite($von, $text);
+    // Drittes Argument: Trockenlauf. Der Testzweig zeigt nur, was geschehen
+    // wuerde - er schaltet nicht. Der echte Empfang unten laeuft ohne.
+    $erg = sg_verarbeite($von, $text, true);
     printf("Von     : %s\nText    : %s\nGrund   : %s\nAntwort : %s\n",
         sg_maske($von), $text, $erg['grund'],
         $erg['antwort'] === '' ? '(bewusst keine)' : $erg['antwort']);
@@ -91,6 +94,17 @@ if (!flock($fh, LOCK_EX | LOCK_NB)) {
     // Laeuft schon - das ist der Normalfall bei jedem Cron-Aufruf.
     exit(0);
 }
+/* Die eigene Prozessnummer in die Sperrdatei schreiben.
+ *
+ * Ohne sie kann niemand den laufenden Bot gezielt beenden: das Update tauscht
+ * die Dateien unter ihm aus, der alte Prozess haelt die Sperre weiter, und
+ * der naechste Cron-Aufruf endet mit "laeuft schon". postinstall.sh und das
+ * uninstall-Skript lesen die Nummer hier heraus - und pruefen vor dem Beenden
+ * in /proc, dass sie wirklich zu sg_bot.php gehoert. */
+ftruncate($fh, 0);
+rewind($fh);
+fwrite($fh, (string) getmypid() . "\n");
+fflush($fh);
 
 $cfg = sg_config();
 $ende = ($modus === 'einmal') ? time() + 30 : 0;   // 0 = ohne Ende
