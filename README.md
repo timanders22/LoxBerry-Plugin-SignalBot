@@ -8,6 +8,25 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.10
+
+**Der Bot-Dienst konnte nie starten.** `bin/sg_bot.php` suchte seine Programmbibliothek
+ueber `dirname(__DIR__) . '/webfrontend/htmlauth/…'`. Im entpackten Archiv
+liegen `bin/` und `webfrontend/` nebeneinander, auf dem installierten
+LoxBerry in getrennten Baeumen — der Aufruf endete dort bei jedem Cron-Lauf
+mit `Failed opening required`. Weil die Cron-Zeile nach `/dev/null` schreibt,
+stand das nirgends. Damit hat der Bot seit der Einfuehrung nie gelauscht.
+
+Die Bibliothek wird jetzt ueber eine Kandidatenliste gesucht; findet keiner
+sie, schreibt der Dienst auf die Fehlerausgabe, **welche Datei er wo gesucht
+hat**, und endet mit Rueckgabewert 1 statt stillschweigend.
+
+Nach dem Update einmal von Hand pruefen:
+
+```bash
+php /opt/loxberry/bin/plugins/<ordner>/sg_bot.php; echo "Rueckgabewert: $?"
+```
+
 ## Zwei Richtungen
 
 | Richtung | Weg | Beispiel |

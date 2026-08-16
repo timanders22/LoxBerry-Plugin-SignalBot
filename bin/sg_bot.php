@@ -28,7 +28,47 @@
  */
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
-require_once dirname(__DIR__) . '/webfrontend/htmlauth/sg_lib.php';
+/* Die Bibliothek ueber eine Kandidatenliste finden - NICHT ueber eine feste
+ * Zahl von ".." nach oben.
+ *
+ * Im entpackten Archiv liegen bin/ und webfrontend/ nebeneinander, auf dem
+ * installierten LoxBerry in GETRENNTEN Baeumen:
+ *
+ *     /opt/loxberry/bin/plugins/<ordner>/sg_bot.php
+ *     /opt/loxberry/webfrontend/htmlauth/plugins/<ordner>/sg_lib.php
+ *
+ * dirname(__DIR__) ergibt dort /opt/loxberry/bin/plugins - gesucht wurde also
+ * /opt/loxberry/bin/plugins/webfrontend/htmlauth/sg_lib.php. Die gibt es nicht: der
+ * Dienst brach bei JEDEM Cron-Lauf mit einem fatalen Fehler ab, und weil die
+ * Cron-Zeile nach /dev/null schreibt, stand das nirgends.
+ *
+ * Gefunden am 16.08.2026 mit Werkzeuge/installationslage_pruefen.py, nachdem
+ * dieselbe Zeile den Hintergrunddienst des Abfahrts-Assistenten von 1.5.0 bis
+ * 1.5.7 lahmgelegt hatte.
+ */
+$sg_lb = getenv('LBHOMEDIR');
+$sg_ordner = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
+$sg_kandidaten = array();
+if ($sg_lb) {
+    $sg_kandidaten[] = $sg_lb . '/webfrontend/htmlauth/plugins/' . $sg_ordner . '/sg_lib.php';
+}
+// installiert, ohne dass die Umgebungsvariablen gesetzt waeren:
+// .../bin/plugins/<ordner>  ->  .../webfrontend/htmlauth/plugins/<ordner>
+$sg_kandidaten[] = dirname(dirname(dirname(__DIR__)))
+                 . '/webfrontend/htmlauth/plugins/' . basename(__DIR__) . '/sg_lib.php';
+// entpacktes Archiv: bin/ und webfrontend/ liegen nebeneinander
+$sg_kandidaten[] = dirname(__DIR__) . '/webfrontend/htmlauth/sg_lib.php';
+
+$sg_lib = '';
+foreach ($sg_kandidaten as $sg_kand) {
+    if (is_file($sg_kand)) { $sg_lib = $sg_kand; break; }
+}
+if ($sg_lib === '') {
+    fwrite(STDERR, "SignalBot: sg_lib.php nicht gefunden. Gesucht wurde in:\n");
+    foreach ($sg_kandidaten as $sg_kand) { fwrite(STDERR, '  ' . $sg_kand . "\n"); }
+    exit(1);
+}
+require_once $sg_lib;
 
 $modus = isset($argv[1]) ? (string) $argv[1] : 'dauer';
 
