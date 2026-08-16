@@ -978,6 +978,9 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="start">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('TEST.K_START')) ?></button></form>
+<form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <input data-role="none" type="hidden" name="testaktion" value="<?= sg_dienst_autostart() === 'enabled' ? 'disable' : 'enable' ?>">
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_dienst_autostart() === 'enabled' ? sg_t('TEST.K_AUTOSTART_AUS') : sg_t('TEST.K_AUTOSTART_EIN')) ?></button></form>
 </div>
 <div class="sm-knopfreihe">
 <a data-role="none" class="sm-btn sm-b-technik" href="<?= sg_e($sg_cfg['rpc_url']) ?>/api/v1/check" target="_blank"><?= sg_e(sg_t('TEST.K_CHECK')) ?></a>

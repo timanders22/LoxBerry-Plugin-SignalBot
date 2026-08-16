@@ -601,9 +601,26 @@ function sg_dienst_laeuft()
     return trim(implode('', $aus)) === 'active';
 }
 
+/** Startet der Dienst beim Hochfahren mit? enabled | disabled | unbekannt */
+function sg_dienst_autostart()
+{
+    $aus = array(); $rc = 0;
+    @exec('systemctl is-enabled signal-cli-loxberry 2>/dev/null', $aus, $rc);
+    $t = trim(implode('', $aus));
+    return in_array($t, array('enabled', 'disabled', 'static', 'masked'), true) ? $t : 'unbekannt';
+}
+
+/**
+ * Den Dienst steuern - ohne root.
+ *
+ * postroot.sh legt eine sudo-Regel fuer genau diese Unit und genau diese
+ * Unterbefehle an. Der Benutzer loxberry hat auf einem LoxBerry nicht
+ * zwangslaeufig allgemeine sudo-Rechte; ohne die Regel liesse sich der Dienst
+ * weder aus der Oberflaeche noch ueber SSH steuern.
+ */
 function sg_dienst($befehl)
 {
-    if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
+    if (!in_array($befehl, array('start', 'stop', 'restart', 'enable', 'disable'), true)) {
         return array(0, 'unbekannter Befehl');
     }
     $aus = array(); $rc = 0;

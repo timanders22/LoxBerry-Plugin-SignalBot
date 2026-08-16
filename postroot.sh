@@ -181,9 +181,13 @@ if [ "$BOGEN" != "amd64" ] && [ "$STARTBAR" = "0" ]; then
     echo "<WARNING>     Reiter Einstellungen dessen Adresse eintragen."
     echo "<WARNING>"
     echo "<WARNING> Laeuft signal-cli danach - oder laeuft es hier bereits,"
-    echo "<WARNING> etwa als Paket signal-cli-native -, den Dienst einmalig"
-    echo "<WARNING> einschalten mit:"
-    echo "<WARNING>   sudo systemctl enable --now signal-cli-loxberry"
+    echo "<WARNING> etwa als Paket signal-cli-native -, genuegt im Plugin der"
+    echo "<WARNING> Reiter Test: dort 'Dienst starten' und 'Autostart"
+    echo "<WARNING> einschalten'. Beides braucht KEINE root-Rechte, dafuer"
+    echo "<WARNING> gibt es die sudo-Regel dieses Plugins."
+    echo "<WARNING> Ueber SSH als Benutzer loxberry dasselbe:"
+    echo "<WARNING>   sudo -n /bin/systemctl enable signal-cli-loxberry"
+    echo "<WARNING>   sudo -n /bin/systemctl start signal-cli-loxberry"
     echo "<WARNING>"
     echo "<WARNING> Der Reiter Test sagt jederzeit, woran es gerade haengt."
     echo "<WARNING> ============================================================"
@@ -237,9 +241,17 @@ fi
 
 # Der Benutzer loxberry muss den Dienst aus der Oberflaeche steuern koennen -
 # aber nur diesen einen und nur diese Unterbefehle.
+#
+# enable und disable sind seit 0.9.12 dabei. Grund: der Benutzer loxberry hat
+# auf einem LoxBerry nicht zwangslaeufig allgemeine sudo-Rechte. Ohne diese
+# beiden Eintraege liesse sich der Autostart nur als root einschalten - und
+# genau das brauchte man auf einem Raspberry Pi, wo das Plugin den Dienst
+# bewusst nicht startet, bis die native Bibliothek da ist. Der Zugewinn an
+# Rechten ist gering: es geht weiterhin nur um diese eine Unit, und wer den
+# Dienst ohnehin starten darf, darf ihn dann auch beim Hochfahren starten.
 cat > /etc/sudoers.d/loxberry-signalbot <<'SUDO'
-loxberry ALL=(root) NOPASSWD: /bin/systemctl start signal-cli-loxberry, /bin/systemctl stop signal-cli-loxberry, /bin/systemctl restart signal-cli-loxberry
-loxberry ALL=(root) NOPASSWD: /usr/bin/systemctl start signal-cli-loxberry, /usr/bin/systemctl stop signal-cli-loxberry, /usr/bin/systemctl restart signal-cli-loxberry
+loxberry ALL=(root) NOPASSWD: /bin/systemctl start signal-cli-loxberry, /bin/systemctl stop signal-cli-loxberry, /bin/systemctl restart signal-cli-loxberry, /bin/systemctl enable signal-cli-loxberry, /bin/systemctl disable signal-cli-loxberry
+loxberry ALL=(root) NOPASSWD: /usr/bin/systemctl start signal-cli-loxberry, /usr/bin/systemctl stop signal-cli-loxberry, /usr/bin/systemctl restart signal-cli-loxberry, /usr/bin/systemctl enable signal-cli-loxberry, /usr/bin/systemctl disable signal-cli-loxberry
 SUDO
 chmod 0440 /etc/sudoers.d/loxberry-signalbot
 if ! visudo -cf /etc/sudoers.d/loxberry-signalbot >/dev/null 2>&1; then

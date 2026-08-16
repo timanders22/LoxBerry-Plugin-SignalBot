@@ -48,6 +48,18 @@ function sg_pruefungen()
     $z[] = sg_pruefzeile($laeuft ? 1 : ($vorhanden ? 0 : -1), sg_t('TEST.F_DIENST'),
         $laeuft ? sg_t('TEST.A_DIENST_LAEUFT') : sg_t('TEST.A_DIENST_TOT'));
 
+    // Startet der Dienst beim Hochfahren mit? Ohne Autostart laeuft der Bot
+    // nach einem Stromausfall erst wieder, wenn ihn jemand von Hand startet -
+    // oder bis die Selbstheilung greift.
+    $auto = sg_dienst_autostart();
+    if ($auto === 'enabled') {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_AUTOSTART'), sg_t('TEST.A_AUTOSTART_EIN'));
+    } elseif ($auto === 'unbekannt') {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_AUTOSTART'), sg_t('TEST.A_AUTOSTART_UNBEKANNT'));
+    } else {
+        $z[] = sg_pruefzeile(0, sg_t('TEST.F_AUTOSTART'), sg_t('TEST.A_AUTOSTART_AUS'));
+    }
+
     $lebt = sg_daemon_lebt();
     $z[] = sg_pruefzeile($lebt ? 1 : 0, sg_t('TEST.F_RPC'),
         $lebt ? sprintf(sg_t('TEST.A_RPC_OK'), sg_e($cfg['rpc_url']))
@@ -220,6 +232,8 @@ function sg_test_aktion($was, $zusatz = '')
 {
     $cfg = sg_config();
     switch ($was) {
+        case 'enable':
+        case 'disable':
         case 'start':
         case 'stop':
         case 'restart':
