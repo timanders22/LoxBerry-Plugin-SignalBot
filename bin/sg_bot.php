@@ -111,8 +111,13 @@ $ende = ($modus === 'einmal') ? time() + 30 : 0;   // 0 = ohne Ende
 
 sg_log('Bot gestartet' . ($ende ? ' (Testlauf, 30 s)' : ''));
 
-/** Eine Zeile des Ereignisstroms auswerten und gegebenenfalls antworten. */
-function sg_ereignis($json)
+/** Eine Zeile des Ereignisstroms auswerten und gegebenenfalls antworten.
+ *
+ * Hiess bis 0.9.12 sg_ereignis() - denselben Namen traegt seither die
+ * Protokollfunktion in sg_lib.php, und beide Dateien treffen sich im selben
+ * Prozess. Der Dauerlaeufer starb dann sofort mit "Cannot redeclare".
+ * Gefunden von installationslage_pruefen.py. */
+function sg_strom_zeile($json)
 {
     $d = json_decode($json, true);
     if (!is_array($d)) { return; }
@@ -139,25 +144,63 @@ function sg_ereignis($json)
     }
 }
 
+/**
+ * Der Takt zwischen zwei Nachrichten.
+ *
+ * Wird immer dann gerufen, wenn der Ereignisstrom eine Weile still war -
+ * also regelmaessig, ohne dass dafuer ein eigener Zeitgeber noetig waere.
+ * Zwei Aufgaben:
+ *
+ *   1. HERZSCHLAG. Loxone kann sonst nicht erkennen, ob der Bot noch lebt:
+ *      ein virtueller Eingang behaelt seinen letzten Wert, in der App sieht
+ *      ein toter Bot deshalb genauso aus wie ein stiller. Der Bot schreibt
+ *      seinen Zeitstempel auf <praefix>/online; in Loxone laesst sich daraus
+ *      mit einer Einschaltverzoegerung eine echte Ausfallmeldung bauen.
+ *   2. WARTESCHLANGE. Meldungen, die wegen der Nachtruhe zurueckgehalten
+ *      wurden, und dringende, die noch nicht quittiert sind.
+ */
+function sg_takt()
+{
+    static $letzter = 0;
+    $cfg = sg_config();
+    $jetzt = time();
+    if (!empty($cfg['herzschlag']) && $jetzt - $letzter >= 60) {
+        $letzter = $jetzt;
+        sg_mqtt_pulsen('online', (string) $jetzt);
+    }
+    sg_warteschlange_arbeiten();
+}
+
 /** Einmal am Ereignisstrom hoeren, bis er abreisst. */
 function sg_lauschen($ende)
 {
     $cfg = sg_config();
     $url = $cfg['rpc_url'] . '/api/v1/events';
+    /* Zwanzig Sekunden statt fuenf Minuten.
+     *
+     * Nicht, weil der Strom schneller antworten muesste - sondern weil der
+     * Bot zwischen zwei Nachrichten etwas zu tun hat: Herzschlag und
+     * Warteschlange. Beides braucht einen regelmaessigen Takt, und den gibt
+     * es ohne eigenen Zeitgeber nur hier. Nach fuenfzehn stillen Runden -
+     * also nach fuenf Minuten, wie bisher - wird die Verbindung erneuert. */
     $ctx = stream_context_create(array('http' => array(
         'method' => 'GET',
-        'timeout' => 300,
+        'timeout' => 20,
         'header' => "Accept: text/event-stream\r\nUser-Agent: LoxBerry-SignalBot",
     )));
     $fp = @fopen($url, 'r', false, $ctx);
     if ($fp === false) { return false; }
-    stream_set_timeout($fp, 300);
+    stream_set_timeout($fp, 20);
+    $still = 0;
     while (!feof($fp)) {
         if ($ende && time() > $ende) { break; }
         $zeile = fgets($fp);
         if ($zeile === false) {
             $st = stream_get_meta_data($fp);
             if (!empty($st['timed_out'])) {
+                sg_takt();
+                $still++;
+                if ($still < 15) { continue; }
                 /* Bis 0.9.0 stand hier "continue" - weiterhoeren, es war ja
                  * nur Stille.
                  *
@@ -188,7 +231,7 @@ function sg_lauschen($ende)
         }
         $zeile = trim($zeile);
         if ($zeile === '' || strpos($zeile, 'data:') !== 0) { continue; }
-        sg_ereignis(trim(substr($zeile, 5)));
+        sg_strom_zeile(trim(substr($zeile, 5)));
     }
     fclose($fp);
     return true;
@@ -205,11 +248,31 @@ while (true) {
         if ($fehler_folge === 1 || $fehler_folge % 10 === 0) {
             sg_log('Ereignisstrom nicht erreichbar (Versuch ' . $fehler_folge . '). Laeuft signal-cli?');
         }
+        /* Selbstheilung.
+         *
+         * Nach fuenf vergeblichen Anlaeufen wird der signal-cli-Dienst einmal
+         * neu gestartet - die sudo-Regel dafuer legt postroot.sh ohnehin an.
+         * Danach hoechstens noch einmal je halber Stunde, damit daraus keine
+         * Startschleife wird. Ohne das klopft der Bot stundenlang an eine
+         * Tuer, hinter der niemand mehr ist, und niemand merkt es. */
+        if ($fehler_folge === 5 || ($fehler_folge > 5 && $fehler_folge % 180 === 0)) {
+            $sg_marke = sg_tmpdir() . '/dienst_neustart';
+            $sg_letzt = is_file($sg_marke) ? (int) @file_get_contents($sg_marke) : 0;
+            if (time() - $sg_letzt > 1800) {
+                @file_put_contents($sg_marke, (string) time());
+                sg_log('Selbstheilung: signal-cli-Dienst wird neu gestartet.');
+                list($sg_ok, $sg_txt) = sg_dienst('restart');
+                sg_log('Selbstheilung: ' . ($sg_ok ? 'Neustart angestossen.' : 'Neustart misslungen: ' . $sg_txt));
+            }
+        }
         $pause = min(60, 5 * $fehler_folge);
         for ($i = 0; $i < $pause; $i++) {
             if ($ende && time() > $ende) { break 2; }
             sleep(1);
         }
+        // Auch ohne Ereignisstrom weiterarbeiten: Meldungen aus Loxone
+        // stehen in der Warteschlange und sollen raus, sobald es geht.
+        sg_takt();
         continue;
     }
     if ($fehler_folge > 0) { sg_log('Ereignisstrom wieder da.'); }

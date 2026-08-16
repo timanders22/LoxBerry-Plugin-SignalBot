@@ -144,6 +144,71 @@ function sg_pruefungen()
     $z[] = sg_pruefzeile($gut, sg_t('TEST.F_TOKEN'),
         $gut ? sg_t('TEST.A_TOKEN_OK') : sg_t('TEST.A_TOKEN_FEHLT'));
 
+    /* ---- Kill-Schalter ----
+       Der gefaehrlichste stille Zustand: der Bot ist gesperrt, und niemand
+       weiss mehr, warum er nicht antwortet. */
+    if (!empty($cfg['gesperrt'])) {
+        $z[] = sg_pruefzeile(0, sg_t('TEST.F_SPERRE'), sg_t('TEST.A_SPERRE_EIN'));
+    } else {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_SPERRE'), sg_t('TEST.A_SPERRE_AUS'));
+    }
+
+    /* ---- Offene Meldungen ---- */
+    $offen = sg_offene_meldungen();
+    $z[] = sg_pruefzeile($offen > 0 ? 0 : 1, sg_t('TEST.F_OFFEN'),
+        $offen > 0 ? sprintf(sg_t('TEST.A_OFFEN'), $offen) : sg_t('TEST.A_OFFEN_KEINE'));
+
+    /* ---- Nachtruhe ---- */
+    if ((string) $cfg['nacht_von'] === '') {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_NACHT'), sg_t('TEST.A_NACHT_AUS'));
+    } else {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_NACHT'),
+            sprintf(sg_t('TEST.A_NACHT_EIN'), sg_e($cfg['nacht_von']), sg_e($cfg['nacht_bis']),
+                sg_nachtruhe($cfg) ? sg_t('TEST.A_NACHT_JETZT') : sg_t('TEST.A_NACHT_NICHT')));
+    }
+
+    /* ---- Die Loxone-Vorlagen ----
+       Wohlgeformt oder nicht - das ist nicht verhandelbar, und der Anwender
+       soll es hier erfahren und nicht erst in Loxone Config, wo er den Fehler
+       bei sich sucht. */
+    $xmlfehler = array();
+    foreach (array('sg_vorlage', 'sg_vorlage_out') as $bau) {
+        list($xname, $xinhalt) = $bau();
+        $vorher = libxml_use_internal_errors(true);
+        $ok = simplexml_load_string($xinhalt) !== false;
+        libxml_clear_errors();
+        libxml_use_internal_errors($vorher);
+        if (!$ok) { $xmlfehler[] = $xname; }
+    }
+    $z[] = sg_pruefzeile($xmlfehler ? 0 : 1, sg_t('TEST.F_XML'),
+        $xmlfehler ? sprintf(sg_t('TEST.A_XML_FEHLER'), sg_e(implode(', ', $xmlfehler)))
+                   : sg_t('TEST.A_XML_OK'));
+
+    /* ---- Reiterleiste, Bereiche und Positivliste ----
+       Drei Stellen, die zusammenpassen muessen. Fehlt ein Name in der
+       Positivliste, ist der Reiter sichtbar und anklickbar - aber nach jedem
+       Absenden springt die Seite zurueck auf Einstellungen. Diese Pruefung
+       gehoert laut REGELN_1 in den Reiter Test, damit das Ausschreiben der
+       Leiste nachpruefbar bleibt. */
+    $eigen = @file_get_contents(__DIR__ . '/index.php');
+    if ($eigen === false) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_REITER'), sg_t('TEST.A_REITER_UNBEKANNT'));
+    } else {
+        preg_match_all('/data-ziel="(tab-[a-z0-9]+)"/', $eigen, $m1);
+        preg_match_all('/class="sm-seite[^"]*"[^>]*id="(tab-[a-z0-9]+)"/', $eigen, $m2);
+        $liste = array();
+        if (preg_match('/\^tab-\(([a-z0-9|]+)\)/', $eigen, $m3)) {
+            foreach (explode('|', $m3[1]) as $x) { $liste[] = 'tab-' . $x; }
+        }
+        $leiste = array_unique($m1[1]);
+        $flaechen = array_unique($m2[1]);
+        sort($leiste); sort($flaechen); sort($liste);
+        $passt = ($leiste === $flaechen && $leiste === $liste && count($leiste) > 0);
+        $z[] = sg_pruefzeile($passt ? 1 : 0, sg_t('TEST.F_REITER'),
+            sprintf(sg_t($passt ? 'TEST.A_REITER_OK' : 'TEST.A_REITER_FEHL'),
+                count($leiste), count($flaechen), count($liste)));
+    }
+
     return $z;
 }
 

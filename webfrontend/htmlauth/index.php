@@ -32,8 +32,8 @@ $sg_fehler = array();
 $sg_qr = '';
 
 /* ================= Vorlage herunterladen (vor jeder Ausgabe) ================= */
-if ($sg_post && isset($_POST['vorlage'])) {
-    list($sg_vname, $sg_vinhalt) = sg_vorlage();
+if ($sg_post && isset($_POST['vorlage']) || $sg_post && isset($_POST['vorlage_out'])) {
+    list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage();
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $sg_vname . '"');
     echo $sg_vinhalt;
@@ -83,6 +83,27 @@ if ($sg_post && isset($_POST['link_fertig'])) {
         }
     }
     $sg_tab = 'tab-settings';
+}
+
+/* ================= Kill-Schalter ================= */
+if ($sg_post && isset($_POST['sperre'])) {
+    $sg_scfg = sg_config();
+    $sg_scfg['gesperrt'] = $_POST['sperre'] === 'ein' ? 1 : 0;
+    if (sg_config_write($sg_scfg)) {
+        sg_log($sg_scfg['gesperrt'] ? 'Bot in der Oberflaeche gesperrt.' : 'Bot in der Oberflaeche entsperrt.');
+        sg_ereignis_merken('Oberflaeche', $sg_scfg['gesperrt'] ? 'gesperrt' : 'entsperrt', '');
+        $sg_meldungen[] = $sg_scfg['gesperrt'] ? sg_t('EINST.M_GESPERRT') : sg_t('EINST.M_ENTSPERRT');
+    } else {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
+    }
+    $sg_tab = 'tab-settings';
+}
+
+/* ================= Ereignisprotokoll leeren ================= */
+if ($sg_post && isset($_POST['clearaudit'])) {
+    sg_write_atomic(sg_datadir() . '/ereignisse.json', json_encode(array()), 0600);
+    $sg_meldungen[] = sg_t('LOG.M_AUDIT_LEER');
+    $sg_tab = 'tab-log';
 }
 
 /* ================= Test-Aktionen ================= */
@@ -157,10 +178,21 @@ if ($sg_post && isset($_POST['speichern'])) {
         if (strlen($sg_pin) < 4) {
             $sg_fehler[] = sg_t('EINST.FEHLER_PIN_KURZ');
         } else {
-            $sg_cfg['pin'] = $sg_pin;
+            /* Die PIN wird als Hash abgelegt, nicht im Klartext.
+             * Sie steht sonst lesbar in einer Datei, die auch die Zweitschrift
+             * mitfuehrt - und ein Klartext-Geheimnis ist eines, das man
+             * versehentlich weitergibt. */
+            $sg_cfg['pin_hash'] = password_hash($sg_pin, PASSWORD_DEFAULT);
+            $sg_cfg['pin'] = '';
         }
     }
-    if (!empty($_POST['pin_loeschen'])) { $sg_cfg['pin'] = ''; }
+    if (!empty($_POST['pin_loeschen'])) { $sg_cfg['pin'] = ''; $sg_cfg['pin_hash'] = ''; }
+    // Altbestand: eine noch im Klartext gespeicherte PIN beim ersten
+    // Speichern still in einen Hash umschreiben.
+    if ((string) $sg_cfg['pin'] !== '' && (string) $sg_cfg['pin_hash'] === '') {
+        $sg_cfg['pin_hash'] = password_hash((string) $sg_cfg['pin'], PASSWORD_DEFAULT);
+        $sg_cfg['pin'] = '';
+    }
 
     $sg_br = (int) (isset($_POST['bremse']) ? $_POST['bremse'] : 10);
     if ($sg_br < 1 || $sg_br > 60) {
@@ -176,10 +208,60 @@ if ($sg_post && isset($_POST['speichern'])) {
 
     $sg_cfg['stille'] = isset($_POST['stille']) ? 1 : 0;
     $sg_cfg['zustand_ein'] = isset($_POST['zustand_ein']) ? 1 : 0;
+    $sg_cfg['audit'] = isset($_POST['audit']) ? 1 : 0;
+    $sg_cfg['herzschlag'] = isset($_POST['herzschlag']) ? 1 : 0;
 
-    if (!$sg_fehler) {
-        if (sg_config_write($sg_cfg)) { $sg_meldungen[] = sg_t('EINST.GESPEICHERT'); sg_log('Einstellungen gespeichert'); }
-        else { $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config'])); }
+    // PIN-Sperre
+    $sg_pv = (int) (isset($_POST['pin_versuche']) ? $_POST['pin_versuche'] : 3);
+    if ($sg_pv < 1 || $sg_pv > 10) {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_PIN_VERSUCHE'), 1, 10);
+    } else { $sg_cfg['pin_versuche'] = $sg_pv; }
+    $sg_ps = (int) (isset($_POST['pin_sperre']) ? $_POST['pin_sperre'] : 15);
+    if ($sg_ps < 1 || $sg_ps > 1440) {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_PIN_SPERRE'), 1, 1440);
+    } else { $sg_cfg['pin_sperre'] = $sg_ps; }
+
+    // Gruppen-Kennung: signal-cli gibt sie als Base64 aus.
+    $sg_gr = trim((string) (isset($_POST['gruppe']) ? $_POST['gruppe'] : ''));
+    if ($sg_gr !== '' && !preg_match('#^[A-Za-z0-9+/=_\-]{10,}$#', $sg_gr)) {
+        $sg_fehler[] = sg_t('EINST.FEHLER_GRUPPE');
+    } else { $sg_cfg['gruppe'] = $sg_gr; }
+
+    // Nachtruhe: entweder beide Zeiten oder keine.
+    $sg_nv = trim((string) (isset($_POST['nacht_von']) ? $_POST['nacht_von'] : ''));
+    $sg_nb = trim((string) (isset($_POST['nacht_bis']) ? $_POST['nacht_bis'] : ''));
+    $sg_zeitform = '/^([01][0-9]|2[0-3]):[0-5][0-9]$/';
+    if ($sg_nv === '' && $sg_nb === '') {
+        $sg_cfg['nacht_von'] = ''; $sg_cfg['nacht_bis'] = '';
+    } elseif (preg_match($sg_zeitform, $sg_nv) && preg_match($sg_zeitform, $sg_nb) && $sg_nv !== $sg_nb) {
+        $sg_cfg['nacht_von'] = $sg_nv; $sg_cfg['nacht_bis'] = $sg_nb;
+    } else {
+        $sg_fehler[] = sg_t('EINST.FEHLER_NACHT');
+    }
+
+    $sg_qt = (int) (isset($_POST['quittung_takt']) ? $_POST['quittung_takt'] : 5);
+    if ($sg_qt < 1 || $sg_qt > 120) {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_QUITTUNG_TAKT'), 1, 120);
+    } else { $sg_cfg['quittung_takt'] = $sg_qt; }
+    $sg_qm = (int) (isset($_POST['quittung_max']) ? $_POST['quittung_max'] : 3);
+    if ($sg_qm < 0 || $sg_qm > 20) {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_QUITTUNG_MAX'), 0, 20);
+    } else { $sg_cfg['quittung_max'] = $sg_qm; }
+
+    /* GESPEICHERT WIRD AUCH DANN, WENN EINZELNE FELDER BEANSTANDET SIND.
+     *
+     * Bis 0.9.11 stand hier "if (!$sg_fehler)". Eine halb ausgefuellte Zeile
+     * in der Weissliste verhinderte damit das Speichern ALLER Felder - der
+     * Benutzer aenderte die Bremse, bekam eine Meldung ueber eine Rufnummer
+     * und wunderte sich, warum die Bremse alt blieb. Genau dieser Fehler
+     * steht in REGELN_1 als eigener Punkt: melden ist richtig, blockieren
+     * nicht. Die beanstandeten Felder behalten ihren alten Wert, alle
+     * uebrigen werden uebernommen. */
+    if (sg_config_write($sg_cfg)) {
+        $sg_meldungen[] = $sg_fehler ? sg_t('EINST.GESPEICHERT_TEIL') : sg_t('EINST.GESPEICHERT');
+        sg_log('Einstellungen gespeichert' . ($sg_fehler ? ' (mit Beanstandungen)' : ''));
+    } else {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
     }
     $sg_tab = 'tab-settings';
 }
@@ -222,14 +304,39 @@ if ($sg_post && isset($_POST['befehle_speichern'])) {
         $sg_wort = sg_klein(trim(preg_replace('/\s+/', ' ',
             preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wort')))));
         $sg_stufe = (string) $sg_g('b_stufe', 'sofort');
+        $sg_wart = (string) $sg_g('b_wert_art', 'fest');
         $sg_b = array(
             'aktiv' => (int) $sg_g('b_aktiv', 0) ? 1 : 0,
             'wort' => $sg_wort,
             'thema' => preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $sg_g('b_thema')),
             'wert' => trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wert', '1'))),
+            'wert_art' => in_array($sg_wart, array('fest', 'zahl'), true) ? $sg_wart : 'fest',
+            'min' => (int) $sg_g('b_min', 0),
+            'max' => (int) $sg_g('b_max', 100),
             'stufe' => in_array($sg_stufe, array('sofort', 'rueckfrage', 'pin'), true) ? $sg_stufe : 'sofort',
+            'absender' => trim((string) $sg_g('b_absender')),
+            'zweit' => trim((string) $sg_g('b_zweit')),
             'antwort' => trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_antwort'))),
         );
+        // Rufnummern in den beiden neuen Feldern werden GEPRUEFT, nicht
+        // zurechtgebogen - eine stillschweigend verstuemmelte Nummer waere
+        // eine Berechtigung, die niemand mehr nachvollziehen kann.
+        if ($sg_b['absender'] !== '') {
+            $sg_liste2 = array();
+            foreach (preg_split('/[\s,;]+/', $sg_b['absender']) as $sg_nr) {
+                if ($sg_nr === '') { continue; }
+                if (preg_match('/^\+[0-9]{6,20}$/', $sg_nr)) { $sg_liste2[] = $sg_nr; }
+                else { $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_ABSENDER'), sg_e($sg_nr), $sg_i + 1); }
+            }
+            $sg_b['absender'] = implode(',', $sg_liste2);
+        }
+        if ($sg_b['zweit'] !== '' && !preg_match('/^\+[0-9]{6,20}$/', $sg_b['zweit'])) {
+            $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_ZWEIT'), sg_e($sg_b['zweit']), $sg_i + 1);
+            $sg_b['zweit'] = '';
+        }
+        if ($sg_b['aktiv'] && $sg_b['wert_art'] === 'zahl' && $sg_b['max'] <= $sg_b['min']) {
+            $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_BEREICH'), $sg_i + 1);
+        }
         if ($sg_b['aktiv'] && $sg_b['wort'] !== '') {
             if (in_array($sg_b['wort'], $sg_reserviert, true)) {
                 $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_RESERVIERT'), sg_e($sg_b['wort']), $sg_i + 1);
@@ -241,16 +348,20 @@ if ($sg_post && isset($_POST['befehle_speichern'])) {
             if ($sg_b['thema'] === '') {
                 $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_THEMA'), $sg_i + 1);
             }
-            if ($sg_b['stufe'] === 'pin' && (string) $sg_cfg['pin'] === '') {
+            if ($sg_b['stufe'] === 'pin' && !sg_pin_gesetzt($sg_cfg)) {
                 $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_KEINE_PIN'), sg_e($sg_b['wort']));
             }
         }
         $sg_neu[$sg_i] = $sg_b;
     }
-    if (!$sg_fehler) {
-        $sg_cfg['befehle'] = $sg_neu;
-        if (sg_config_write($sg_cfg)) { $sg_meldungen[] = sg_t('BEF.GESPEICHERT'); sg_log('Befehlstabelle gespeichert'); }
-        else { $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config'])); }
+    /* Auch hier gilt: melden, nicht blockieren. Bis 0.9.11 verwarf ein
+     * doppeltes Wort in Zeile 17 die Bearbeitung aller zwanzig Zeilen. */
+    $sg_cfg['befehle'] = $sg_neu;
+    if (sg_config_write($sg_cfg)) {
+        $sg_meldungen[] = $sg_fehler ? sg_t('BEF.GESPEICHERT_TEIL') : sg_t('BEF.GESPEICHERT');
+        sg_log('Befehlstabelle gespeichert' . ($sg_fehler ? ' (mit Beanstandungen)' : ''));
+    } else {
+        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
     }
     $sg_tab = 'tab-befehle';
 }
@@ -384,11 +495,27 @@ $sg_reiter = array(
     'tab-log'      => sg_t('REITER.LOG'),
 );
 ?>
+<?php
+/* Die Reiter stehen AUSGESCHRIEBEN da, nicht in einer Schleife.
+ *
+ * Das ist Absicht und kostet ein paar Zeilen: hausstandard_pruefen.py sucht
+ * die Leiste ueber data-ziel="tab-..." im Quelltext. Eine Schleife erzeugt
+ * dasselbe HTML, aber das Werkzeug findet nichts mehr und meldet die Reiter
+ * als "trifft nicht zu" - eine Pruefung, die nichts prueft. Genau dieser
+ * Fehler steht in REGELN_1 zweimal in der Liste eigener Fehler; die
+ * Aufloesung dort lautet: ausschreiben UND die Uebereinstimmung im Reiter
+ * Test pruefen lassen. Beides ist jetzt so.
+ *
+ * Gemessen am 16.08.2026: mit Schleife meldet das Werkzeug "-", mit
+ * ausgeschriebener Leiste "TAB". */
+?>
 <div class="sm-tabs">
-<?php foreach ($sg_reiter as $sg_id => $sg_bez) { ?>
-	<a class="sm-tab<?= $sg_tab === $sg_id ? ' sm-active' : '' ?>" data-ziel="<?= sg_e($sg_id) ?>"
-	   href="index.php?form=<?= sg_e(substr($sg_id, 4)) ?>"><?= sg_e($sg_bez) ?></a>
-<?php } ?>
+	<a class="sm-tab<?= $sg_tab === 'tab-settings' ? ' sm-active' : '' ?>" data-ziel="tab-settings" href="index.php?form=settings"><?= sg_e($sg_reiter['tab-settings']) ?></a>
+	<a class="sm-tab<?= $sg_tab === 'tab-befehle' ? ' sm-active' : '' ?>" data-ziel="tab-befehle" href="index.php?form=befehle"><?= sg_e($sg_reiter['tab-befehle']) ?></a>
+	<a class="sm-tab<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" data-ziel="tab-mqtt" href="index.php?form=mqtt"><?= sg_e($sg_reiter['tab-mqtt']) ?></a>
+	<a class="sm-tab<?= $sg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" data-ziel="tab-loxone" href="index.php?form=loxone"><?= sg_e($sg_reiter['tab-loxone']) ?></a>
+	<a class="sm-tab<?= $sg_tab === 'tab-test' ? ' sm-active' : '' ?>" data-ziel="tab-test" href="index.php?form=test"><?= sg_e($sg_reiter['tab-test']) ?></a>
+	<a class="sm-tab<?= $sg_tab === 'tab-log' ? ' sm-active' : '' ?>" data-ziel="tab-log" href="index.php?form=log"><?= sg_e($sg_reiter['tab-log']) ?></a>
 </div>
 
 <!-- ================= Reiter: Einstellungen ================= -->
@@ -401,6 +528,19 @@ $sg_reiter = array(
     <b class="<?= (string) $sg_cfg['konto'] !== '' ? 'sm-an' : 'sm-aus' ?>" style="font-size:1.0em;"><?= sg_e((string) $sg_cfg['konto'] !== '' ? sg_maske($sg_cfg['konto']) : sg_t('ALLG.KEINS')) ?></b></div>
   <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.ERLAUBTE')) ?>
     <b class="<?= count($sg_cfg['erlaubt']) ? 'sm-an' : 'sm-aus' ?>"><?= count($sg_cfg['erlaubt']) ?></b></div>
+  <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.SPERRE')) ?>
+    <b class="<?= empty($sg_cfg['gesperrt']) ? 'sm-an' : 'sm-aus' ?>"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('ALLG.FREI') : sg_t('ALLG.GESPERRT')) ?></b></div>
+</div>
+
+<h2><?= sg_e(sg_t('EINST.H_SPERRE')) ?></h2>
+<div class="sm-warnung"><?= sg_t('EINST.SPERRE_TEXT') ?></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+<form action="index.php" method="post">
+  <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+  <input data-role="none" type="hidden" name="sperre" value="<?= empty($sg_cfg['gesperrt']) ? 'ein' : 'aus' ?>">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('EINST.K_SPERREN') : sg_t('EINST.K_ENTSPERREN')) ?></button>
+</form>
 </div>
 
 <h2><?= sg_e(sg_t('EINST.H_VERKNUEPFUNG')) ?></h2>
@@ -476,6 +616,18 @@ $sg_reiter = array(
     <div class="sm-hilfe"><?= sg_t('EINST.H_BREMSE') ?></div>
   </div>
 </div>
+<div class="sm-row">
+  <div class="sm-feld">
+    <label for="pin_versuche"><?= sg_e(sg_t('EINST.L_PIN_VERSUCHE')) ?></label>
+    <input data-role="none" type="number" id="pin_versuche" name="pin_versuche" value="<?= (int) $sg_cfg['pin_versuche'] ?>" min="1" max="10">
+    <div class="sm-hilfe"><?= sg_t('EINST.H_PIN_VERSUCHE') ?></div>
+  </div>
+  <div class="sm-feld">
+    <label for="pin_sperre"><?= sg_e(sg_t('EINST.L_PIN_SPERRE')) ?></label>
+    <input data-role="none" type="number" id="pin_sperre" name="pin_sperre" value="<?= (int) $sg_cfg['pin_sperre'] ?>" min="1" max="1440">
+    <div class="sm-hilfe"><?= sg_t('EINST.H_PIN_SPERRE') ?></div>
+  </div>
+</div>
 
 <h2><?= sg_e(sg_t('EINST.H_WEITERES')) ?></h2>
 <div class="sm-feld">
@@ -485,6 +637,49 @@ $sg_reiter = array(
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_ZUSTAND') ?></div>
 </div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="audit" value="1" <?= !empty($sg_cfg['audit']) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_AUDIT')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_AUDIT') ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="herzschlag" value="1" <?= !empty($sg_cfg['herzschlag']) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_HERZSCHLAG')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_HERZSCHLAG') ?></div>
+</div>
+
+<h2><?= sg_e(sg_t('EINST.H_MELDEWEGE')) ?></h2>
+<div class="sm-feld">
+  <label for="gruppe"><?= sg_e(sg_t('EINST.L_GRUPPE')) ?></label>
+  <input data-role="none" type="text" id="gruppe" name="gruppe" value="<?= sg_e($sg_cfg['gruppe']) ?>">
+  <div class="sm-hilfe"><?= sg_t('EINST.H_GRUPPE') ?></div>
+</div>
+<div class="sm-row">
+  <div class="sm-feld">
+    <label for="nacht_von"><?= sg_e(sg_t('EINST.L_NACHT_VON')) ?></label>
+    <input data-role="none" type="text" id="nacht_von" name="nacht_von" value="<?= sg_e($sg_cfg['nacht_von']) ?>" placeholder="22:00">
+  </div>
+  <div class="sm-feld">
+    <label for="nacht_bis"><?= sg_e(sg_t('EINST.L_NACHT_BIS')) ?></label>
+    <input data-role="none" type="text" id="nacht_bis" name="nacht_bis" value="<?= sg_e($sg_cfg['nacht_bis']) ?>" placeholder="07:00">
+  </div>
+</div>
+<div class="sm-hilfe"><?= sg_t('EINST.H_NACHT') ?></div>
+<div class="sm-row">
+  <div class="sm-feld">
+    <label for="quittung_takt"><?= sg_e(sg_t('EINST.L_QUITTUNG_TAKT')) ?></label>
+    <input data-role="none" type="number" id="quittung_takt" name="quittung_takt" value="<?= (int) $sg_cfg['quittung_takt'] ?>" min="1" max="120">
+  </div>
+  <div class="sm-feld">
+    <label for="quittung_max"><?= sg_e(sg_t('EINST.L_QUITTUNG_MAX')) ?></label>
+    <input data-role="none" type="number" id="quittung_max" name="quittung_max" value="<?= (int) $sg_cfg['quittung_max'] ?>" min="0" max="20">
+  </div>
+</div>
+<div class="sm-hilfe"><?= sg_t('EINST.H_QUITTUNG') ?></div>
 <?php /* MQTT stand hier bis zu dieser Fassung. Es wohnt jetzt
          vollstaendig im Reiter MQTT - eine Sache, eine Stelle. */ ?>
 
@@ -503,13 +698,16 @@ $sg_reiter = array(
 <form action="index.php" method="post" autocomplete="off">
 <input data-role="none" type="hidden" name="befehle_speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-befehle">
+<div style="overflow-x:auto;">
 <table class="sm-tbl">
 <tr>
-  <th style="width:34px;"><?= sg_e(sg_t('BEF.T_AN')) ?></th>
-  <th style="width:19%;"><?= sg_e(sg_t('BEF.T_WORT')) ?></th>
-  <th style="width:22%;"><?= sg_e(sg_t('BEF.T_THEMA')) ?></th>
-  <th style="width:9%;"><?= sg_e(sg_t('BEF.T_WERT')) ?></th>
-  <th style="width:16%;"><?= sg_e(sg_t('BEF.T_STUFE')) ?></th>
+  <th style="width:30px;"><?= sg_e(sg_t('BEF.T_AN')) ?></th>
+  <th style="width:15%;"><?= sg_e(sg_t('BEF.T_WORT')) ?></th>
+  <th style="width:17%;"><?= sg_e(sg_t('BEF.T_THEMA')) ?></th>
+  <th style="width:15%;"><?= sg_e(sg_t('BEF.T_WERT')) ?></th>
+  <th style="width:12%;"><?= sg_e(sg_t('BEF.T_STUFE')) ?></th>
+  <th style="width:13%;"><?= sg_e(sg_t('BEF.T_WER')) ?></th>
+  <th style="width:13%;"><?= sg_e(sg_t('BEF.T_ZWEIT')) ?></th>
   <th><?= sg_e(sg_t('BEF.T_ANTWORT')) ?></th>
 </tr>
 <?php for ($sg_i = 0; $sg_i < SG_BEFEHLE; $sg_i++) { $sg_b = $sg_cfg['befehle'][$sg_i]; ?>
@@ -517,16 +715,31 @@ $sg_reiter = array(
   <td style="text-align:center;"><input data-role="none" type="checkbox" name="b_aktiv[<?= $sg_i ?>]" value="1" <?= !empty($sg_b['aktiv']) ? 'checked' : '' ?>></td>
   <td><input data-role="none" type="text" name="b_wort[<?= $sg_i ?>]" value="<?= sg_e($sg_b['wort']) ?>" placeholder="<?= $sg_i === 0 ? 'licht an' : '' ?>"></td>
   <td><input data-role="none" type="text" name="b_thema[<?= $sg_i ?>]" value="<?= sg_e($sg_b['thema']) ?>" placeholder="<?= $sg_i === 0 ? 'licht/wohnen' : '' ?>"></td>
-  <td><input data-role="none" type="text" name="b_wert[<?= $sg_i ?>]" value="<?= sg_e($sg_b['wert']) ?>"></td>
+  <td>
+    <select data-role="none" name="b_wert_art[<?= $sg_i ?>]">
+<?php foreach (array('fest', 'zahl') as $sg_wa) { ?>
+      <option value="<?= $sg_wa ?>"<?= $sg_b['wert_art'] === $sg_wa ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.WERT_' . strtoupper($sg_wa))) ?></option>
+<?php } ?>
+    </select>
+    <input data-role="none" type="text" name="b_wert[<?= $sg_i ?>]" value="<?= sg_e($sg_b['wert']) ?>" placeholder="1">
+    <span class="sm-hilfe" style="display:block;">
+      <input data-role="none" type="number" name="b_min[<?= $sg_i ?>]" value="<?= (int) $sg_b['min'] ?>" style="width:45%;">
+      <input data-role="none" type="number" name="b_max[<?= $sg_i ?>]" value="<?= (int) $sg_b['max'] ?>" style="width:45%;">
+    </span>
+  </td>
   <td><select data-role="none" name="b_stufe[<?= $sg_i ?>]">
 <?php foreach (array('sofort', 'rueckfrage', 'pin') as $sg_s) { ?>
     <option value="<?= $sg_s ?>"<?= $sg_b['stufe'] === $sg_s ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.STUFE_' . strtoupper($sg_s))) ?></option>
 <?php } ?>
   </select></td>
+  <td><input data-role="none" type="text" name="b_absender[<?= $sg_i ?>]" value="<?= sg_e($sg_b['absender']) ?>" placeholder="<?= sg_e(sg_t('BEF.P_ALLE')) ?>"></td>
+  <td><input data-role="none" type="text" name="b_zweit[<?= $sg_i ?>]" value="<?= sg_e($sg_b['zweit']) ?>" placeholder="+49..."></td>
   <td><input data-role="none" type="text" name="b_antwort[<?= $sg_i ?>]" value="<?= sg_e($sg_b['antwort']) ?>" placeholder="<?= sg_e(sg_t('BEF.P_ANTWORT')) ?>"></td>
 </tr>
 <?php } ?>
 </table>
+</div>
+<div class="sm-hilfe"><?= sg_t('BEF.SPALTEN_TEXT') ?></div>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-aktion"></i><?= sg_t('LEGENDE.AKTION') ?></span>
 </div>
@@ -542,7 +755,7 @@ $sg_reiter = array(
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
 
-<h2>MQTT</h2>
+<h2><?= sg_e(sg_t('MQTT.H_EINSTELLUNG')) ?></h2>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="save_mqtt" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
@@ -596,6 +809,11 @@ $sg_reiter = array(
     <td><span class="sm-mono"><?= sg_e($sg_b['wort']) ?></span></td></tr>
 <?php } ?>
 <?php if ($sg_leer) { ?><tr><td colspan="3"><?= sg_t('MQTT.KEINE_BEFEHLE') ?></td></tr><?php } ?>
+<?php if (!empty($sg_cfg['herzschlag'])) { ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_cfg['mqtt_topic']) ?>/online</span></td>
+    <td><span class="sm-mono"><?= sg_e(sg_t('MQTT.W_ZEITSTEMPEL')) ?></span></td>
+    <td><?= sg_t('MQTT.T_ONLINE') ?></td></tr>
+<?php } ?>
 </table>
 </div>
 
@@ -604,16 +822,62 @@ $sg_reiter = array(
 <h2><?= sg_e(sg_t('LOX.H_RICHTUNGEN')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.RICHTUNGEN_TEXT') ?></div>
 
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.S0_T')) ?></b><br>
+<?= sg_t('LOX.S0') ?>
+</div>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SABO_T')) ?></b><br>
+<?= sg_t('LOX.SABO') ?>
+<div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/#</div>
+<?= sg_t('MQTT.ABO_WARNUNG') ?>
+</div>
+
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S1_T')) ?></b><br>
 <?= sg_t('LOX.S1') ?>
 <div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/&lt;Thema aus der Befehlstabelle&gt;</div>
 <?= sg_t('LOX.S1_IMPULS') ?>
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('MQTT.T_WERT')) ?></th><th><?= sg_e(sg_t('MQTT.T_BEFEHL')) ?></th></tr>
+<?php $sg_leer2 = true; foreach ($sg_cfg['befehle'] as $sg_b2) {
+    if (empty($sg_b2['aktiv']) || $sg_b2['wort'] === '' || $sg_b2['thema'] === '') { continue; }
+    $sg_leer2 = false; ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_cfg['mqtt_topic']) ?>/<?= sg_e($sg_b2['thema']) ?></span></td>
+    <td><span class="sm-mono"><?= sg_e($sg_b2['wert_art'] === 'zahl'
+        ? (int) $sg_b2['min'] . '..' . (int) $sg_b2['max'] : $sg_b2['wert']) ?></span></td>
+    <td><span class="sm-mono"><?= sg_e($sg_b2['wort']) ?></span></td></tr>
+<?php } ?>
+<?php if ($sg_leer2) { ?><tr><td colspan="3"><?= sg_t('MQTT.KEINE_BEFEHLE') ?></td></tr><?php } ?>
+</table>
+</div>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SVI_T')) ?></b><br>
+<?= sg_t('LOX.SVI') ?>
+<table class="sm-tbl">
+<tr><th style="width:170px;"><?= sg_e(sg_t('LOX.T_TITEL')) ?></th><th style="width:70px;"><?= sg_e(sg_t('LOX.T_ART')) ?></th><th style="width:90px;"><?= sg_e(sg_t('LOX.T_BEREICH')) ?></th><th><?= sg_e(sg_t('LOX.T_BEDEUTUNG')) ?></th></tr>
+<?php foreach (sg_felder() as $sg_fn => $sg_fd) {
+    list($sg_analog, $sg_min, $sg_max, $sg_fs) = $sg_fd; ?>
+<tr><td><span class="sm-mono">SIGNAL_<?= sg_e($sg_fn) ?></span></td>
+    <td><?= sg_e($sg_analog ? sg_t('LOX.ANALOG') : sg_t('LOX.DIGITAL')) ?></td>
+    <td><span class="sm-mono"><?= (int) $sg_min ?>..<?= (int) $sg_max ?></span></td>
+    <td><?= sg_t($sg_fs) ?></td></tr>
+<?php } ?>
+</table>
+<?= sg_t('LOX.SVI_ADRESSE') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('status')) ?></div>
+<?= sg_t('LOX.SVI_HOST') ?>
 </div>
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S2_T')) ?></b><br>
 <?= sg_t('LOX.S2') ?>
 <div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Alarm%20ausgeloest</div>
 <?= sg_t('LOX.S2_HINWEIS') ?>
+<br><br><?= sg_t('LOX.S2_DRINGEND') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;dringend=1&amp;text=Alarm%20ausgeloest</div>
+<?= sg_t('LOX.S2_BILD') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Bewegung&amp;bild=<?= sg_e(sg_datadir()) ?>/schnappschuss.jpg</div>
+<br><?= sg_t('LOX.S2_SPERRE') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('sperren')) ?>
+<?= sg_e(sg_endpunkt('entsperren')) ?></div>
 </div>
 
 <?php if (!empty($sg_cfg['zustand_ein'])) { ?>
@@ -624,6 +888,12 @@ $sg_reiter = array(
 </div>
 <?php } ?>
 
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SAUS_T')) ?></b><br>
+<?= sg_t('LOX.SAUS') ?>
+<div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/online</div>
+<?= sg_t('LOX.SAUS_HINWEIS') ?>
+</div>
+
 <h2><?= sg_e(sg_t('LOX.H_VORLAGE')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.VORLAGE_TEXT') ?></div>
 <div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
@@ -632,6 +902,11 @@ $sg_reiter = array(
   <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
   <input data-role="none" type="hidden" name="vorlage" value="1">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
+</form>
+<form action="index.php" method="post">
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="vorlage_out" value="1">
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
 </form>
 </div>
 
@@ -643,9 +918,17 @@ $sg_reiter = array(
 <tr><td>2</td><td><?= sg_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono">Alarmanlage</span></td><td><?= sg_t('BAUSTEIN.B2_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B2_VERB') ?></td></tr>
 <tr><td>3</td><td><?= sg_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono">Signal Meldung</span></td><td><?= sg_t('BAUSTEIN.B3_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B3_VERB') ?></td></tr>
 <tr><td>4</td><td><?= sg_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono">Zustand melden</span></td><td><?= sg_t('BAUSTEIN.B4_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B4_VERB') ?></td></tr>
-<tr><td>5</td><td><?= sg_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono">Bot stumm</span></td><td><?= sg_t('BAUSTEIN.B5_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B5_VERB') ?></td></tr>
+<tr><td>5</td><td><?= sg_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono">Bot antwortet nicht</span></td><td><?= sg_t('BAUSTEIN.B5_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B5_VERB') ?></td></tr>
+<tr><td>6</td><td><?= sg_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono">Signal Bot sperren</span></td><td><?= sg_t('BAUSTEIN.B6_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B6_VERB') ?></td></tr>
+<tr><td>7</td><td><?= sg_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono">Meldung unquittiert</span></td><td><?= sg_t('BAUSTEIN.B7_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B7_VERB') ?></td></tr>
 </table>
 <?= sg_t('LOX.S4_ERLAEUTERUNG') ?>
+</div>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SGEGEN_T')) ?></b><br>
+<?= sg_t('LOX.SGEGEN') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('status')) ?>&amp;selftest=1</div>
+<?= sg_t('LOX.SGEGEN_2') ?>
 </div>
 </div>
 
@@ -671,6 +954,7 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 
 <h3><?= sg_e(sg_t('TEST.H_TROCKEN')) ?></h3>
 <p class="sm-hilfe"><?= sg_t('TEST.TROCKEN_TEXT') ?></p>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <form action="index.php" method="post">
   <input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="trocken">
@@ -687,16 +971,22 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span>
 </div>
 <div class="sm-knopfreihe">
-<a class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;aktion=status" target="_blank"><?= sg_e(sg_t('TEST.K_STATUS')) ?></a>
+<a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;aktion=status" target="_blank"><?= sg_e(sg_t('TEST.K_STATUS')) ?></a>
+<a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;selftest=1" target="_blank"><?= sg_e(sg_t('TEST.K_SELFTEST')) ?></a>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="start">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('TEST.K_START')) ?></button></form>
 </div>
 <div class="sm-knopfreihe">
-<a class="sm-btn sm-b-technik" href="<?= sg_e($sg_cfg['rpc_url']) ?>/api/v1/check" target="_blank"><?= sg_e(sg_t('TEST.K_CHECK')) ?></a>
+<a data-role="none" class="sm-btn sm-b-technik" href="<?= sg_e($sg_cfg['rpc_url']) ?>/api/v1/check" target="_blank"><?= sg_e(sg_t('TEST.K_CHECK')) ?></a>
+</div>
+
+<h3><?= sg_e(sg_t('TEST.H_SCHALTEN')) ?></h3>
+<div class="sm-warnung"><?= sg_t('TEST.SCHALTEN_TEXT') ?></div>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span>
 </div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
@@ -716,6 +1006,31 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 
 <!-- ================= Reiter: Logdateien ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
+<h2><?= sg_e(sg_t('LOG.H_EREIGNIS')) ?></h2>
+<div class="sm-hilfe"><?= sg_t('LOG.EREIGNIS_TEXT') ?></div>
+<?php $sg_ev = array_reverse(sg_ereignisse()); ?>
+<?php if (!$sg_ev) { ?>
+<div class="sm-hinweis"><?= sg_t('LOG.EREIGNIS_LEER') ?></div>
+<?php } else { ?>
+<table class="sm-tbl">
+<tr><th style="width:150px;"><?= sg_e(sg_t('LOG.T_ZEIT')) ?></th><th style="width:130px;"><?= sg_e(sg_t('LOG.T_WER')) ?></th><th style="width:130px;"><?= sg_e(sg_t('LOG.T_WAS')) ?></th><th><?= sg_e(sg_t('LOG.T_DETAIL')) ?></th></tr>
+<?php foreach (array_slice($sg_ev, 0, 60) as $sg_x) { ?>
+<tr><td><?= sg_e(date('d.m.Y H:i:s', (int) $sg_x['ts'])) ?></td>
+    <td><?= sg_e($sg_x['wer']) ?></td>
+    <td><?= sg_e($sg_x['was']) ?></td>
+    <td><?= sg_e($sg_x['detail']) ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+<form action="index.php" method="post">
+  <input data-role="none" type="hidden" name="activetab" value="tab-log">
+  <input data-role="none" type="hidden" name="clearaudit" value="1">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('LOG.K_AUDIT_LEEREN')) ?></button>
+</form>
+</div>
+<?php } ?>
+
 <h2><?= sg_e(sg_t('LOG.H_TITEL')) ?></h2>
 <div class="sm-hilfe"><?= sg_t('LOG.MASKE_HINWEIS') ?></div>
 <?php
@@ -736,6 +1051,17 @@ $sg_zeilen = is_file($sg_lf) ? array_slice(file($sg_lf, FILE_IGNORE_NEW_LINES) ?
 </form>
 </div>
 <div class="sm-hilfe"><?= sprintf(sg_t('LOG.CLI_HINWEIS'), '<span class="sm-mono">journalctl -u signal-cli-loxberry -n 100</span>') ?></div>
+
+<?php
+/* Die Logdateiliste des Kerns - Pflichtinhalt dieses Reiters laut
+   Hausstandard. Sie zeigt die Dateien mit Datum und Groesse und traegt die
+   Logstufen-Einstellung des Plugins; die Anzeige darueber bleibt daneben
+   stehen, weil sie ohne Umweg das zeigt, was gerade passiert. */
+if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
+    echo '<h2>' . sg_e(sg_t('LOG.H_DATEIEN')) . '</h2>';
+    echo LBWeb::loglist_html();
+}
+?>
 </div>
 
 </div><!-- /sm-wrap -->

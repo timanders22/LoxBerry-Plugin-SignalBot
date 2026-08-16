@@ -37,6 +37,8 @@ date_default_timezone_set('Europe/Berlin');
 define('SG_BEFEHLE', 20);
 /** So lange gilt eine Rueckfrage oder eine PIN-Anforderung (Sekunden). */
 define('SG_WARTEZEIT', 90);
+/** So viele Zeilen haelt das Ereignisprotokoll. */
+define('SG_EREIGNISSE', 300);
 
 /* ==================================================================
  * Pfade und Protokoll
@@ -273,8 +275,13 @@ function sg_befehl_vorgabe()
         'aktiv' => 0,
         'wort' => '',        // was der Nutzer schreibt
         'thema' => '',       // MQTT-Thema, das gepulst wird
-        'wert' => '1',       // Nutzlast
+        'wert' => '1',       // Nutzlast bei fester Nutzlast
+        'wert_art' => 'fest',// fest | zahl - bei 'zahl' schickt der Absender ihn mit
+        'min' => 0,          // nur bei 'zahl': erlaubter Bereich
+        'max' => 100,
         'stufe' => 'sofort', // sofort | rueckfrage | pin
+        'absender' => '',    // leer = alle Erlaubten, sonst Liste von Rufnummern
+        'zweit' => '',       // Vier-Augen: diese Nummer muss zusaetzlich freigeben
         'antwort' => '',     // Bestaetigungstext, leer = Vorgabetext
     );
 }
@@ -297,6 +304,15 @@ function sg_vorgaben()
         'befehle'        => array(),
         // Zustaende, die Loxone meldet
         'zustand_ein'    => 1,
+        // Betrieb
+        'gesperrt'       => 0,         // Kill-Schalter: nimmt keine Befehle mehr an
+        'audit'          => 1,         // Ereignisprotokoll fuehren
+        'herzschlag'     => 1,         // Lebenszeichen auf MQTT
+        'gruppe'         => '',        // Gruppen-Kennung fuer Meldungen (leer = einzeln)
+        'nacht_von'      => '',        // Nachtruhe, z. B. 22:00 - leer = aus
+        'nacht_bis'      => '',        //             z. B. 07:00
+        'quittung_takt'  => 5,         // Minuten zwischen Wiederholungen (dringend)
+        'quittung_max'   => 3,         // so oft hoechstens wiederholen
         // MQTT
         'mqtt_ein'       => 1,
         'mqtt_topic'     => 'signalbot',
@@ -373,6 +389,15 @@ function sg_config()
     if ($cfg['rpc_url'] === '') { $cfg['rpc_url'] = 'http://127.0.0.1:8095'; }
     $cfg['bremse'] = max(1, min(60, (int) $cfg['bremse']));
     $cfg['pin_versuche'] = max(1, min(10, (int) $cfg['pin_versuche']));
+    $cfg['gesperrt'] = empty($cfg['gesperrt']) ? 0 : 1;
+    $cfg['audit'] = empty($cfg['audit']) ? 0 : 1;
+    $cfg['herzschlag'] = empty($cfg['herzschlag']) ? 0 : 1;
+    $cfg['gruppe'] = preg_replace('#[^A-Za-z0-9+/=_\-]#', '', (string) $cfg['gruppe']);
+    foreach (array('nacht_von', 'nacht_bis') as $sg_nz) {
+        $cfg[$sg_nz] = preg_match('/^([01][0-9]|2[0-3]):[0-5][0-9]$/', (string) $cfg[$sg_nz]) ? (string) $cfg[$sg_nz] : '';
+    }
+    $cfg['quittung_takt'] = max(1, min(120, (int) $cfg['quittung_takt']));
+    $cfg['quittung_max'] = max(0, min(20, (int) $cfg['quittung_max']));
     $cfg['pin_sperre'] = max(1, min(1440, (int) $cfg['pin_sperre']));
     $cfg['stille'] = empty($cfg['stille']) ? 0 : 1;
     $cfg['mqtt_ein'] = empty($cfg['mqtt_ein']) ? 0 : 1;
@@ -397,6 +422,16 @@ function sg_config()
         $b['thema'] = preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $b['thema']);
         $b['wert'] = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $b['wert']));
         $b['stufe'] = in_array($b['stufe'], array('sofort', 'rueckfrage', 'pin'), true) ? $b['stufe'] : 'sofort';
+        $b['wert_art'] = in_array($b['wert_art'], array('fest', 'zahl'), true) ? $b['wert_art'] : 'fest';
+        $b['min'] = (int) $b['min'];
+        $b['max'] = (int) $b['max'];
+        if ($b['max'] < $b['min']) { $b['max'] = $b['min']; }
+        $b['absender'] = implode(',', array_filter(array_map(function ($n) {
+            $n = preg_replace('/[^0-9+]/', '', (string) $n);
+            return preg_match('/^\+[0-9]{6,20}$/', $n) ? $n : '';
+        }, explode(',', (string) $b['absender']))));
+        $sg_z = preg_replace('/[^0-9+]/', '', (string) $b['zweit']);
+        $b['zweit'] = preg_match('/^\+[0-9]{6,20}$/', $sg_z) ? $sg_z : '';
         $b['antwort'] = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $b['antwort']));
         $cfg['befehle'][$i] = $b;
     }
@@ -595,10 +630,34 @@ function sg_konten()
 }
 
 /** Eine Nachricht senden. */
-function sg_senden($an, $text)
+/**
+ * Eine Nachricht senden - an eine Rufnummer, an die Gruppe, mit Anhang.
+ *
+ * $an = '' zusammen mit einer eingetragenen Gruppen-Kennung schickt in die
+ * Gruppe. $anhang ist ein Dateipfad auf dem LoxBerry (etwa ein Kamerabild,
+ * das Loxone gerade abgelegt hat); er wird nur mitgegeben, wenn die Datei
+ * wirklich da und lesbar ist - sonst ginge die ganze Meldung verloren, und
+ * das waere im Alarmfall der schlechteste Tausch.
+ */
+function sg_senden($an, $text, $anhang = '')
 {
     $cfg = sg_config();
-    $params = array('recipient' => array((string) $an), 'message' => (string) $text);
+    $params = array('message' => (string) $text);
+    if ((string) $an !== '') {
+        $params['recipient'] = array((string) $an);
+    } elseif ((string) $cfg['gruppe'] !== '') {
+        $params['groupId'] = (string) $cfg['gruppe'];
+    } else {
+        sg_log('Senden ohne Empfaenger und ohne Gruppe - nichts zu tun.');
+        return 0;
+    }
+    if ((string) $anhang !== '') {
+        if (is_file($anhang) && is_readable($anhang)) {
+            $params['attachments'] = array((string) $anhang);
+        } else {
+            sg_log('Anhang ' . $anhang . ' fehlt oder ist nicht lesbar - Meldung geht ohne ihn raus.');
+        }
+    }
     if ((string) $cfg['konto'] !== '') { $params['account'] = (string) $cfg['konto']; }
     $a = sg_rpc('send', $params, 25);
     if (!$a['ok']) {
@@ -846,11 +905,18 @@ function sg_zustand_setzen($name, $wert)
     return $ok;
 }
 
-function sg_zustand_text()
+function sg_zustand_text($nur = '')
 {
     $z = sg_zustaende();
     if (!$z) { return sg_t('BOT.KEINE_ZUSTAENDE'); }
     ksort($z);
+    if ($nur !== '') {
+        // Ein einzelner Zustand - "status alarm" statt der ganzen Liste.
+        foreach ($z as $name => $d) {
+            if (sg_klein($name) === sg_klein($nur)) { $z = array($name => $d); $nur = ''; break; }
+        }
+        if ($nur !== '') { return sprintf(sg_t('BOT.KEIN_ZUSTAND'), $nur); }
+    }
     $zeilen = array();
     foreach ($z as $name => $d) {
         $alter = time() - (int) $d['ts'];
@@ -970,6 +1036,196 @@ function sg_udp_senden($port, $msg)
 }
 
 /* ==================================================================
+ * Ereignisprotokoll, Kill-Schalter, Nachtruhe, Ausgangswarteschlange
+ * ================================================================== */
+
+/**
+ * Das Ereignisprotokoll: wer hat wann was ausgeloest.
+ *
+ * Getrennt vom Betriebsprotokoll, weil dieses gekuerzt wird, sobald es gross
+ * wird - und weil bei einem Baustein, der die Alarmanlage schaltet, die Frage
+ * "wer war das" auch noch nach Wochen beantwortbar sein muss. Eine Zeile je
+ * Vorgang, aelteste fallen nach SG_EREIGNISSE heraus.
+ */
+function sg_ereignis_merken($wer, $was, $detail = '')
+{
+    $cfg = sg_config();
+    if (empty($cfg['audit'])) { return false; }
+    $f = sg_datadir() . '/ereignisse.json';
+    $sperre = @fopen(sg_tmpdir() . '/ereignisse.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $liste = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
+    if (!is_array($liste)) { $liste = array(); }
+    $liste[] = array('ts' => time(), 'wer' => (string) $wer, 'was' => (string) $was,
+                     'detail' => (string) $detail);
+    if (count($liste) > SG_EREIGNISSE) { $liste = array_slice($liste, -SG_EREIGNISSE); }
+    $ok = sg_write_atomic($f, json_encode($liste), 0600);
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $ok;
+}
+
+function sg_ereignisse()
+{
+    $f = sg_datadir() . '/ereignisse.json';
+    if (!is_file($f)) { return array(); }
+    $d = json_decode((string) @file_get_contents($f), true);
+    return is_array($d) ? $d : array();
+}
+
+/** Ist gerade Nachtruhe? Leere Zeiten heissen: keine. */
+function sg_nachtruhe($cfg, $zeit = null)
+{
+    $von = (string) $cfg['nacht_von'];
+    $bis = (string) $cfg['nacht_bis'];
+    if ($von === '' || $bis === '' || $von === $bis) { return false; }
+    $jetzt = $zeit === null ? (int) date('H') * 60 + (int) date('i') : $zeit;
+    list($vh, $vm) = array_map('intval', explode(':', $von));
+    list($bh, $bm) = array_map('intval', explode(':', $bis));
+    $a = $vh * 60 + $vm;
+    $b = $bh * 60 + $bm;
+    // Ueber Mitternacht hinweg ist der Normalfall (22:00 bis 07:00).
+    return $a < $b ? ($jetzt >= $a && $jetzt < $b) : ($jetzt >= $a || $jetzt < $b);
+}
+
+/* ---- Ausgangswarteschlange ----
+ *
+ * Sie traegt zwei Dinge, die ohne sie nicht gehen:
+ *   1. Nachtruhe - eine nicht dringende Meldung wartet bis zum Morgen,
+ *      statt jemanden um drei Uhr zu wecken.
+ *   2. Dringend mit Quittung - eine Meldung wird wiederholt, bis der
+ *      Empfaenger "quittiert" schreibt oder der Zaehler abgelaufen ist.
+ * Zugestellt wird aus dem Dauerlaeufer heraus (sg_warteschlange_arbeiten).
+ */
+function sg_warteschlange()
+{
+    $f = sg_datadir() . '/ausgang.json';
+    if (!is_file($f)) { return array(); }
+    $d = json_decode((string) @file_get_contents($f), true);
+    return is_array($d) ? $d : array();
+}
+
+function sg_warteschlange_schreiben($liste)
+{
+    return sg_write_atomic(sg_datadir() . '/ausgang.json', json_encode(array_values($liste)), 0600);
+}
+
+/** Eine Meldung einreihen. $ab = fruehester Zeitpunkt, 0 = sofort. */
+function sg_warteschlange_ein($an, $text, $dringend = 0, $ab = 0)
+{
+    $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $liste = sg_warteschlange();
+    $liste[] = array(
+        'id' => sg_token(8), 'an' => (string) $an, 'text' => (string) $text,
+        'dringend' => $dringend ? 1 : 0, 'ab' => (int) $ab,
+        'versuche' => 0, 'ts' => time(),
+    );
+    if (count($liste) > 200) { $liste = array_slice($liste, -200); }
+    $ok = sg_warteschlange_schreiben($liste);
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $ok;
+}
+
+/** Offene dringende Meldungen eines Empfaengers quittieren. */
+function sg_quittieren($an)
+{
+    $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $liste = sg_warteschlange();
+    $n = 0;
+    foreach ($liste as $k => $e) {
+        if ($e['an'] === $an && !empty($e['dringend'])) { unset($liste[$k]); $n++; }
+    }
+    if ($n) { sg_warteschlange_schreiben($liste); }
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $n;
+}
+
+/**
+ * Faellige Meldungen zustellen. Wird vom Dauerlaeufer regelmaessig gerufen.
+ * Rueckgabe: Zahl der zugestellten Meldungen.
+ */
+function sg_warteschlange_arbeiten()
+{
+    $cfg = sg_config();
+    $liste = sg_warteschlange();
+    if (!$liste) { return 0; }
+    $jetzt = time();
+    $gesendet = 0;
+    $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $liste = sg_warteschlange();
+    foreach ($liste as $k => $e) {
+        if ((int) $e['ab'] > $jetzt) { continue; }
+        if (empty($e['dringend'])) {
+            // Einmal senden, dann ist sie erledigt - gleich ob es klappt.
+            sg_senden($e['an'], $e['text']);
+            unset($liste[$k]);
+            $gesendet++;
+            continue;
+        }
+        // Dringend: wiederholen, bis quittiert wird oder der Zaehler leer ist.
+        if ((int) $e['versuche'] >= (int) $cfg['quittung_max'] + 1) {
+            sg_log('Dringende Meldung an ' . sg_maske($e['an']) . ' bleibt unquittiert - aufgegeben.');
+            sg_ereignis_merken(sg_maske($e['an']), 'unquittiert', sg_kuerzen($e['text'], 60));
+            unset($liste[$k]);
+            continue;
+        }
+        $text = $e['versuche'] > 0
+            ? sg_t('BOT.WIEDERHOLUNG') . ' ' . $e['text']
+            : $e['text'];
+        sg_senden($e['an'], $text . "\n" . sg_t('BOT.BITTE_QUITTIEREN'));
+        $liste[$k]['versuche'] = (int) $e['versuche'] + 1;
+        $liste[$k]['ab'] = $jetzt + ((int) $cfg['quittung_takt'] * 60);
+        $gesendet++;
+    }
+    sg_warteschlange_schreiben($liste);
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $gesendet;
+}
+
+/**
+ * Meldung nach draussen geben - der eine Weg fuer Loxone und den Bot.
+ *
+ * Entscheidet, ob sofort gesendet oder eingereiht wird: Nachtruhe haelt eine
+ * nicht dringende Meldung zurueck, eine dringende geht immer sofort raus und
+ * wird bis zur Quittung wiederholt.
+ */
+function sg_melden($an, $text, $dringend = 0)
+{
+    $cfg = sg_config();
+    if ($dringend) {
+        sg_warteschlange_ein($an, $text, 1, 0);
+        return 'dringend';
+    }
+    if (sg_nachtruhe($cfg)) {
+        // bis zum Ende der Nachtruhe zurueckhalten
+        list($bh, $bm) = array_map('intval', explode(':', $cfg['nacht_bis']));
+        $ziel = mktime($bh, $bm, 0);
+        if ($ziel <= time()) { $ziel += 86400; }
+        sg_warteschlange_ein($an, $text, 0, $ziel);
+        return 'nachtruhe';
+    }
+    return sg_senden($an, $text) ? 'gesendet' : 'fehler';
+}
+
+/**
+ * Der naechstliegende Befehl zu einem unbekannten Wort.
+ * Ein Tippfehler soll nicht in einer Sackgasse enden.
+ */
+function sg_vorschlag($wort, $cfg)
+{
+    $bester = ''; $abstand = 99;
+    foreach ($cfg['befehle'] as $b) {
+        if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
+        $d = levenshtein($wort, $b['wort']);
+        if ($d < $abstand) { $abstand = $d; $bester = $b['wort']; }
+    }
+    // Nur vorschlagen, wenn es wirklich nah dran ist.
+    return ($bester !== '' && $abstand <= max(2, (int) floor(strlen($bester) / 3))) ? $bester : '';
+}
+
+/* ==================================================================
  * Der Kern: eine eingehende Nachricht verarbeiten
  *
  * Getrennt vom Empfangen, damit der Reiter Test denselben Weg durchspielen
@@ -1004,6 +1260,7 @@ function sg_verarbeite($von, $text, $trocken = false)
     /* ---- Schicht 1: Weissliste ---- */
     if (!sg_erlaubt($von)) {
         sg_log('Abgewiesen: ' . sg_maske($von) . ' (nicht auf der Weissliste)');
+        sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'nicht auf der Weissliste');
         // Bewusst schweigen: eine Antwort wuerde Fremden bestaetigen, dass
         // hier ein Bot horcht. Wer die Nummer nur vertippt hat, merkt es am
         // ausbleibenden Echo genauso.
@@ -1011,11 +1268,23 @@ function sg_verarbeite($von, $text, $trocken = false)
                      'grund' => 'nicht_erlaubt');
     }
 
+    /* ---- Kill-Schalter ----
+       Ist der Bot gesperrt, wird gar nichts mehr ausgefuehrt. Gedacht fuer
+       den Fall, dass ein Handy abhandenkommt: sperren laesst sich das aus
+       Loxone heraus (Endpunkt, Aktion sperren) und in der Oberflaeche. Die
+       eingebauten Woerter bleiben erreichbar, sonst wuesste niemand, warum
+       nichts passiert. */
+    if (!empty($cfg['gesperrt']) && !in_array($klein, array('hilfe', 'help', '?'), true)) {
+        sg_log('Abgewiesen (Bot gesperrt): ' . sg_maske($von) . ' - ' . sg_kuerzen($text, 40));
+        return array('antwort' => sg_t('BOT.GESPERRT'), 'grund' => 'gesperrt');
+    }
+
     /* ---- Schicht 3 (vorgezogen): Bremse ----
        Im Trockenlauf wird nicht gezaehlt: der Probelauf des Verwalters darf
        das Kontingent des Bewohners nicht aufbrauchen. */
     if (!$trocken && !sg_bremse_frei($von)) {
         sg_log('Gebremst: ' . sg_maske($von) . ' (mehr als ' . (int) $cfg['bremse'] . ' je Minute)');
+        sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'Bremse');
         return array('antwort' => sg_t('BOT.GEBREMST'), 'grund' => 'gebremst');
     }
 
@@ -1054,12 +1323,21 @@ function sg_verarbeite($von, $text, $trocken = false)
         if (in_array($klein, array('nein', 'no', 'abbrechen', 'stop'), true)) {
             sg_wartend($von, false);
             sg_log('Abgebrochen von ' . sg_maske($von) . ': ' . $b['wort']);
+            /* Bei einer Vier-Augen-Freigabe wartet jemand anders auf die
+             * Antwort. Ohne diese Nachricht bliebe er ratlos zurueck: sein
+             * Befehl wurde nie ausgefuehrt, und niemand hat ihm gesagt warum. */
+            if (!empty($warte['fuer'])) {
+                sg_senden((string) $warte['fuer'], sg_t('BOT.ZWEIT_ABGELEHNT'));
+                sg_ereignis_merken(sg_maske($von), 'Freigabe abgelehnt',
+                    $b['wort'] . ' fuer ' . sg_maske($warte['fuer']));
+            }
             return array('antwort' => sg_t('BOT.ABGEBROCHEN'), 'grund' => 'abgebrochen');
         }
         if ($warte['art'] === 'pin') {
             // hash_equals gegen das Erraten ueber die Antwortzeit.
             if (!sg_pin_stimmt($cfg, $text)) {
                 sg_log('Falsche PIN von ' . sg_maske($von) . ' fuer: ' . $b['wort']);
+                sg_ereignis_merken(sg_maske($von), 'PIN falsch', $b['wort']);
                 sg_wartend($von, false);
                 $sg_offen = sg_pin_fehlversuch($von);
                 if ($sg_offen > 0) {
@@ -1073,24 +1351,86 @@ function sg_verarbeite($von, $text, $trocken = false)
             return array('antwort' => sg_t('BOT.BITTE_JA_NEIN'), 'grund' => 'unklar');
         }
         sg_wartend($von, false);
-        return sg_ausfuehren($b, $von, $trocken);
+        /* Wer hier bestaetigt, kann der Absender selbst sein - oder der
+         * Zweite bei einem Befehl mit Vier-Augen-Freigabe. Im zweiten Fall
+         * steht in der Wartedatei, fuer wen freigegeben wird; dann ist die
+         * Freigabe erteilt und wird nicht noch einmal verlangt. */
+        $sg_fuer = isset($warte['fuer']) ? (string) $warte['fuer'] : '';
+        $sg_mit = isset($warte['wert']) ? (string) $warte['wert'] : null;
+        if ($sg_fuer !== '') {
+            sg_ereignis_merken(sg_maske($von), 'Freigabe erteilt', $b['wort'] . ' fuer ' . sg_maske($sg_fuer));
+        }
+        return sg_ausfuehren($b, $sg_fuer !== '' ? $sg_fuer : $von, $trocken, $sg_fuer !== '', $sg_mit);
     }
 
     /* ---- Eingebaute Woerter ---- */
     if (in_array($klein, array('hilfe', 'help', '?'), true)) {
-        return array('antwort' => sg_hilfetext(), 'grund' => 'hilfe');
+        return array('antwort' => sg_hilfetext($von), 'grund' => 'hilfe');
     }
-    if (in_array($klein, array('status', 'zustand'), true)) {
+    if (in_array($klein, array('quittiert', 'quittieren', 'ack'), true)) {
+        if ($trocken) { return array('antwort' => sg_t('BOT.NICHTS_ZU_QUITTIEREN'), 'grund' => 'quittiert'); }
+        $n = sg_quittieren($von);
+        sg_ereignis_merken(sg_maske($von), 'quittiert', (string) $n);
+        return array('antwort' => $n > 0 ? sprintf(sg_t('BOT.QUITTIERT'), $n) : sg_t('BOT.NICHTS_ZU_QUITTIEREN'),
+                     'grund' => 'quittiert');
+    }
+    if ($klein === 'status' || $klein === 'zustand'
+        || strpos($klein, 'status ') === 0 || strpos($klein, 'zustand ') === 0) {
         if (empty($cfg['zustand_ein'])) {
             return array('antwort' => sg_t('BOT.ZUSTAND_AUS'), 'grund' => 'zustand_aus');
         }
-        return array('antwort' => sg_zustand_text(), 'grund' => 'status');
+        $sg_teil = strpos($klein, ' ') !== false ? trim(substr($klein, strpos($klein, ' ') + 1)) : '';
+        return array('antwort' => sg_zustand_text($sg_teil), 'grund' => 'status');
     }
 
     /* ---- Schicht 2: Befehl suchen und Stufe anwenden ---- */
     foreach ($cfg['befehle'] as $i => $b) {
         if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
-        if ($klein !== $b['wort']) { continue; }
+
+        /* Ein Befehl kann einen WERT mitbekommen: "heizung 21".
+         * Erwartet wird er nur, wenn die Zeile auf 'zahl' steht - sonst ist
+         * alles hinter dem Wort ein anderer Befehl oder ein Vertipper. */
+        $sg_mit = null;
+        if ($klein === $b['wort']) {
+            if ($b['wert_art'] === 'zahl') {
+                return array('antwort' => sprintf(sg_t('BOT.WERT_FEHLT'), $b['wort'],
+                                 (int) $b['min'], (int) $b['max'], $b['wort']),
+                             'grund' => 'wert_fehlt');
+            }
+        } else {
+            if ($b['wert_art'] !== 'zahl') { continue; }
+            $sg_vor = $b['wort'] . ' ';
+            if (strpos($klein, $sg_vor) !== 0) { continue; }
+            $sg_rest = str_replace(',', '.', trim(substr($klein, strlen($sg_vor))));
+            if (!preg_match('/^-?[0-9]+(\.[0-9]+)?$/', $sg_rest)) {
+                return array('antwort' => sprintf(sg_t('BOT.WERT_UNGUELTIG'), (int) $b['min'], (int) $b['max']),
+                             'grund' => 'wert_ungueltig');
+            }
+            $sg_zahl = (float) $sg_rest;
+            if ($sg_zahl < (float) $b['min'] || $sg_zahl > (float) $b['max']) {
+                return array('antwort' => sprintf(sg_t('BOT.WERT_BEREICH'), (int) $b['min'], (int) $b['max']),
+                             'grund' => 'wert_bereich');
+            }
+            // Ganze Zahlen ohne Nachkomma schreiben - das erwartet Loxone.
+            $sg_mit = (floor($sg_zahl) == $sg_zahl) ? (string) (int) $sg_zahl : (string) $sg_zahl;
+        }
+
+        /* Berechtigung je Befehl. Die Weissliste sagt, WER ueberhaupt reden
+         * darf; hier steht, wer DIESEN Befehl ausloesen darf. Ohne das duerfte
+         * jeder Erlaubte alles - auch das Tor und die Alarmanlage. */
+        if ((string) $b['absender'] !== '') {
+            $sg_n = preg_replace('/[^0-9+]/', '', (string) $von);
+            $sg_darf = false;
+            foreach (explode(',', (string) $b['absender']) as $sg_nr) {
+                if (hash_equals(trim($sg_nr), $sg_n)) { $sg_darf = true; break; }
+            }
+            if (!$sg_darf) {
+                sg_log('Nicht zustaendig: ' . sg_maske($von) . ' fuer "' . $b['wort'] . '"');
+                sg_ereignis_merken(sg_maske($von), 'abgewiesen', $b['wort'] . ' (nicht zustaendig)');
+                return array('antwort' => sg_t('BOT.NICHT_ZUSTAENDIG'), 'grund' => 'nicht_zustaendig');
+            }
+        }
+
         if ($b['stufe'] === 'pin') {
             if (!sg_pin_gesetzt($cfg)) {
                 sg_log('Befehl ' . $b['wort'] . ' verlangt eine PIN, es ist aber keine gesetzt.');
@@ -1101,16 +1441,24 @@ function sg_verarbeite($von, $text, $trocken = false)
                 return array('antwort' => sprintf(sg_t('BOT.PIN_GESPERRT'), (int) ceil($sg_offen / 60)),
                              'grund' => 'pin_gesperrt');
             }
-            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'])); }
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit)); }
             return array('antwort' => sg_t('BOT.PIN_BITTE'), 'grund' => 'pin_angefordert');
         }
         if ($b['stufe'] === 'rueckfrage') {
-            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage', 'wort' => $b['wort'], 'stufe' => $b['stufe'])); }
-            return array('antwort' => sprintf(sg_t('BOT.RUECKFRAGE'), $b['wort']), 'grund' => 'rueckfrage');
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit)); }
+            return array('antwort' => sprintf(sg_t('BOT.RUECKFRAGE'), $b['wort']
+                         . ($sg_mit === null ? '' : ' ' . $sg_mit)), 'grund' => 'rueckfrage');
         }
-        return sg_ausfuehren($b, $von, $trocken);
+        return sg_ausfuehren($b, $von, $trocken, false, $sg_mit);
     }
 
+    // Der Vergleich laeuft am ERSTEN WORT. Wer "heizzung 21" schreibt, hat
+    // sich im Befehl vertippt, nicht in der Zahl.
+    $sg_erstes = strpos($klein, ' ') === false ? $klein : substr($klein, 0, strpos($klein, ' '));
+    $sg_nah = sg_vorschlag($sg_erstes, $cfg);
+    if ($sg_nah !== '') {
+        return array('antwort' => sprintf(sg_t('BOT.VORSCHLAG'), $sg_nah), 'grund' => 'vorschlag');
+    }
     return array('antwort' => sg_t('BOT.UNBEKANNT'), 'grund' => 'unbekannt');
 }
 
@@ -1122,41 +1470,83 @@ function sg_verarbeite($von, $text, $trocken = false)
  * Antworttext ist derselbe, den der Absender bekommen haette - darum geht es
  * im Probelauf ja.
  */
-function sg_ausfuehren($b, $von, $trocken = false)
+function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert = null)
 {
     if ($b['thema'] === '') {
         return array('antwort' => sg_t('BOT.KEIN_THEMA'), 'grund' => 'kein_thema');
     }
+    // Der mitgeschickte Wert schlaegt die feste Nutzlast der Zeile.
+    $nutz = $wert === null ? (string) $b['wert'] : (string) $wert;
+    $wortzeile = $b['wort'] . ($wert === null ? '' : ' ' . $wert);
+
     if ($trocken) {
-        sg_log('Trockenlauf: "' . $b['wort'] . '" wuerde ' . $b['thema'] . '=' . $b['wert']
+        sg_log('Trockenlauf: "' . $wortzeile . '" wuerde ' . $b['thema'] . '=' . $nutz
              . ' senden (es wurde nichts gesendet)');
-        $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $b['wort']);
+        $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $wortzeile);
         return array('antwort' => $antwort, 'grund' => 'wuerde_ausfuehren');
     }
-    $ok = sg_mqtt_pulsen($b['thema'], $b['wert']);
-    sg_log('Befehl "' . $b['wort'] . '" von ' . sg_maske($von) . ' -> '
-         . $b['thema'] . '=' . $b['wert'] . ' (' . ($ok ? 'gesendet' : 'FEHLGESCHLAGEN') . ')');
+
+    /* ---- Vier-Augen ----
+     * Steht eine zweite Nummer in der Zeile, wird nicht ausgefuehrt, sondern
+     * dort gefragt. Erst deren "ja" fuehrt aus - dann kommt dieser Aufruf mit
+     * $freigegeben = true noch einmal hier an. */
+    if (!$freigegeben && (string) $b['zweit'] !== '') {
+        sg_wartend($b['zweit'], array('befehl' => -1, 'art' => 'rueckfrage', 'wort' => $b['wort'],
+                                      'stufe' => $b['stufe'], 'fuer' => $von, 'wert' => $wert));
+        sg_senden($b['zweit'], sprintf(sg_t('BOT.ZWEIT_FRAGE'), sg_maske($von), $wortzeile));
+        sg_log('Vier-Augen: ' . sg_maske($von) . ' will "' . $wortzeile . '", gefragt wird '
+             . sg_maske($b['zweit']));
+        sg_ereignis_merken(sg_maske($von), 'Freigabe angefragt', $wortzeile);
+        return array('antwort' => sprintf(sg_t('BOT.ZWEIT_WARTET'), sg_maske($b['zweit'])),
+                     'grund' => 'zweitfreigabe');
+    }
+
+    $ok = sg_mqtt_pulsen($b['thema'], $nutz);
+    // Unabhaengig vom Ereignisprotokoll festhalten, wann zuletzt etwas
+    // geschaltet wurde - Loxone fragt das ueber die Statuszeile ab und kann
+    // daran erkennen, ob der Bot noch arbeitet.
+    if ($ok) {
+        sg_write_atomic(sg_datadir() . '/letzter.json',
+            json_encode(array('ts' => time(), 'wort' => $wortzeile)), 0644);
+    }
+    sg_log('Befehl "' . $wortzeile . '" von ' . sg_maske($von) . ' -> '
+         . $b['thema'] . '=' . $nutz . ' (' . ($ok ? 'gesendet' : 'FEHLGESCHLAGEN') . ')');
+    sg_ereignis_merken(sg_maske($von), $ok ? 'ausgefuehrt' : 'fehlgeschlagen',
+                $wortzeile . ' -> ' . $b['thema'] . '=' . $nutz);
     if (!$ok) {
         return array('antwort' => sg_t('BOT.MQTT_FEHLER'), 'grund' => 'mqtt_fehler');
     }
-    $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $b['wort']);
+    $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $wortzeile);
     return array('antwort' => $antwort, 'grund' => 'ausgefuehrt');
 }
 
 /** Die Hilfe, die der Bot auf "hilfe" schickt. */
-function sg_hilfetext()
+function sg_hilfetext($fuer = '')
 {
     $cfg = sg_config();
     $zeilen = array(sg_t('BOT.HILFE_KOPF'));
+    $n = preg_replace('/[^0-9+]/', '', (string) $fuer);
     foreach ($cfg['befehle'] as $b) {
         if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
+        // Was jemand nicht ausloesen darf, gehoert auch nicht in seine Liste.
+        if ($n !== '' && (string) $b['absender'] !== '') {
+            $darf = false;
+            foreach (explode(',', (string) $b['absender']) as $nr) {
+                if (hash_equals(trim($nr), $n)) { $darf = true; break; }
+            }
+            if (!$darf) { continue; }
+        }
         $marke = '';
         if ($b['stufe'] === 'pin') { $marke = ' ' . sg_t('BOT.MARKE_PIN'); }
         elseif ($b['stufe'] === 'rueckfrage') { $marke = ' ' . sg_t('BOT.MARKE_RUECKFRAGE'); }
-        $zeilen[] = '- ' . $b['wort'] . $marke;
+        if ((string) $b['zweit'] !== '') { $marke .= ' ' . sg_t('BOT.MARKE_ZWEIT'); }
+        $wort = $b['wort'] . ($b['wert_art'] === 'zahl'
+            ? ' <' . (int) $b['min'] . '..' . (int) $b['max'] . '>' : '');
+        $zeilen[] = '- ' . $wort . $marke;
     }
     if (!empty($cfg['zustand_ein'])) { $zeilen[] = '- status'; }
     $zeilen[] = '- hilfe';
+    if (!empty($cfg['gesperrt'])) { $zeilen[] = ''; $zeilen[] = sg_t('BOT.GESPERRT'); }
     return implode("\n", $zeilen);
 }
 
@@ -1167,6 +1557,42 @@ function sg_hilfetext()
  * CRLF und der Tabulator vor den Kindelementen entsprechen dem Original.
  * Uebernommen aus LoxBerry-Plugin-APC-UPS, nur das Kuerzel getauscht.
  * ================================================================== */
+
+/**
+ * Wie oft ist $was in den letzten $sekunden vorgekommen?
+ *
+ * Damit sieht Loxone, was sonst nur im Protokoll steht: eine Haeufung von
+ * Abweisungen oder falschen PINs ist der erste sichtbare Hinweis darauf, dass
+ * jemand am Bot herumprobiert. Ohne eine solche Zahl merkt das niemand, denn
+ * jeder einzelne Vorgang sieht harmlos aus.
+ */
+function sg_zaehle_ereignisse($was, $sekunden = 3600)
+{
+    $grenze = time() - (int) $sekunden;
+    $n = 0;
+    foreach (sg_ereignisse() as $x) {
+        if ((int) $x['ts'] >= $grenze && $x['was'] === $was) { $n++; }
+    }
+    return $n;
+}
+
+/** Sekunden seit dem letzten ausgefuehrten Befehl; -1 = noch keiner. */
+function sg_letzter_befehl()
+{
+    $f = sg_datadir() . '/letzter.json';
+    if (!is_file($f)) { return -1; }
+    $d = json_decode((string) @file_get_contents($f), true);
+    if (!is_array($d) || empty($d['ts'])) { return -1; }
+    return max(0, time() - (int) $d['ts']);
+}
+
+/** Offene, noch nicht quittierte dringende Meldungen. */
+function sg_offene_meldungen()
+{
+    $n = 0;
+    foreach (sg_warteschlange() as $x) { if (!empty($x['dringend'])) { $n++; } }
+    return $n;
+}
 
 /** Adresse des eigenen Endpunkts. */
 function sg_endpunkt($aktion = 'status')
@@ -1190,6 +1616,11 @@ function sg_felder()
         'ERLAUBTE'  => array(1, 0, 100, 'FELD.ERLAUBTE'),
         'BEFEHLE'   => array(1, 0, SG_BEFEHLE, 'FELD.BEFEHLE'),
         'ZUSTAENDE' => array(1, 0, 50, 'FELD.ZUSTAENDE'),
+        'GESPERRT'  => array(0, 0, 1, 'FELD.GESPERRT'),
+        'OFFEN'     => array(1, 0, 200, 'FELD.OFFEN'),
+        'LETZTER'   => array(1, -1, 86400, 'FELD.LETZTER'),
+        'ABGEWIESEN'=> array(1, 0, 500, 'FELD.ABGEWIESEN'),
+        'PINFEHL'   => array(1, 0, 500, 'FELD.PINFEHL'),
     );
 }
 
@@ -1251,6 +1682,78 @@ function sg_vorlage()
         'comment' => 'Erzeugt vom LoxBerry-Plugin Signal Bot (' . date('d.m.Y') . '). '
                    . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
                    . 'zweimal eingelesen ergibt doppelte Bausteine.',
+    ), $cmds));
+}
+
+/**
+ * Die zweite Vorlage: ein virtueller AUSGANG zum Senden.
+ *
+ * Bis 0.9.11 gab es nur Eingaenge, mit der Begruendung, der Meldungstext sei
+ * je Anwendungsfall ein anderer. Das ueberzeugt nicht: die URL-Kodierung, das
+ * Token in der Adresse und die Trennung von Adresse und Befehl sind genau
+ * die Stellen, an denen es haendisch schiefgeht. Der Text laesst sich danach
+ * in Loxone Config in einer Zeile aendern.
+ *
+ * Aufbau und Attributreihenfolge stammen aus dem gemessenen Muster
+ * VQ_KEBA_P30_UDP.xml aus dem Arbeitsordner: Wurzel mit Title, Comment,
+ * Address, CloseAfterSend, CmdSep; Kind mit Title, Comment, CmdOn, wahlweise
+ * CmdOff, dann Analog. Tabulator vor den Kindern, CRLF als Zeilenende.
+ */
+function sg_xml_virtual_out($kopf, $cmds)
+{
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualOut ';
+    $o .= 'Title="' . sg_x($kopf['title']) . '" ';
+    $o .= 'Comment="' . sg_x($kopf['comment']) . '" ';
+    $o .= 'Address="' . sg_x($kopf['address']) . '" ';
+    $o .= 'CloseAfterSend="true" ';
+    $o .= 'CmdSep=""';
+    $o .= '>' . $crlf;
+    foreach ($cmds as $c) {
+        $o .= "\t" . '<VirtualOutCmd ';
+        $o .= 'Title="' . sg_x($c['title']) . '" ';
+        $o .= 'Comment="' . sg_x($c['comment']) . '" ';
+        $o .= 'CmdOn="' . sg_x($c['on']) . '" ';
+        if (isset($c['off']) && $c['off'] !== '') {
+            $o .= 'CmdOff="' . sg_x($c['off']) . '" ';
+        }
+        $o .= 'Analog="' . (!empty($c['analog']) ? 'true' : 'false') . '"';
+        $o .= '/>' . $crlf;
+    }
+    $o .= '</VirtualOut>' . $crlf;
+    return $o;
+}
+
+function sg_vorlage_out()
+{
+    $p = sg_paths();
+    $cfg = sg_config();
+    $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+        ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
+        : (gethostname() ?: 'loxberry');
+    $pfad = '/plugins/' . $p['plugin'] . '/index.php?token=' . $cfg['aktionstoken'] . '&aktion=';
+    $cmds = array(
+        array('title' => 'Signal - Meldung senden',
+              'comment' => sg_t('VORLAGE.Q1'),
+              'on' => $pfad . 'senden&text=Meldung%20aus%20Loxone', 'analog' => 0),
+        array('title' => 'Signal - Meldung mit Wert',
+              'comment' => sg_t('VORLAGE.Q2'),
+              'on' => $pfad . 'senden&text=Wert%3A%20<v.0>', 'analog' => 1),
+        array('title' => 'Signal - dringende Meldung',
+              'comment' => sg_t('VORLAGE.Q3'),
+              'on' => $pfad . 'senden&dringend=1&text=Alarm%20ausgeloest', 'analog' => 0),
+        array('title' => 'Signal - Zustand melden',
+              'comment' => sg_t('VORLAGE.Q4'),
+              'on' => $pfad . 'zustand&name=alarm&wert=<v.0>', 'analog' => 1),
+        array('title' => 'Signal - Bot sperren',
+              'comment' => sg_t('VORLAGE.Q5'),
+              'on' => $pfad . 'sperren', 'off' => $pfad . 'entsperren', 'analog' => 0),
+    );
+    return array('VQ_signalbot.xml', sg_xml_virtual_out(array(
+        'title'   => 'Signal Bot Befehle',
+        'address' => 'http://' . $host,
+        'comment' => sg_t('VORLAGE.QKOPF'),
     ), $cmds));
 }
 

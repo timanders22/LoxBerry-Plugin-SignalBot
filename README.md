@@ -8,6 +8,88 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.12
+
+Diese Fassung behebt fuenf Fehler, von denen zwei das Plugin an einer echten
+Anlage unbrauchbar gemacht haben, raeumt die Abweichungen vom
+Oberflaechen-Hausstandard aus und bringt zwoelf neue Funktionen. Jeder Punkt
+wurde nachgemessen, nicht abgeleitet.
+
+### Behoben
+
+**Der Endpunkt fuer Loxone war installiert vollstaendig tot.**
+`webfrontend/html/index.php` suchte `sg_lib.php` ueber `dirname(__DIR__)`. Im
+entpackten Archiv geht das auf, auf dem installierten LoxBerry liegen `html/`
+und `htmlauth/` aber in getrennten Baeumen - jeder Aufruf endete in HTTP 500
+mit leerem Rumpf, weil zwei Zeilen darueber `display_errors` abgeschaltet wird.
+Damit war die ganze Richtung Loxone &rarr; Chat tot: Meldungen, Zustaende und
+Statusabfrage gleichermassen. In Loxone sieht das aus wie "kein Wert", nicht
+wie ein Defekt. Die Bibliothek wird jetzt ueber eine Kandidatenliste gesucht;
+findet keiner sie, antwortet der Endpunkt mit `SIGNAL;OK=0;GRUND=BIBLIOTHEK_FEHLT`
+statt zu schweigen.
+
+**Das MQTT-Gateway galt immer als "nicht auf Autostart".** Gesucht wurde der
+Schluessel `Autostart`; er heisst `Gatewayautostart`. Auf jeder einwandfrei
+eingerichteten Anlage stand deshalb dauerhaft eine Warnung im Reiter MQTT und
+ein rotes Kreuz im Reiter Test.
+
+**Der "Trockenlauf" im Reiter Test hat wirklich geschaltet.** Ein Befehl der
+Stufe *sofort* wurde ausgefuehrt, und bei *Rueckfrage* legte der Probelauf eine
+Wartedatei fuer die echte Rufnummer des ersten erlaubten Absenders an -
+antwortete diese Person spaeter aus einem anderen Grund "ja", fuehrte der Bot
+den Befehl aus, den der Verwalter ins Testfeld getippt hatte. Jetzt gibt es
+einen echten Trockenlauf: nichts wird gesendet, nichts gemerkt, nichts gezaehlt.
+
+**Eine leere Konfiguration hat Weissliste, PIN und Token ueberschrieben - samt
+Zweitschrift.** Der Schutz hing an `is_array()`, und eine leere Datei ergibt ein
+leeres Feld, was ein Feld *ist*. Jetzt gilt eine vorhandene, aber leere Datei
+als unlesbar, und zurueckgeholt wird nur eine Sicherung, die auch Inhalt hat.
+
+**Nach Deinstallation und Neuinstallation gab es keinen Dienst.**
+`postroot.sh` stieg mit `exit 0` aus, sobald signal-cli im Pfad lag - dahinter
+lagen Systembenutzer, Unit-Datei und sudo-Regel. Jetzt umschliesst die Pruefung
+nur noch das Beschaffen.
+
+Dazu: `?selftest=1` am Endpunkt (Hausstandard), UDP ohne `php-sockets`,
+`sg_daemon_lebt()` wertet die HTTP-Statuszeile aus statt jede Antwort als
+"lebt" zu zaehlen, die Bremse faellt geschlossen aus statt offen, die
+Rueckfrage haengt am Befehlswort statt an der Zeilennummer, ein ungueltiges
+`&an=` wird abgewiesen statt zum Rundruf an alle zu werden, `preinstall.sh`
+und die beiden Upgrade-Skripte sind entfallen (sie sicherten in einen Ordner,
+den der Installer eine Sekunde spaeter loescht), `ARCHITECTURE=false`,
+`php-mbstring` wird zur wirklich laufenden PHP-Fassung passend nachinstalliert,
+signal-cli ist auf eine gemessene Fassung gebunden statt "latest", und der alte
+Dauerlaeufer wird beim Update beendet, statt bis zum naechsten Neustart
+weiterzulaufen.
+
+### Neu
+
+| Funktion | Kurz |
+|---|---|
+| Kill-Schalter | Sperrt den Bot - aus der Oberflaeche oder aus Loxone. Fuer den Fall, dass ein Handy abhandenkommt. |
+| Werte je Befehl | `heizung 21` statt nur fester Nutzlast, mit Bereichsgrenzen je Zeile. |
+| Zustaendigkeit je Befehl | Die Weissliste sagt, wer reden darf; die neue Spalte, wer *diesen* Befehl ausloesen darf. |
+| Vier-Augen | Eine zweite Rufnummer muss freigeben, bevor geschaltet wird. |
+| PIN-Sperre | Nach N Fehlversuchen ist die PIN fuer diesen Absender gesperrt. Die PIN steht jetzt als Hash in der Konfiguration. |
+| Ereignisprotokoll | Wer hat wann was ausgeloest - getrennt vom Betriebsprotokoll, im Reiter Logdateien. |
+| Herzschlag | Zeitstempel jede Minute auf `<praefix>/online`, damit Loxone einen Ausfall ueberhaupt erkennen kann. |
+| Selbstheilung | Nach mehreren vergeblichen Anlaeufen startet der Bot den signal-cli-Dienst neu. |
+| Nachtruhe | Gewoehnliche Meldungen warten bis zum Morgen, dringende gehen sofort. |
+| Dringend mit Quittung | Wird wiederholt, bis der Empfaenger `quittiert` schreibt. |
+| Gruppen und Anhaenge | Meldung in eine Signal-Gruppe, wahlweise mit Bild - etwa dem Kamera-Schnappschuss zum Alarm. |
+| Vorlage fuer virtuelle Ausgaenge | `VQ_signalbot.xml` mit Adresse, Token und URL-Kodierung fertig. |
+| `status alarm` | Ein einzelner Zustand statt aller, dazu ein Vorschlag bei Tippfehlern. |
+
+### Was sich fuer bestehende Anlagen aendert
+
+Die Adressen im Miniserver bleiben gueltig; die Statuszeile bekommt drei
+Felder **hinzu** (`GESPERRT`, `OFFEN`, `LETZTER`), vorhandene
+Befehlserkennungen greifen weiter. Eine im Klartext gespeicherte PIN wird beim
+ersten Speichern in der Oberflaeche in einen Hash umgeschrieben; bis dahin
+wird sie weiter angenommen. Neue Funktionen sind ab Werk aus: Nachtruhe ist
+leer, die Gruppen-Kennung ist leer, kein Befehl hat eine Zustaendigkeit oder
+eine zweite Freigabe.
+
 ## Neu in 0.9.10
 
 **Der Bot-Dienst konnte nie starten.** `bin/sg_bot.php` suchte seine Programmbibliothek

@@ -114,7 +114,7 @@ if ($sg_selftest) {
     sg_ende(200, 'SELFTEST;OK=1;TOKEN=OK');
 }
 
-$erlaubte_aktionen = array('senden', 'zustand', 'status');
+$erlaubte_aktionen = array('senden', 'zustand', 'status', 'sperren', 'entsperren');
 $aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
 if (!in_array($aktion, $erlaubte_aktionen, true)) {
     sg_ende(400, "SIGNAL;OK=0;GRUND=UNBEKANNTE_AKTION\n"
@@ -124,13 +124,37 @@ if (!in_array($aktion, $erlaubte_aktionen, true)) {
 /* ---------------- status ---------------- */
 if ($aktion === 'status') {
     $z = sg_zustaende();
-    printf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d\n",
+    printf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d;GESPERRT=%d;OFFEN=%d;LETZTER=%d;ABGEWIESEN=%d;PINFEHL=%d\n",
         sg_daemon_lebt() ? 1 : 0,
         sg_dienst_laeuft() ? 1 : 0,
         (string) $cfg['konto'] !== '' ? 1 : 0,
         count($cfg['erlaubt']),
         count(array_filter($cfg['befehle'], function ($b) { return !empty($b['aktiv']) && $b['wort'] !== ''; })),
-        count($z));
+        count($z),
+        !empty($cfg['gesperrt']) ? 1 : 0,
+        sg_offene_meldungen(),
+        sg_letzter_befehl(),
+        sg_zaehle_ereignisse('abgewiesen'),
+        sg_zaehle_ereignisse('PIN falsch'));
+    exit;
+}
+
+/* ---------------- sperren / entsperren ----------------
+ *
+ * Der Kill-Schalter fuer den Fall, dass ein Handy abhandenkommt. Ohne ihn
+ * muesste man erst die LoxBerry-Oberflaeche oeffnen; so genuegt ein Taster
+ * oder ein Baustein im Miniserver. */
+if ($aktion === 'sperren' || $aktion === 'entsperren') {
+    $neu = $aktion === 'sperren' ? 1 : 0;
+    if ((int) $cfg['gesperrt'] !== $neu) {
+        $cfg['gesperrt'] = $neu;
+        if (!sg_config_write($cfg)) {
+            sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
+        }
+        sg_log($neu ? 'Bot ueber den Endpunkt GESPERRT.' : 'Bot ueber den Endpunkt entsperrt.');
+        sg_ereignis_merken('Loxone', $neu ? 'gesperrt' : 'entsperrt', '');
+    }
+    printf("SIGNAL;OK=1;AKTION=%s;GESPERRT=%d\n", $aktion, $neu);
     exit;
 }
 
@@ -200,12 +224,44 @@ if (!$ziele) {
     sg_ende(400, 'SIGNAL;OK=0;GRUND=KEIN_EMPFAENGER');
 }
 
+/* Dringend? Dann geht die Meldung durch die Nachtruhe hindurch und wird
+ * wiederholt, bis jemand "quittiert" schreibt. */
+$dringend = isset($_GET['dringend']) && (string) $_GET['dringend'] !== '0' ? 1 : 0;
+
+/* Ein Anhang - etwa der Kamerabild-Schnappschuss zum Alarm. Nur Pfade
+ * unterhalb der Datenordner des Plugins und der ueblichen Ablagen sind
+ * zugelassen; ein Endpunkt im unangemeldeten Bereich darf nicht zum
+ * Dateibetrachter fuer das ganze Geraet werden. */
+$anhang = '';
+if (isset($_GET['bild']) && (string) $_GET['bild'] !== '') {
+    $roh = (string) $_GET['bild'];
+    $echt = realpath($roh);
+    $erlaubte_orte = array(realpath(sg_datadir()), realpath('/tmp'), realpath('/var/tmp'));
+    $drin = false;
+    foreach ($erlaubte_orte as $ort) {
+        if ($ort && $echt && strpos($echt, $ort) === 0) { $drin = true; break; }
+    }
+    if (!$echt || !$drin || !is_file($echt)) {
+        sg_ende(400, 'SIGNAL;OK=0;GRUND=ANHANG_UNZULAESSIG');
+    }
+    $anhang = $echt;
+}
+
 $ok = 0;
 foreach ($ziele as $ziel) {
-    if (sg_senden($ziel, $text)) { $ok++; }
+    if ($anhang !== '') {
+        // Mit Anhang wird unmittelbar gesendet - eine Bilddatei in die
+        // Warteschlange zu legen hiesse, auf eine Datei zu warten, die es
+        // spaeter vielleicht nicht mehr gibt.
+        if (sg_senden($ziel, $text, $anhang)) { $ok++; }
+    } else {
+        $art = sg_melden($ziel, $text, $dringend);
+        if ($art !== 'fehler') { $ok++; }
+    }
 }
-sg_log('Meldung aus Loxone an ' . $ok . ' von ' . count($ziele) . ' Empfaenger gesendet');
+sg_log('Meldung aus Loxone an ' . $ok . ' von ' . count($ziele) . ' Empfaenger'
+     . ($dringend ? ' (dringend)' : '') . ($anhang !== '' ? ' (mit Anhang)' : ''));
 if ($ok === 0) {
     sg_ende(502, 'SIGNAL;OK=0;GRUND=SENDEN_FEHLGESCHLAGEN');
 }
-printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d\n", $ok);
+printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d\n", $ok, $dringend);
