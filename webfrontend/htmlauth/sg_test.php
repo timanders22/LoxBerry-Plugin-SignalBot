@@ -183,18 +183,28 @@ function sg_pruefungen()
        Wohlgeformt oder nicht - das ist nicht verhandelbar, und der Anwender
        soll es hier erfahren und nicht erst in Loxone Config, wo er den Fehler
        bei sich sucht. */
-    $xmlfehler = array();
-    foreach (array('sg_vorlage', 'sg_vorlage_out') as $bau) {
-        list($xname, $xinhalt) = $bau();
-        $vorher = libxml_use_internal_errors(true);
-        $ok = simplexml_load_string($xinhalt) !== false;
-        libxml_clear_errors();
-        libxml_use_internal_errors($vorher);
-        if (!$ok) { $xmlfehler[] = $xname; }
+    /* SimpleXML ist eine EIGENE Erweiterung (Debian: php<X.Y>-xml) und auf
+     * einem LoxBerry nicht garantiert. Ohne diese Abfrage waere der Aufruf
+     * ein "Call to undefined function" - und weil sg_pruefungen() bei JEDEM
+     * Rendern laeuft, haette das die ganze Oberflaeche mit HTTP 500
+     * erschlagen, nicht nur diese Pruefzeile. Dieselbe Klasse wie
+     * socket_create() und mb_strtolower(): erst fragen, dann rufen. */
+    if (!function_exists('simplexml_load_string')) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_XML'), sg_t('TEST.A_XML_UNPRUEFBAR'));
+    } else {
+        $xmlfehler = array();
+        foreach (array('sg_vorlage', 'sg_vorlage_out') as $bau) {
+            list($xname, $xinhalt) = $bau();
+            $vorher = function_exists('libxml_use_internal_errors') ? libxml_use_internal_errors(true) : false;
+            $ok = simplexml_load_string($xinhalt) !== false;
+            if (function_exists('libxml_clear_errors')) { libxml_clear_errors(); }
+            if (function_exists('libxml_use_internal_errors')) { libxml_use_internal_errors($vorher); }
+            if (!$ok) { $xmlfehler[] = $xname; }
+        }
+        $z[] = sg_pruefzeile($xmlfehler ? 0 : 1, sg_t('TEST.F_XML'),
+            $xmlfehler ? sprintf(sg_t('TEST.A_XML_FEHLER'), sg_e(implode(', ', $xmlfehler)))
+                       : sg_t('TEST.A_XML_OK'));
     }
-    $z[] = sg_pruefzeile($xmlfehler ? 0 : 1, sg_t('TEST.F_XML'),
-        $xmlfehler ? sprintf(sg_t('TEST.A_XML_FEHLER'), sg_e(implode(', ', $xmlfehler)))
-                   : sg_t('TEST.A_XML_OK'));
 
     /* ---- Reiterleiste, Bereiche und Positivliste ----
        Drei Stellen, die zusammenpassen muessen. Fehlt ein Name in der

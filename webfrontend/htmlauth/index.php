@@ -11,10 +11,50 @@ require_once __DIR__ . '/sg_lib.php';
 require_once __DIR__ . '/sg_test.php';
 
 $p = sg_paths();
-if ($p['home'] !== '' && file_exists($p['home'] . '/libs/phplib/loxberry_system.php')) {
-    require_once $p['home'] . '/libs/phplib/loxberry_system.php';
-    require_once $p['home'] . '/libs/phplib/loxberry_web.php';
+
+/* Den LoxBerry-Kern laden - und zwar so, dass eine unbrauchbare Wurzel nicht
+ * die ganze Oberflaeche mitnimmt.
+ *
+ * Bis 0.9.12 stand hier eine Bedingung, die NUR die erste der beiden Dateien
+ * prueft, und danach zwei harte require_once. Auf einem Geraet, auf dem
+ * $p['home'] leer blieb, endete das mit
+ *     Failed opening required '/libs/phplib/loxberry_web.php'
+ * und damit HTTP 500 fuer die gesamte Seite - obwohl der Kern fuer dieses
+ * Plugin gar nicht zwingend ist: alle Aufrufe stehen ohnehin hinter
+ * class_exists('LBWeb'). Ein optionaler Bestandteil darf nicht toedlich sein.
+ *
+ * Jede Datei wird jetzt EINZELN geprueft. Taugt die Wurzel nicht, greift der
+ * include_path, den LoxBerry selbst setzt (.:<home>/libs/phplib) - dafuer
+ * braucht es keinen festen Pfad nach /opt/loxberry. Und geladen wird mit
+ * include_once: fehlt der Kern wirklich, laeuft die Seite ohne Kopf- und
+ * Fusszeile weiter, statt gar nicht zu laufen. */
+$sg_home = $p['home'];
+foreach (array('loxberry_system.php', 'loxberry_web.php') as $sg_kern) {
+    $sg_voll = $sg_home . '/libs/phplib/' . $sg_kern;
+    if ($sg_home !== '' && is_file($sg_voll)) {
+        require_once $sg_voll;
+    } else {
+        @include_once $sg_kern;
+    }
 }
+/* $p NEU HOLEN - und $sg_home vorher sichern.
+ *
+ * DAS war der Fehler, an dem die Oberflaeche mit HTTP 500 starb, und zwar von
+ * Anfang an: eine eingebundene Datei laeuft im Variablenraum des Aufrufers,
+ * und loxberry_system.php setzt in Zeile 18 seines Dateikoerpers
+ *
+ *     $p = explode("/", substr($scriptPath, strlen(LBHOMEDIR)));
+ *
+ * Unser $p aus sg_paths() war damit nach der ersten der beiden Zeilen ein
+ * Feld von Pfadstuecken. $p['home'] war leer, und die zweite Zeile suchte
+ * '/libs/phplib/loxberry_web.php' - im Wurzelverzeichnis. Genau diese
+ * Meldung stand am 17.08.2026 auf dem Geraet.
+ *
+ * Der Kern belegt im Aufrufer 31 Namen, darunter die kurzen $p, $cfg,
+ * $format und $message. Nach dem Laden gilt deshalb: nichts von vorher
+ * weiterbenutzen, sondern neu holen. Alles Eigene traegt ohnehin das
+ * Praefix sg_. */
+$p = sg_paths();
 
 /* Drei Stellen gehoeren immer zusammen: Reiterleiste, Bereich (sm-seite mit
    gleicher id) und diese Positivliste. Fehlt ein Name hier, springt die Seite

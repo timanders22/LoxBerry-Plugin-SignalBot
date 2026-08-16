@@ -8,6 +8,42 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.13
+
+**Die Oberflaeche liess sich gar nicht oeffnen — HTTP 500, von Anfang an.**
+
+Der LoxBerry-Kern wird per `require_once` eingebunden, und eine eingebundene
+Datei laeuft im Variablenraum des Aufrufers. `libs/phplib/loxberry_system.php`
+setzt in seinem Dateikoerper 31 Variablen, darunter in Zeile 18:
+
+```php
+$p = explode("/", substr($scriptPath, strlen(LBHOMEDIR)));
+```
+
+Das Plugin hielt in `$p` seine eigenen Pfade aus `sg_paths()`. Nach der ersten
+der beiden `require_once`-Zeilen war `$p` ein Feld von Pfadstuecken, `$p['home']`
+leer — und die zweite Zeile suchte `/libs/phplib/loxberry_web.php` im
+Wurzelverzeichnis:
+
+    Failed opening required '/libs/phplib/loxberry_web.php'
+    in .../plugins/signalbot/index.php on line 16
+
+Behoben: der Wert wird **vor** dem Einbinden in eine eigene Variable gerettet,
+jede der beiden Kerndateien wird **einzeln** geprueft, geladen wird mit
+`include_once` ueber den `include_path`, wenn die Wurzel nichts taugt — und
+`$p` wird nach dem Einbinden neu geholt. Der Kern ist fuer dieses Plugin
+ohnehin nicht zwingend: alle Aufrufe stehen hinter `class_exists('LBWeb')`.
+Ein optionaler Bestandteil darf die Seite nicht toeten.
+
+Dazu abgesichert: `simplexml_load_string()` im Reiter *Test* laeuft jetzt nur
+noch, wenn es die Erweiterung gibt. Fehlt sie, meldet die Selbstpruefung
+"nicht pruefbar", statt die ganze Seite mitzunehmen — dieselbe Klasse, nur
+eine Erweiterung weiter.
+
+**Warum das keine Pruefung gefunden hat:** Die Attrappe des Kerns belegte
+diese Variablennamen nicht. Sie tut es seit dem 17.08.2026; seither meldet
+`rendern.py` fuer 0.9.12 `FATAL` und `AUSGABE ZU KURZ (0 Zeichen)`.
+
 ## Neu in 0.9.12
 
 Diese Fassung behebt fuenf Fehler, von denen zwei das Plugin an einer echten
