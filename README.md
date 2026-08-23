@@ -8,6 +8,41 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.14
+
+**Auf ARM laeuft signal-cli jetzt ohne root.** Am Geraet gemessen
+(23.08.2026, Raspberry Pi 4, LoxBerry 4.0.0.13): libsignal faellt auf
+`System.loadLibrary("signal_jni")` zurueck und durchsucht den
+`java.library.path` -
+
+    Failed to call libsignal-client: no signal_jni in java.library.path: ...
+    LD_LIBRARY_PATH=$HOME/nativ signal-cli --config /tmp/sigtest listAccounts
+    -> Rueckgabewert 0
+
+Am JAR muss also niemand operieren. `postroot.sh` legt deshalb den Ordner
+
+    <home>/data/plugins/<ordner>.nativ
+
+an - er gehoert dem Benutzer `loxberry` - und traegt ihn als
+`Environment=LD_LIBRARY_PATH=...` in die Unit ein. Wer dort eine passende
+`libsignal_jni.so` ablegt, startet den Dienst anschliessend im Reiter *Test*,
+**ohne root**. Die Fassung muss zu der im JAR passen: signal-cli 0.14.7
+enthaelt libsignal 0.99.1. Der Reiter *Test* sagt, ob die Datei erkannt wurde,
+und nennt sonst den Ordner. `ProtectHome` steht dafuer auf `read-only` statt
+`true` - auf vielen Anlagen ist `/opt/loxberry` ein Verweis nach
+`/home/loxberry`, und mit `true` waere der Ordner fuer den Dienst unerreichbar.
+
+**Die Verknuepfung laesst sich wieder loesen.** Im Reiter *Einstellungen*
+erscheint der Abschnitt, sobald ein Konto eingetragen ist. Er nennt beide
+Schritte in der richtigen Reihenfolge: erst am Handy unter *Gekoppelte
+Geraete* den Eintrag loeschen - nur das Hauptgeraet kann eine Verknuepfung
+wirklich aufheben -, dann hier die oertlichen Schluessel entfernen
+(`deleteLocalAccountData`). Ein Haekchen muss gesetzt sein, sonst passiert
+nichts, und wenn signal-cli nicht antwortet, bleibt das Kontofeld stehen
+statt halb geleert. `unregister` und `--delete-account` benutzt das Plugin
+bewusst NICHT: das erste ist laut Handbuchseite fuer verknuepfte Geraete der
+falsche Befehl, das zweite loescht das Konto beim Anbieter.
+
 ## Neu in 0.9.13
 
 **Die Oberflaeche liess sich gar nicht oeffnen — HTTP 500, von Anfang an.**

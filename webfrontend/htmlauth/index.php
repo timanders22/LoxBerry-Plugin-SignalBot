@@ -125,6 +125,49 @@ if ($sg_post && isset($_POST['link_fertig'])) {
     $sg_tab = 'tab-settings';
 }
 
+/* ================= Verknuepfung loesen =================
+ *
+ * WAS HIER BEWUSST NICHT PASSIERT
+ * signal-cli kennt drei Befehle, die nach "Verknuepfung weg" klingen, und
+ * zwei davon waeren hier falsch:
+ *
+ *   unregister    schaltet nur DIESES Geraet ab; mit --delete-account loescht
+ *                 es das ganze Konto vom Server ("Cannot be undone without
+ *                 loss"). Die Handbuchseite sagt ausdruecklich: fuer ein
+ *                 verknuepftes Geraet ist removeDevice der Weg.
+ *   removeDevice  entfernt eine Verknuepfung - aber nur vom HAUPTGERAET aus,
+ *                 also vom Handy. Von hier aus geht das nicht.
+ *   deleteLocalAccountData   loescht die oertlichen Schluessel. Genau das ist
+ *                 hier richtig, und mehr kann und darf diese Seite nicht.
+ *
+ * Die Verknuepfung selbst wird deshalb am Handy geloest (Signal -> Gekoppelte
+ * Geraete). Dieser Knopf raeumt die Seite des LoxBerry auf: ohne ihn blieben
+ * die Schluessel in /var/lib/signal-cli liegen, und die naechste Verknuepfung
+ * traefe auf ein Konto, das der Bot noch zu kennen glaubt.
+ */
+if ($sg_post && isset($_POST['link_loesen'])) {
+    $sg_lcfg = sg_config();
+    if (empty($_POST['loesen_ok'])) {
+        $sg_fehler[] = sg_t('EINST.M_LOESEN_UNBESTAETIGT');
+    } elseif ((string) $sg_lcfg['konto'] === '') {
+        $sg_fehler[] = sg_t('EINST.M_LOESEN_KEIN_KONTO');
+    } else {
+        $sg_a = sg_rpc('deleteLocalAccountData',
+                       array('account' => (string) $sg_lcfg['konto'], 'ignoreRegistered' => true), 60);
+        if ($sg_a['ok']) {
+            sg_log('Verknuepfung geloest: oertliche Schluessel fuer ' . sg_maske($sg_lcfg['konto']) . ' geloescht.');
+            sg_ereignis_merken('Oberflaeche', 'Verknuepfung geloest', sg_maske($sg_lcfg['konto']));
+            $sg_lcfg['konto'] = '';
+            sg_config_write($sg_lcfg);
+            @unlink(sg_tmpdir() . '/linkuri.txt');
+            $sg_meldungen[] = sg_t('EINST.M_LOESEN_OK');
+        } else {
+            $sg_fehler[] = sprintf(sg_t('EINST.M_LOESEN_FEHLER'), sg_e($sg_a['fehler']));
+        }
+    }
+    $sg_tab = 'tab-settings';
+}
+
 /* ================= Kill-Schalter ================= */
 if ($sg_post && isset($_POST['sperre'])) {
     $sg_scfg = sg_config();
@@ -609,6 +652,25 @@ $sg_reiter = array(
 <?php if (!$sg_lebt) { ?><div class="sm-warnung"><?= sg_t('EINST.LINK_KEIN_DIENST') ?></div><?php } ?>
 <?php } ?>
 
+<?php if ((string) $sg_cfg['konto'] !== '') { ?>
+<h2><?= sg_e(sg_t('EINST.H_LOESEN')) ?></h2>
+<div class="sm-warnung"><?= sg_t('EINST.LOESEN_TEXT') ?></div>
+<form action="index.php" method="post">
+  <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+  <input data-role="none" type="hidden" name="link_loesen" value="1">
+  <div class="sm-feld">
+    <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+      <input data-role="none" type="checkbox" name="loesen_ok" value="1">
+      <?= sg_e(sg_t('EINST.L_LOESEN_OK')) ?>
+    </label>
+  </div>
+  <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
+  <div class="sm-knopfreihe">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('EINST.K_LOESEN')) ?></button>
+  </div>
+</form>
+<?php } ?>
+
 <form action="index.php" method="post" autocomplete="off">
 <input data-role="none" type="hidden" name="speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -1041,6 +1103,11 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="stop">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_STOP')) ?></button></form>
+<?php if (sg_bogen() !== '' && sg_bogen() !== 'amd64' && !is_file(sg_nativ_datei())) { ?>
+<form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <input data-role="none" type="hidden" name="testaktion" value="nativ">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_NATIV')) ?></button></form>
+<?php } ?>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="token">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_TOKEN')) ?></button></form>

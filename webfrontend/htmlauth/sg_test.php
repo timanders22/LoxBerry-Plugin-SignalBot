@@ -39,7 +39,22 @@ function sg_pruefungen()
     // steht so in den Systemanforderungen von signal-cli.
     $bogen = trim(shell_exec('dpkg --print-architecture 2>/dev/null') ?: '');
     if ($bogen !== '' && $bogen !== 'amd64') {
-        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_BOGEN'), sprintf(sg_t('TEST.A_BOGEN_ARM'), sg_e($bogen)));
+        /* Auf ARM entscheidet die nachgereichte Bibliothek. Sie liegt im
+         * Ordner nativ des Plugins; der Dienst findet sie ueber
+         * LD_LIBRARY_PATH, das postroot.sh in die Unit schreibt. */
+        $nativ = sg_nativ_datei();
+        if (is_file($nativ)) {
+            $z[] = sg_pruefzeile(1, sg_t('TEST.F_BOGEN'),
+                sprintf(sg_t('TEST.A_BOGEN_NATIV'), sg_e($bogen),
+                        number_format(filesize($nativ) / 1048576, 1, ',', '.')));
+        } else {
+            $sg_f = sg_libsignal_fassung();
+            $z[] = sg_pruefzeile(-1, sg_t('TEST.F_BOGEN'),
+                sprintf(sg_t('TEST.A_BOGEN_ARM'), sg_e($bogen))
+                . ' ' . sprintf(sg_t('TEST.A_BOGEN_ORT'),
+                    $sg_f !== '' ? sg_e($sg_f) : sg_t('TEST.A_BOGEN_UNBEKANNT'), sg_e($bogen),
+                    sg_e(sg_nativ_seite()), sg_e(sg_nativ_ordner())));
+        }
     } elseif ($bogen !== '') {
         $z[] = sg_pruefzeile(1, sg_t('TEST.F_BOGEN'), sprintf(sg_t('TEST.A_BOGEN_OK'), sg_e($bogen)));
     }
@@ -235,6 +250,71 @@ function sg_pruefungen()
 }
 
 /**
+ * Die native Bibliothek beschaffen und ablegen.
+ *
+ * BEWUSST EIN KNOPF UND KEIN AUTOMATISMUS. Es ist ein Bau eines Dritten
+ * (exquo/signal-libs-build), den das signal-cli-Wiki unter "Provide native
+ * lib for libsignal" verlinkt - nicht von den signal-cli-Entwicklern. Wer
+ * ihn holt, soll das entscheiden und nicht nebenbei bekommen; deshalb steht
+ * der Knopf bei den orangen und die Herkunft im Text daneben.
+ *
+ * Geholt wird ueber curl und tar - beides ist da (curl steht in dpkg/apt).
+ * Die Fassung stammt aus dem Dateinamen des mitgelieferten JAR, wird also
+ * nicht geraten. Nach dem Auspacken wird geprueft, ob wirklich eine
+ * ELF-Bibliothek angekommen ist; eine Fehlerseite von GitHub waere sonst
+ * eine Datei, die "da" ist und nichts taugt.
+ */
+function sg_nativ_holen()
+{
+    $bogen = sg_bogen();
+    $ziel3 = sg_nativ_ziel();
+    $fassung = sg_libsignal_fassung();
+    if ($ziel3 === '' || $fassung === '') {
+        return array(0, sprintf(sg_t('TEST.M_NATIV_UNBEKANNT'), sg_e($bogen)));
+    }
+    $ordner = sg_nativ_ordner();
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true)) {
+        return array(0, sprintf(sg_t('TEST.M_NATIV_ORDNER'), sg_e($ordner)));
+    }
+    if (!is_writable($ordner)) {
+        return array(0, sprintf(sg_t('TEST.M_NATIV_ORDNER'), sg_e($ordner)));
+    }
+    $url = 'https://github.com/exquo/signal-libs-build/releases/download/libsignal_v'
+         . $fassung . '/libsignal_jni.so-v' . $fassung . '-' . $ziel3 . '.tar.gz';
+    $tmp = sg_tmpdir() . '/libsignal_jni.tar.gz';
+    @unlink($tmp);
+    $rc = 0; $aus = array();
+    @exec('curl -sSL --max-time 300 --retry 2 -o ' . escapeshellarg($tmp) . ' '
+          . escapeshellarg($url) . ' 2>&1', $aus, $rc);
+    if ($rc !== 0 || !is_file($tmp) || filesize($tmp) < 100000) {
+        @unlink($tmp);
+        sg_log('Native Bibliothek: Download fehlgeschlagen (' . $url . ')');
+        return array(0, sprintf(sg_t('TEST.M_NATIV_LADEN'), sg_e($url)));
+    }
+    $aus = array(); $rc = 0;
+    @exec('tar xzf ' . escapeshellarg($tmp) . ' -C ' . escapeshellarg($ordner)
+          . ' libsignal_jni.so 2>&1', $aus, $rc);
+    @unlink($tmp);
+    $datei = sg_nativ_datei();
+    if ($rc !== 0 || !is_file($datei)) {
+        return array(0, sg_t('TEST.M_NATIV_PACKEN'));
+    }
+    // Wirklich eine Bibliothek? Die ersten vier Byte einer ELF-Datei.
+    $fp = @fopen($datei, 'rb');
+    $kopf = $fp ? fread($fp, 4) : '';
+    if ($fp) { fclose($fp); }
+    if ($kopf !== "\x7fELF") {
+        @unlink($datei);
+        return array(0, sg_t('TEST.M_NATIV_KEINE_LIB'));
+    }
+    @chmod($datei, 0644);
+    sg_log('Native Bibliothek libsignal ' . $fassung . ' fuer ' . $bogen . ' abgelegt: ' . $datei);
+    sg_ereignis_merken('Oberflaeche', 'libsignal geholt', $fassung . ' / ' . $bogen);
+    return array(1, sprintf(sg_t('TEST.M_NATIV_OK'), sg_e($fassung),
+        number_format(filesize($datei) / 1048576, 1, ',', '.')));
+}
+
+/**
  * Die Knopf-Aktionen des Reiters Test.
  * Rueckgabe: array(ok, Meldung)
  */
@@ -268,6 +348,9 @@ function sg_test_aktion($was, $zusatz = '')
             $erg = sg_verarbeite($von, $zusatz, true);
             return array(1, sprintf(sg_t('TEST.M_TROCKEN'), sg_e($zusatz), sg_e($erg['grund']),
                 $erg['antwort'] === '' ? sg_t('TEST.M_TROCKEN_STILL') : nl2br(sg_e($erg['antwort']))));
+
+        case 'nativ':
+            return sg_nativ_holen();
 
         case 'token':
             $neu = sg_config();

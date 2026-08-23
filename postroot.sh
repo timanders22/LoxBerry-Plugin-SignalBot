@@ -21,6 +21,26 @@ ZIEL=/opt
 BOGEN=$(dpkg --print-architecture 2>/dev/null)
 echo "<INFO> Architektur: $BOGEN"
 
+# ---- Ablage fuer eine nachgereichte native Bibliothek ----
+#
+# Auf ARM fehlt libsignal-client im Archiv. Nachtragen laesst sie sich ohne
+# Eingriff ins JAR: libsignal faellt auf System.loadLibrary("signal_jni")
+# zurueck und durchsucht den java.library.path, und den erweitert
+# LD_LIBRARY_PATH. Am Geraet gemessen (23.08.2026, Pi 4, arm64):
+#
+#     Failed to call libsignal-client: no signal_jni in java.library.path: ...
+#     LD_LIBRARY_PATH=$HOME/nativ signal-cli ... listAccounts -> Rueckgabewert 0
+#
+# Der Ordner gehoert dem Benutzer loxberry. Das ist der Kern der Sache: die
+# Unit schreibt nur der Installer, und der laeuft als root - alles danach,
+# also das Ablegen der Datei und das Starten des Dienstes, geht ohne root.
+# NEBEN dem Datenordner: purge_installation loescht bei jedem Update
+# data/plugins/<ordner>/ vollstaendig, die Bibliothek waere sonst jedes Mal weg.
+NATIVDIR="$ARGV5/data/plugins/$ARGV3.nativ"
+mkdir -p "$NATIVDIR"
+chown loxberry:loxberry "$NATIVDIR" 2>/dev/null
+chmod 0775 "$NATIVDIR"
+
 # ---- php-mbstring fuer die PHP-Fassung, die hier wirklich laeuft ----
 #
 # In dpkg/apt stand bis 0.9.11 "php-mbstring". Das ist ein Metapaket und zeigt
@@ -155,43 +175,14 @@ if [ "$BOGEN" != "amd64" ]; then
         STARTBAR=1
         echo "<OK> $NATIV liegt im JAR - der Dienst kann auf $BOGEN arbeiten."
     fi
+    # Oder sie liegt nachgereicht im Ordner nativ. Der Name ist der, den
+    # System.loadLibrary("signal_jni") sucht: lib + signal_jni + .so
+    if [ "$STARTBAR" = "0" ] && [ -f "$NATIVDIR/libsignal_jni.so" ]; then
+        STARTBAR=1
+        echo "<OK> libsignal_jni.so liegt in $NATIVDIR - der Dienst kann arbeiten."
+    fi
 fi
 
-if [ "$BOGEN" != "amd64" ] && [ "$STARTBAR" = "0" ]; then
-    echo "<WARNING> ============================================================"
-    echo "<WARNING> Die native Bibliothek libsignal-client liegt diesem Archiv"
-    echo "<WARNING> NUR fuer x86_64 bei. Auf '$BOGEN' fehlt sie, und signal-cli"
-    echo "<WARNING> bricht beim ersten Zugriff ab."
-    echo "<WARNING>"
-    echo "<WARNING> Der Dienst wird deshalb eingerichtet, aber WEDER GESTARTET"
-    echo "<WARNING> NOCH AKTIVIERT - er wuerde sonst alle zehn Sekunden neu"
-    echo "<WARNING> anlaufen und wieder abstuerzen."
-    echo "<WARNING>"
-    echo "<WARNING> Drei Wege:"
-    echo "<WARNING>  a) Fertiges Paket fuer $BOGEN. Das signal-cli-Wiki verlinkt"
-    echo "<WARNING>     unter 'Binary distributions' eine Paketquelle, die auch"
-    echo "<WARNING>     arm64 fuehrt; 'signal-cli-native' braucht kein Java."
-    echo "<WARNING>     Es ist ein Fremdpaket - bitte selbst einrichten:"
-    echo "<WARNING>       https://github.com/AsamK/signal-cli/wiki/Binary-distributions"
-    echo "<WARNING>  b) libsignal_jni_aarch64.so fuer $BOGEN beschaffen und in"
-    echo "<WARNING>     das JAR legen - Anleitung im signal-cli-Wiki unter"
-    echo "<WARNING>     'Provide native lib for libsignal'. Der Name traegt seit"
-    echo "<WARNING>     signal-cli 0.13.6 den Architektur-Zusatz."
-    echo "<WARNING>  c) signal-cli auf einem anderen Rechner betreiben und im"
-    echo "<WARNING>     Reiter Einstellungen dessen Adresse eintragen."
-    echo "<WARNING>"
-    echo "<WARNING> Laeuft signal-cli danach - oder laeuft es hier bereits,"
-    echo "<WARNING> etwa als Paket signal-cli-native -, genuegt im Plugin der"
-    echo "<WARNING> Reiter Test: dort 'Dienst starten' und 'Autostart"
-    echo "<WARNING> einschalten'. Beides braucht KEINE root-Rechte, dafuer"
-    echo "<WARNING> gibt es die sudo-Regel dieses Plugins."
-    echo "<WARNING> Ueber SSH als Benutzer loxberry dasselbe:"
-    echo "<WARNING>   sudo -n /bin/systemctl enable signal-cli-loxberry"
-    echo "<WARNING>   sudo -n /bin/systemctl start signal-cli-loxberry"
-    echo "<WARNING>"
-    echo "<WARNING> Der Reiter Test sagt jederzeit, woran es gerade haengt."
-    echo "<WARNING> ============================================================"
-fi
 
 # ---- Dienst ----
 # Eigener Systembenutzer: der Bot haelt Signal-Schluessel, die haben in
@@ -203,7 +194,9 @@ mkdir -p /var/lib/signal-cli
 chown -R signalcli:signalcli /var/lib/signal-cli
 chmod 0700 /var/lib/signal-cli
 
-cat > /etc/systemd/system/signal-cli-loxberry.service <<'UNIT'
+# Heredoc OHNE Anfuehrungszeichen: $NATIVDIR muss ersetzt werden. Andere
+# Dollarzeichen kommen in der Unit nicht vor.
+cat > /etc/systemd/system/signal-cli-loxberry.service <<UNIT
 [Unit]
 Description=signal-cli JSON-RPC daemon for the LoxBerry Signal Bot
 After=network-online.target
@@ -214,6 +207,10 @@ Type=simple
 User=signalcli
 Group=signalcli
 Environment=XDG_DATA_HOME=/var/lib/signal-cli
+# Hier sucht die Java-Laufzeit zusaetzlich nach nativen Bibliotheken. Der
+# Ordner gehoert loxberry: wer libsignal_jni.so nachreicht, braucht dafuer
+# kein root. Ohne die Datei ist die Zeile wirkungslos.
+Environment=LD_LIBRARY_PATH=$NATIVDIR
 # Mehrkontenbetrieb (ohne -a): nur so gibt es startLink und finishLink,
 # und nur damit laesst sich das Konto aus der Oberflaeche verknuepfen.
 ExecStart=/usr/local/bin/signal-cli --config /var/lib/signal-cli daemon --http=127.0.0.1:8095
@@ -223,7 +220,11 @@ RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only statt true: auf vielen LoxBerry-Anlagen ist /opt/loxberry ein
+# Verweis nach /home/loxberry. Mit ProtectHome=true waere der Ordner nativ
+# fuer den Dienst unerreichbar - er liegt dann naemlich unter /home. Gelesen
+# werden muss er, geschrieben nicht.
+ProtectHome=read-only
 ReadWritePaths=/var/lib/signal-cli
 
 [Install]
@@ -264,7 +265,62 @@ if [ "$STARTBAR" = "1" ]; then
     echo "<INFO> Naechster Schritt: im Plugin den Reiter Einstellungen oeffnen und"
     echo "<INFO> das Signal-Konto als Zweitgeraet verknuepfen."
 else
-    echo "<OK> Dienst signal-cli-loxberry eingerichtet, aber nicht gestartet."
-    echo "<INFO> Warum, steht in der Warnung weiter oben und im Reiter Test."
+    echo "<OK> Dienst signal-cli-loxberry eingerichtet, aber noch nicht gestartet."
 fi
+
+# Der Hinweis steht ABSICHTLICH hier unten, als Letztes.
+#
+# Er stand bis 0.9.13 mitten im Ablauf und war als <WARNING> ausgezeichnet.
+# Beides war unguenstig: die Installation ist gelungen, es fehlt nur ein
+# Schritt an einer fremden Voraussetzung - ein <WARNING> mitten im Protokoll
+# liest sich wie ein Defekt des Plugins. Und was in der Mitte steht, hat man
+# am Ende der Installation vergessen. Deshalb: <INFO>, und zwar zuletzt.
+if [ "$BOGEN" != "amd64" ] && [ "$STARTBAR" = "0" ]; then
+    echo "<INFO> ------------------------------------------------------------"
+    echo "<INFO> NOCH EIN SCHRITT, DANN IST DER BOT BEREIT"
+    echo "<INFO>"
+    echo "<INFO> Das Plugin ist vollstaendig installiert. Was noch fehlt,"
+    echo "<INFO> gehoert nicht zum Plugin, sondern zu signal-cli: dessen"
+    echo "<INFO> native Bibliothek libsignal-client liegt dem Archiv NUR fuer"
+    echo "<INFO> x86_64 bei. Auf '$BOGEN' fehlt sie."
+    echo "<INFO>"
+    echo "<INFO> Der Dienst ist deshalb eingerichtet, aber noch nicht"
+    echo "<INFO> gestartet - er wuerde sonst alle zehn Sekunden neu anlaufen"
+    echo "<INFO> und wieder abstuerzen. Das ist Absicht, kein Fehler."
+    echo "<INFO>"
+    echo "<INFO> Der bequemste Weg fuehrt ueber die Oberflaeche: Reiter Test,"
+    echo "<INFO> Knopf 'Bibliothek libsignal holen'. Er laedt die passende"
+    echo "<INFO> Datei, legt sie richtig ab und sagt danach, was zu tun ist."
+    echo "<INFO>"
+    echo "<INFO> Von Hand geht es auch, auf drei Wegen:"
+    echo "<INFO>  a) Fertiges Paket fuer $BOGEN. Das signal-cli-Wiki verlinkt"
+    echo "<INFO>     unter 'Binary distributions' eine Paketquelle, die auch"
+    echo "<INFO>     arm64 fuehrt; 'signal-cli-native' braucht kein Java."
+    echo "<INFO>     Es ist ein Fremdpaket - bitte selbst einrichten:"
+    echo "<INFO>       https://github.com/AsamK/signal-cli/wiki/Binary-distributions"
+    echo "<INFO>  b) libsignal_jni.so fuer $BOGEN in diesen Ordner legen:"
+    echo "<INFO>       $NATIVDIR"
+    echo "<INFO>     Der Ordner gehoert loxberry - dafuer wird KEIN root"
+    echo "<INFO>     gebraucht, auch nicht zum anschliessenden Starten."
+    echo "<INFO>     Fertige Baue verlinkt das signal-cli-Wiki unter"
+    echo "<INFO>     'Provide native lib for libsignal'; die Fassung muss zu"
+    echo "<INFO>     der im JAR passen (signal-cli 0.14.7 -> libsignal 0.99.1)."
+    echo "<INFO>     Der Reiter Test sagt, ob die Datei erkannt wurde."
+    echo "<INFO>  c) signal-cli auf einem anderen Rechner betreiben und im"
+    echo "<INFO>     Reiter Einstellungen dessen Adresse eintragen."
+    echo "<INFO>"
+    echo "<INFO> Laeuft signal-cli danach - oder laeuft es hier bereits,"
+    echo "<INFO> etwa als Paket signal-cli-native -, genuegt im Plugin der"
+    echo "<INFO> Reiter Test: dort 'Dienst starten' und 'Autostart"
+    echo "<INFO> einschalten'. Beides braucht KEINE root-Rechte, dafuer"
+    echo "<INFO> gibt es die sudo-Regel dieses Plugins."
+    echo "<INFO> Ueber SSH als Benutzer loxberry dasselbe:"
+    echo "<INFO>   sudo -n /bin/systemctl enable signal-cli-loxberry"
+    echo "<INFO>   sudo -n /bin/systemctl start signal-cli-loxberry"
+    echo "<INFO>"
+    echo "<INFO> Der Reiter Test sagt jederzeit, woran es gerade haengt -"
+    echo "<INFO> mit Anleitung Schritt fuer Schritt."
+    echo "<INFO> ------------------------------------------------------------"
+fi
+
 exit 0

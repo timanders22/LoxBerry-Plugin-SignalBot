@@ -1593,6 +1593,87 @@ function sg_zaehle_ereignisse($was, $sekunden = 3600)
     return $n;
 }
 
+/* ==================================================================
+ * Die native Bibliothek libsignal (nur auf ARM ein Thema)
+ *
+ * signal-cli bringt libsignal-client nur fuer x86_64 mit. Auf ARM muss die
+ * Datei nachgereicht werden - ins JAR muss dafuer niemand hinein: libsignal
+ * faellt auf System.loadLibrary("signal_jni") zurueck und durchsucht den
+ * java.library.path, und den erweitert LD_LIBRARY_PATH. Genau das traegt
+ * postroot.sh in die Unit ein, mit einem Ordner, der dem Benutzer loxberry
+ * gehoert - alles Weitere geht deshalb ohne root.
+ * Am Geraet gemessen am 23.08.2026 (Raspberry Pi 4, LoxBerry 4.0.0.13).
+ * ================================================================== */
+
+/** Die Architektur, wie dpkg sie nennt (arm64, armhf, amd64 ...). */
+function sg_bogen()
+{
+    static $b = null;
+    if ($b === null) { $b = trim((string) @shell_exec('dpkg --print-architecture 2>/dev/null')); }
+    return $b;
+}
+
+/**
+ * Wo die nachgereichte Bibliothek liegt: NEBEN dem Datenordner des Plugins.
+ *
+ * Nicht darin. plugininstall.pl ruft bei jedem Update purge_installation, und
+ * das entfernt data/plugins/<ordner>/ vollstaendig - die 28 MB grosse Datei
+ * waere nach jeder Aktualisierung weg, und der Dienst startete nicht mehr.
+ * Dieselbe Ueberlegung wie bei der Zweitschrift der Konfiguration, die aus
+ * demselben Grund neben dem Ordner liegt. Das uninstall-Skript raeumt hier
+ * deshalb selbst auf.
+ */
+function sg_nativ_ordner()
+{
+    $p = sg_paths();
+    return $p['data'] . '.nativ';
+}
+function sg_nativ_datei()  { return sg_nativ_ordner() . '/libsignal_jni.so'; }
+
+/**
+ * Welche libsignal-Fassung verlangt das installierte signal-cli?
+ *
+ * Aus dem Dateinamen des mitgelieferten JAR gelesen, nicht geraten - eine
+ * nachgereichte Bibliothek muss dazu passen. Leer, wenn nichts gefunden wird.
+ */
+function sg_libsignal_fassung()
+{
+    $orte = array();
+    $link = @readlink('/usr/local/bin/signal-cli');
+    if ($link) { $orte[] = dirname(dirname($link)) . '/lib'; }
+    foreach (glob('/opt/signal-cli-*/lib') ?: array() as $o) { $orte[] = $o; }
+    foreach ($orte as $o) {
+        foreach (glob($o . '/libsignal-client-*.jar') ?: array() as $jar) {
+            if (preg_match('/libsignal-client-([0-9]+\.[0-9]+\.[0-9]+)\.jar$/', $jar, $m)) {
+                return $m[1];
+            }
+        }
+    }
+    return '';
+}
+
+/** Der Dreiklang, unter dem der Fremdbau die Datei fuehrt. */
+function sg_nativ_ziel()
+{
+    $karte = array(
+        'arm64' => 'aarch64-unknown-linux-gnu',
+        'armhf' => 'armv7-unknown-linux-gnueabihf',
+        'amd64' => 'x86_64-unknown-linux-gnu',
+        'i386'  => 'i686-unknown-linux-gnu',
+    );
+    $b = sg_bogen();
+    return isset($karte[$b]) ? $karte[$b] : '';
+}
+
+/** Die Seite, auf der die Baue liegen - fuer den Weg von Hand. */
+function sg_nativ_seite()
+{
+    $f = sg_libsignal_fassung();
+    return $f === ''
+        ? 'https://github.com/exquo/signal-libs-build/releases'
+        : 'https://github.com/exquo/signal-libs-build/releases/tag/libsignal_v' . $f;
+}
+
 /** Sekunden seit dem letzten ausgefuehrten Befehl; -1 = noch keiner. */
 function sg_letzter_befehl()
 {

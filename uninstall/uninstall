@@ -26,6 +26,13 @@ rm -rf "/tmp/$ARGV3"
 # ueberlebt. Genau deshalb ueberlebt sie auch die Deinstallation - und darin
 # stehen Zugriffstoken, PIN-Hash und alle erlaubten Rufnummern. Wer neben dem
 # Ordner ablegt, raeumt hier selbst auf.
+# Die native Bibliothek liegt neben dem Datenordner, damit sie Updates
+# ueberlebt - also ueberlebt sie auch die Deinstallation. Hier weg damit.
+if [ -n "$ARGV5" ] && [ -d "$ARGV5/data/plugins/$ARGV3.nativ" ]; then
+    rm -rf "$ARGV5/data/plugins/$ARGV3.nativ"
+    echo "<OK> Ordner mit der nativen Bibliothek entfernt."
+fi
+
 if [ -n "$ARGV5" ] && [ -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json" ]; then
     rm -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json"
     echo "<OK> Zweitschrift der Konfiguration entfernt (enthielt Token und Rufnummern)."
