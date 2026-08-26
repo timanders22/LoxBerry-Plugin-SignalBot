@@ -71,6 +71,23 @@ $sg_meldungen = array();
 $sg_fehler = array();
 $sg_qr = '';
 
+/* ==================================================================
+ * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
+ * ==================================================================
+ *
+ * Stand der Kopf davor, war er beim Aufruf von header() schon
+ * geschrieben - "Cannot modify header information", und der Knopf
+ * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON
+ * statt einer Datei.
+ *
+ * Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos und
+ * headers_sent() immer falsch. Und wer OHNE gueltiges Formularmerkmal
+ * misst, wird vom Wachposten abgewiesen, bevor der Handler anlaeuft.
+ * Beides hat den Fehler lange verdeckt.
+ *
+ * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
+ * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * ================================================================== */
 /* ================= Vorlage herunterladen (vor jeder Ausgabe) ================= */
 if ($sg_post && isset($_POST['vorlage']) || $sg_post && isset($_POST['vorlage_out'])) {
     list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage();
@@ -462,9 +479,6 @@ if ($sg_uri) {
     if ($sg_png) { $sg_qr = 'data:image/png;base64,' . base64_encode($sg_png); }
 }
 
-if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader(sg_t('ALLG.TITEL'), 'https://github.com/AsamK/signal-cli/wiki', 'help.html');
-}
 
 /* ---------------- Einstellungen sichern ----------------
  *
@@ -511,6 +525,11 @@ if ($sg_post && isset($_POST['sg_zurueck'])) {
             $sg_fehler[] = sg_t('EINST.SICH_SCHREIBFEHLER');
         }
     }
+}
+
+
+if (class_exists('LBWeb', false)) {
+    LBWeb::lbheader(sg_t('ALLG.TITEL'), 'https://github.com/AsamK/signal-cli/wiki', 'help.html');
 }
 
 ?>
