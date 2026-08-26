@@ -465,6 +465,54 @@ if ($sg_uri) {
 if (class_exists('LBWeb', false)) {
     LBWeb::lbheader(sg_t('ALLG.TITEL'), 'https://github.com/AsamK/signal-cli/wiki', 'help.html');
 }
+
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
+ * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
+ * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
+ * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
+if ($sg_post && isset($_POST['sg_sichern'])) {
+    $sg_js = json_encode(sg_config(),
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($sg_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="signalbot_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        echo $sg_js;
+        exit;
+    }
+    $sg_fehler[] = sg_t('EINST.SICH_SCHREIBFEHLER');
+}
+
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
+ * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+if ($sg_post && isset($_POST['sg_zurueck'])) {
+    if (!isset($_FILES['sg_sicherung']) || !is_array($_FILES['sg_sicherung'])
+        || !isset($_FILES['sg_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['sg_sicherung']['tmp_name'])) {
+        $sg_fehler[] = sg_t('EINST.SICH_KEINE_DATEI');
+    } elseif ((int) $_FILES['sg_sicherung']['size'] > 262144) {
+        $sg_fehler[] = sg_t('EINST.SICH_ZU_GROSS');
+    } else {
+        list($sg_neu, $sg_mangel, $sg_n) = sg_sicherung_lesen(
+            (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name']));
+        if ($sg_neu === null) {
+            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
+             * nichts. */
+            $sg_fehler[] = sg_t('EINST.SICH_ABGELEHNT') . ' '
+                            . implode(' ', $sg_mangel);
+        } elseif (sg_config_write($sg_neu)) {
+            $sg_meldungen[] = sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n);
+        } else {
+            $sg_fehler[] = sg_t('EINST.SICH_SCHREIBFEHLER');
+        }
+    }
+}
+
 ?>
 <style>
 /* Hausstandard: eigener Behaelter, kein Schattenwurf, Reiter im Fluss */
@@ -617,7 +665,7 @@ $sg_reiter = array(
 
 <h2><?= sg_e(sg_t('EINST.H_SPERRE')) ?></h2>
 <div class="sm-warnung"><?= sg_t('EINST.SPERRE_TEXT') ?></div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span> <span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -789,6 +837,25 @@ $sg_reiter = array(
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
+
+<h2><?= sg_t('EINST.H_SICHERUNG') ?></h2>
+<div class="sm-hinweis"><?= sg_t('EINST.SICH_ERKLAERUNG') ?></div>
+<div class="sm-warnung"><?= sg_t('EINST.SICH_WARNUNG') ?></div>
+<div class="sm-knopfreihe">
+  <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
+       exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
+       Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
+       einen Download, der das Speichern verschluckt. -->
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="sg_sichern" value="1"><?= sg_t('EINST.K_SICHERN') ?></button>
+  </form>
+  <form action="index.php" method="post" enctype="multipart/form-data">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <input data-role="none" type="file" name="sg_sicherung" accept=".json">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="sg_zurueck" value="1"><?= sg_t('EINST.K_ZURUECK') ?></button>
+  </form>
+</div>
 </div>
 
 <!-- ================= Reiter: Befehle ================= -->
@@ -896,7 +963,7 @@ $sg_reiter = array(
 <div class="sm-step"><b><?= sg_e(sg_t('MQTT.H_ABO')) ?></b><br>
 <?= sg_t('MQTT.ABO_TEXT') ?>
 <div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/#</div>
-<?= sg_t('MQTT.ABO_WARNUNG') ?>
+<?= sg_abo_text() ?>
 </div>
 
 <h3><?= sg_e(sg_t('MQTT.H_THEMEN')) ?></h3>
@@ -931,7 +998,7 @@ $sg_reiter = array(
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.SABO_T')) ?></b><br>
 <?= sg_t('LOX.SABO') ?>
 <div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/#</div>
-<?= sg_t('MQTT.ABO_WARNUNG') ?>
+<?= sg_abo_text() ?>
 </div>
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S1_T')) ?></b><br>
