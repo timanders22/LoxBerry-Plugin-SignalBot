@@ -118,7 +118,7 @@ function sg_paths()
             'sicherung' => $home . '/config/plugins/' . $plugin . '.backup.signalbot.json',
             'sicherung_alt' => $home . '/config/plugins/' . $plugin . '/signalbot.backup.json',
             'configdir' => $home . '/config/plugins/' . $plugin,
-            'data'      => $home . '/data/plugins/' . $plugin,
+            'datadir'      => $home . '/data/plugins/' . $plugin,
             'log'       => $home . '/log/plugins/' . $plugin . '/signalbot.log',
             'tmp'       => '/tmp/' . $plugin,
         );
@@ -129,7 +129,7 @@ function sg_paths()
         'sicherung' => $eigen . '/config/signalbot.backup.json',
         'sicherung_alt' => $eigen . '/config/signalbot.backup.json',
         'configdir' => $eigen . '/config',
-        'data' => sys_get_temp_dir() . '/signalbot',
+        'datadir' => sys_get_temp_dir() . '/signalbot',
         'log' => sys_get_temp_dir() . '/signalbot/signalbot.log',
         'tmp' => sys_get_temp_dir() . '/signalbot');
 }
@@ -144,8 +144,8 @@ function sg_tmpdir()
 function sg_datadir()
 {
     $p = sg_paths();
-    if (!is_dir($p['data'])) { @mkdir($p['data'], 0775, true); }
-    return $p['data'];
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    return $p['datadir'];
 }
 
 /**
@@ -1658,7 +1658,7 @@ function sg_bogen()
 function sg_nativ_ordner()
 {
     $p = sg_paths();
-    return $p['data'] . '.nativ';
+    return $p['datadir'] . '.nativ';
 }
 function sg_nativ_datei()  { return sg_nativ_ordner() . '/libsignal_jni.so'; }
 
@@ -1996,7 +1996,7 @@ function sg_merkwort()
         return $wort;
     }
     $pfade = sg_paths();
-    $verz  = isset($pfade['data']) ? $pfade['data'] : '';
+    $verz  = isset($pfade['datadir']) ? $pfade['datadir'] : '';
     if ($verz === '') {
         return '';
     }
