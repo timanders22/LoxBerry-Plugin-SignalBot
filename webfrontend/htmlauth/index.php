@@ -69,6 +69,24 @@ if (isset($_GET['form']) && preg_match($sg_muster, 'tab-' . $_GET['form'])) {
 $sg_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 $sg_meldungen = array();
 $sg_fehler = array();
+
+/* ---------------------------------------------------------------- *
+ * Der Wachposten - EIN Posten, vor allen Handlern.
+ * Abgewiesen heisst gemeldet, und es wird NICHTS ausgefuehrt: $_POST
+ * wird geleert, nur der aktive Reiter bleibt stehen, damit der Bediener
+ * nach der Abweisung dort steht, wo er war.
+ * ---------------------------------------------------------------- */
+$sg_wache = sg_wachposten();
+if ($sg_wache !== '') {
+    $sg_reiter_merk = isset($_POST['activetab']) && is_string($_POST['activetab'])
+        ? (string) $_POST['activetab'] : null;
+    $_POST = array();
+    if ($sg_reiter_merk !== null) {
+        $_POST['activetab'] = $sg_reiter_merk;
+    }
+    $sg_fehler[] = $sg_wache;
+}
+
 $sg_qr = '';
 
 /* ==================================================================
@@ -687,6 +705,7 @@ $sg_reiter = array(
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span> <span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-settings">
   <input data-role="none" type="hidden" name="sperre" value="<?= empty($sg_cfg['gesperrt']) ? 'ein' : 'aus' ?>">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('EINST.K_SPERREN') : sg_t('EINST.K_ENTSPERREN')) ?></button>
@@ -702,6 +721,7 @@ $sg_reiter = array(
   <div style="margin:12px 0;"><img src="<?= $sg_qr ?>" alt="QR" style="image-rendering:pixelated;"></div>
   <div class="sm-warnung"><?= sg_t('EINST.QR_WARNUNG') ?></div>
   <form action="index.php" method="post">
+    <?php echo sg_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="hidden" name="link_fertig" value="1">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('EINST.K_LINK_FERTIG')) ?></button>
@@ -711,6 +731,7 @@ $sg_reiter = array(
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-settings">
   <input data-role="none" type="hidden" name="link_start" value="1">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" <?= $sg_lebt ? '' : 'disabled' ?>><?= sg_e(sg_t('EINST.K_LINK_START')) ?></button>
@@ -723,6 +744,7 @@ $sg_reiter = array(
 <h2><?= sg_e(sg_t('EINST.H_LOESEN')) ?></h2>
 <div class="sm-warnung"><?= sg_t('EINST.LOESEN_TEXT') ?></div>
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-settings">
   <input data-role="none" type="hidden" name="link_loesen" value="1">
   <div class="sm-feld">
@@ -739,6 +761,7 @@ $sg_reiter = array(
 <?php } ?>
 
 <form action="index.php" method="post" autocomplete="off">
+  <?php echo sg_fmt(); ?>
 <input data-role="none" type="hidden" name="speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 
@@ -866,10 +889,12 @@ $sg_reiter = array(
        Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
        einen Download, der das Speichern verschluckt. -->
   <form action="index.php" method="post">
+    <?php echo sg_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="sg_sichern" value="1"><?= sg_t('EINST.K_SICHERN') ?></button>
   </form>
   <form action="index.php" method="post" enctype="multipart/form-data">
+    <?php echo sg_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="file" name="sg_sicherung" accept=".json">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="sg_zurueck" value="1"><?= sg_t('EINST.K_ZURUECK') ?></button>
@@ -884,6 +909,7 @@ $sg_reiter = array(
 <div class="sm-warnung"><?= sg_t('BEF.STUFEN') ?></div>
 
 <form action="index.php" method="post" autocomplete="off">
+  <?php echo sg_fmt(); ?>
 <input data-role="none" type="hidden" name="befehle_speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-befehle">
 <div style="overflow-x:auto;">
@@ -945,6 +971,7 @@ $sg_reiter = array(
 
 <h2><?= sg_e(sg_t('MQTT.H_EINSTELLUNG')) ?></h2>
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
 <input data-role="none" type="hidden" name="save_mqtt" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <div class="sm-feld">
@@ -1087,11 +1114,13 @@ $sg_reiter = array(
 <div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
   <input data-role="none" type="hidden" name="vorlage" value="1">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
 </form>
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
   <input data-role="none" type="hidden" name="vorlage_out" value="1">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
@@ -1144,6 +1173,7 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <p class="sm-hilfe"><?= sg_t('TEST.TROCKEN_TEXT') ?></p>
 <div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="trocken">
   <div class="sm-feld">
@@ -1164,9 +1194,11 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;aktion=status" target="_blank"><?= sg_e(sg_t('TEST.K_STATUS')) ?></a>
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;selftest=1" target="_blank"><?= sg_e(sg_t('TEST.K_SELFTEST')) ?></a>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="start">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('TEST.K_START')) ?></button></form>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="<?= sg_dienst_autostart() === 'enabled' ? 'disable' : 'enable' ?>">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_dienst_autostart() === 'enabled' ? sg_t('TEST.K_AUTOSTART_AUS') : sg_t('TEST.K_AUTOSTART_EIN')) ?></button></form>
 </div>
@@ -1181,20 +1213,25 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 </div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="probe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_PROBE')) ?></button></form>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="restart">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_RESTART')) ?></button></form>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="stop">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_STOP')) ?></button></form>
 <?php if (sg_bogen() !== '' && sg_bogen() !== 'amd64' && !is_file(sg_nativ_datei())) { ?>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="nativ">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_NATIV')) ?></button></form>
 <?php } ?>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="token">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('TEST.K_TOKEN')) ?></button></form>
 </div>
@@ -1220,6 +1257,7 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-log">
   <input data-role="none" type="hidden" name="clearaudit" value="1">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('LOG.K_AUDIT_LEEREN')) ?></button>
@@ -1241,6 +1279,7 @@ $sg_zeilen = is_file($sg_lf) ? array_slice(file($sg_lf, FILE_IGNORE_NEW_LINES) ?
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-log">
   <input data-role="none" type="hidden" name="clearlog" value="1">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('LOG.K_LEEREN')) ?></button>
