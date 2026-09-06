@@ -8,6 +8,35 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.20
+
+- **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 0.9.19 kam er von der
+  Oberfläche des LoxBerry. Am 05.09.2026 am Gerät gemessen (LoxBerry 4.0.0.15,
+  `system/css/components.css`): deren Regel `.lb-content select`
+  gibt es erst seit der neuen Oberfläche, und jede eigene Feldregel mit der
+  Kurzform `background:` löscht sie wieder. Darauf soll sich eine
+  Plugin-Oberfläche nicht verlassen (`Regeln/04`). Sonst ist an dieser
+  Fassung nichts geändert.
+
+### `cron.log` heißt jetzt `signalbot_start.log`
+
+Der Name war irreführend: die Datei sammelt nicht den Cron, sondern
+ausschließlich das, was beim Wecken des Bots schiefgeht. Das Protokoll des
+Bots ist und bleibt `signalbot.log`, geschrieben von `sg_bot.php` selbst,
+Zeile für Zeile.
+
+**Eine Restlücke bleibt, und sie steht jetzt im Skript.** Am Gerät gemessen
+(06.09.2026): der überlebende Bot (PID 822) erbt die Deskriptoren 1 und 2 auf
+diese Datei und hält sie, so lange er läuft. Wird die Ramdisk geleert,
+schreibt er in einen gelöschten Inode. Der nächste Minutenlauf legt die Datei
+zwar neu an — der bereits laufende Bot findet aber nicht mehr hin. Aus der
+Shell ist das nicht zu schließen: einem laufenden Prozess lassen sich seine
+Deskriptoren nicht tauschen. Betroffen ist nur dieser Nebenkanal, **nicht das
+Protokoll**; deshalb bleibt es bei der Richtigstellung des Namens.
+
+Der Befund stammt aus einem Durchgang über alle laufenden Dienste dieser
+Anlage; sieben hielten eine gelöschte Protokolldatei offen.
+
 ## Neu in 0.9.14
 
 **Auf ARM laeuft signal-cli jetzt ohne root.** Am Geraet gemessen

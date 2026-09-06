@@ -7,7 +7,21 @@
 # LoxBerry leitet die Ausgabe seiner Cron-Zeile bereits dorthin um, ein
 # zweites Mal macht jeden Startfehler unsichtbar. Genau daran ist der
 # Hintergrunddienst einer anderen Linie acht Fassungen lang gescheitert.
-LOG=REPLACELBPLOGDIR/cron.log
+# Diese Datei sammelt AUSSCHLIESSLICH, was beim Wecken schiefgeht. Das
+# Protokoll des Bots ist signalbot.log; das schreibt sg_bot.php selbst, Zeile
+# fuer Zeile (oeffnen, schreiben, schliessen) - dort haelt niemand etwas fest.
+#
+# Bis 0.9.20 hiess sie cron.log, was nach einem allgemeinen Cron-Protokoll
+# aussah. Der Name sagt jetzt, was drinsteht.
+#
+# Bekannte Restluecke, am Geraet gemessen (06.09.2026): der ueberlebende Bot
+# (PID 822) erbt die Deskriptoren 1 und 2 auf diese Datei und haelt sie, so
+# lange er laeuft. Wird die Ramdisk geleert, schreibt er in einen geloeschten
+# Inode. Der naechste Minutenlauf legt die Datei zwar neu an, aber der bereits
+# laufende Bot findet nicht mehr hin. Aus der Schale ist das nicht zu
+# schliessen - ein laufender Prozess laesst seine Deskriptoren nicht tauschen.
+# Betroffen ist nur dieser Nebenkanal, nicht das Protokoll.
+LOG=REPLACELBPLOGDIR/signalbot_start.log
 # Nicht unbegrenzt wachsen lassen; hier steht nur, was schiefgeht.
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
     : > "$LOG"
