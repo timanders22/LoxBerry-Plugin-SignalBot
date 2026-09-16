@@ -8,6 +8,31 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.22
+
+- **Keine Absturzschleife mehr, solange die Bibliothek fehlt.** Am Gerät
+  gemessen am 17.09.2026 (Raspberry Pi, arm64, 0.9.21): der Ordner
+  `signalbot.nativ` war leer, der Dienst `signal-cli-loxberry` aber
+  eingeschaltet. Er lief alle zwanzig bis dreißig Sekunden an und stürzte mit
+  `no signal_jni in java.library.path` wieder ab — 212 Neustarts in 56
+  Minuten, jeder 11 bis 21 Sekunden Rechenzeit. Angestoßen hat ihn zuletzt
+  der Bot selbst: seine Selbstheilung startete den Dienst alle drei Stunden
+  neu, und `Restart=always` hielt die Schleife danach am Leben.
+- Die Unit trägt jetzt auf ARM die Startbedingung
+  `ConditionPathExists=…/signalbot.nativ/libsignal_jni.so` und eine
+  Startgrenze (fünf Starts in fünf Minuten). Ohne die Datei wird ein Start
+  übersprungen, ohne Fehler und ohne Neustart; der Autostart darf
+  eingeschaltet bleiben. Liegt die Bibliothek im JAR, entfällt die Bedingung.
+- Die Installation hält einen laufenden Neustartzyklus an, wenn die
+  Bibliothek fehlt — die neue Bedingung allein beendet ihn nicht.
+- Die Selbstheilung des Bots setzt aus, solange die Datei fehlt, und sagt das
+  höchstens alle sechs Stunden im Protokoll.
+- *Dienst starten* und *Dienst neu starten* im Reiter Test melden in diesem
+  Fall nicht mehr „ausgeführt“, sondern was fehlt.
+- Die fünf Dateien, die noch Windows-Zeilenenden trugen, führen jetzt LF
+  (Hausregel seit 13.09.2026; am Gerät ändert das nichts, der Installer
+  wandelt ohnehin).
+
 ## Neu in 0.9.20
 
 - **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 0.9.19 kam er von der

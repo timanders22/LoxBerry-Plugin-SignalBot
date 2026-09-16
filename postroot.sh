@@ -164,15 +164,20 @@ fi
 #
 # Die Pruefung laeuft AUSSERHALB des Beschaffungsteils: sie muss auch dann
 # greifen, wenn signal-cli schon vorhanden war.
+# NATIVBEDINGUNG wird eine Zeile der Unit: fehlt die Bibliothek im JAR,
+# startet der Dienst nur, solange libsignal_jni.so im Ordner nativ liegt.
+NATIVBEDINGUNG=""
 if [ "$BOGEN" != "amd64" ]; then
     STARTBAR=0
     NATIV=""
+    NATIVBEDINGUNG="ConditionPathExists=$NATIVDIR/libsignal_jni.so"
     # Nur der Fall, der nachgemessen ist. Fuer jede andere Architektur bleibt
     # es beim Nichtstarten - lieber kein Dienst als ein Dienst in Endlosschleife.
     [ "$BOGEN" = "arm64" ] && NATIV="libsignal_jni_aarch64.so"
     JAR=$(ls "$ZIEL"/signal-cli-*/lib/libsignal-client-*.jar 2>/dev/null | head -1)
     if [ -n "$NATIV" ] && [ -n "$JAR" ] && command -v unzip >/dev/null 2>&1        && unzip -l "$JAR" 2>/dev/null | grep -q "$NATIV"; then
         STARTBAR=1
+        NATIVBEDINGUNG=""
         echo "<OK> $NATIV liegt im JAR - der Dienst kann auf $BOGEN arbeiten."
     fi
     # Oder sie liegt nachgereicht im Ordner nativ. Der Name ist der, den
@@ -194,13 +199,29 @@ mkdir -p /var/lib/signal-cli
 chown -R signalcli:signalcli /var/lib/signal-cli
 chmod 0700 /var/lib/signal-cli
 
-# Heredoc OHNE Anfuehrungszeichen: $NATIVDIR muss ersetzt werden. Andere
-# Dollarzeichen kommen in der Unit nicht vor.
+# Heredoc OHNE Anfuehrungszeichen: $NATIVDIR und $NATIVBEDINGUNG muessen
+# ersetzt werden. Andere Dollarzeichen kommen in der Unit nicht vor.
+#
+# Zwei Bremsen gegen eine Absturzschleife, beide seit 0.9.22. Bis dahin lief
+# der Dienst ohne libsignal_jni.so, einmal eingeschaltet, endlos: am Geraet
+# gemessen am 17.09.2026 212 Neustarts in 56 Minuten, jeder 11 bis 21
+# Sekunden Rechenzeit.
+#  - ConditionPathExists (nur wenn die Bibliothek nicht im JAR liegt): ohne
+#    die Datei wird ein Start uebersprungen, ohne Fehler und ohne Neustart.
+#    Der Autostart darf deshalb eingeschaltet bleiben - der Dienst wartet.
+#  - StartLimit: hoechstens fuenf Starts in fuenf Minuten, gleich aus welchem
+#    Grund er abstuerzt. Danach steht er, bis ihn der Bot oder der Reiter
+#    Test wieder anstoesst.
+# Die Bedingung muss unter [Unit] stehen; unter [Service] wird sie still
+# uebergangen (systemd-analyze verify, gemessen unter systemd 257).
 cat > /etc/systemd/system/signal-cli-loxberry.service <<UNIT
 [Unit]
 Description=signal-cli JSON-RPC daemon for the LoxBerry Signal Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+$NATIVBEDINGUNG
 
 [Service]
 Type=simple
@@ -238,6 +259,15 @@ systemctl daemon-reload
 if [ "$STARTBAR" = "1" ]; then
     systemctl enable signal-cli-loxberry >/dev/null 2>&1
     systemctl start signal-cli-loxberry >/dev/null 2>&1
+else
+    # Nicht startbar, aber womoeglich schon eingeschaltet und in der
+    # Schleife - von Hand, ueber den Reiter Test oder durch die
+    # Selbstheilung des Bots bis 0.9.21. Ein laufender Neustartzyklus prueft
+    # die neue Startbedingung NICHT erneut (gemessen am 17.09.2026 mit einer
+    # Probe-Unit unter systemd 257); er wird deshalb hier angehalten. Der
+    # Autostart bleibt, wie er ist.
+    systemctl stop signal-cli-loxberry >/dev/null 2>&1
+    systemctl reset-failed signal-cli-loxberry >/dev/null 2>&1
 fi
 
 # Der Benutzer loxberry muss den Dienst aus der Oberflaeche steuern koennen -
@@ -284,9 +314,9 @@ if [ "$BOGEN" != "amd64" ] && [ "$STARTBAR" = "0" ]; then
     echo "<INFO> native Bibliothek libsignal-client liegt dem Archiv NUR fuer"
     echo "<INFO> x86_64 bei. Auf '$BOGEN' fehlt sie."
     echo "<INFO>"
-    echo "<INFO> Der Dienst ist deshalb eingerichtet, aber noch nicht"
-    echo "<INFO> gestartet - er wuerde sonst alle zehn Sekunden neu anlaufen"
-    echo "<INFO> und wieder abstuerzen. Das ist Absicht, kein Fehler."
+    echo "<INFO> Der Dienst ist deshalb eingerichtet, aber angehalten. Er"
+    echo "<INFO> wartet auf die Datei: solange sie fehlt, startet er auch"
+    echo "<INFO> beim Hochfahren nicht. Das ist Absicht, kein Fehler."
     echo "<INFO>"
     echo "<INFO> Der bequemste Weg fuehrt ueber die Oberflaeche: Reiter Test,"
     echo "<INFO> Knopf 'Bibliothek libsignal holen'. Er laedt die passende"

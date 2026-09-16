@@ -255,7 +255,15 @@ while (true) {
          * Danach hoechstens noch einmal je halber Stunde, damit daraus keine
          * Startschleife wird. Ohne das klopft der Bot stundenlang an eine
          * Tuer, hinter der niemand mehr ist, und niemand merkt es. */
-        if ($fehler_folge === 5 || ($fehler_folge > 5 && $fehler_folge % 180 === 0)) {
+        if (($fehler_folge === 5 || ($fehler_folge > 5 && $fehler_folge % 180 === 0))
+            && sg_nativ_fehlt()) {
+            /* Ohne libsignal_jni.so ist ein Neustart keine Heilung, sondern der
+             * Anstoss zu einer Absturzschleife: bis 0.9.21 lief der Dienst
+             * danach bis zum naechsten Eingriff alle zwanzig Sekunden an und
+             * stuerzte wieder ab (gemessen am 17.09.2026). */
+            sg_log_gebremst('nativ_fehlt', 'Selbstheilung ausgesetzt: libsignal_jni.so fehlt in '
+                . sg_nativ_ordner() . ' - Reiter Test, Knopf "Bibliothek libsignal holen".', 21600);
+        } elseif ($fehler_folge === 5 || ($fehler_folge > 5 && $fehler_folge % 180 === 0)) {
             $sg_marke = sg_tmpdir() . '/dienst_neustart';
             $sg_letzt = is_file($sg_marke) ? (int) @file_get_contents($sg_marke) : 0;
             if (time() - $sg_letzt > 1800) {

@@ -327,6 +327,12 @@ function sg_test_aktion($was, $zusatz = '')
         case 'start':
         case 'stop':
         case 'restart':
+            // Ein Start ohne die Bibliothek meldet systemctl als gelungen -
+            // die Unit ueberspringt ihn aber wegen ihrer Startbedingung. Das
+            // hier zu sagen, statt "ausgefuehrt" zu melden, ist die Wirkung.
+            if (($was === 'start' || $was === 'restart') && sg_nativ_fehlt()) {
+                return array(0, sprintf(sg_t('TEST.M_DIENST_NATIV'), $was, sg_e(sg_nativ_ordner())));
+            }
             list($ok, $text) = sg_dienst($was);
             return array($ok, $ok ? sprintf(sg_t('TEST.M_DIENST_OK'), $was)
                                   : sprintf(sg_t('TEST.M_DIENST_FEHL'), $was, sg_e($text)));

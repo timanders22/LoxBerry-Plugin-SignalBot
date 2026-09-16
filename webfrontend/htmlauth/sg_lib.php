@@ -1670,18 +1670,59 @@ function sg_nativ_datei()  { return sg_nativ_ordner() . '/libsignal_jni.so'; }
  */
 function sg_libsignal_fassung()
 {
+    $jar = sg_libsignal_jar();
+    if ($jar !== '' && preg_match('/libsignal-client-([0-9]+\.[0-9]+\.[0-9]+)\.jar$/', $jar, $m)) {
+        return $m[1];
+    }
+    return '';
+}
+
+/** Das mitgelieferte libsignal-client-JAR; leer, wenn keines gefunden wird. */
+function sg_libsignal_jar()
+{
     $orte = array();
     $link = @readlink('/usr/local/bin/signal-cli');
     if ($link) { $orte[] = dirname(dirname($link)) . '/lib'; }
     foreach (glob('/opt/signal-cli-*/lib') ?: array() as $o) { $orte[] = $o; }
     foreach ($orte as $o) {
         foreach (glob($o . '/libsignal-client-*.jar') ?: array() as $jar) {
-            if (preg_match('/libsignal-client-([0-9]+\.[0-9]+\.[0-9]+)\.jar$/', $jar, $m)) {
-                return $m[1];
+            if (preg_match('/libsignal-client-([0-9]+\.[0-9]+\.[0-9]+)\.jar$/', $jar)) {
+                return $jar;
             }
         }
     }
     return '';
+}
+
+/**
+ * Fehlt die native Bibliothek, ohne die signal-cli auf diesem Geraet nicht
+ * startet?
+ *
+ * Dieselbe Frage, die postroot.sh stellt, bevor es die Unit schreibt: eine
+ * andere Architektur als amd64, keine libsignal_jni.so im Ordner nativ und
+ * - nur auf arm64 nachgemessen - auch keine passende Datei im JAR.
+ *
+ * Seit 0.9.22 fragen das auch der Bot, bevor er den Dienst neu startet, und
+ * die Knoepfe des Reiters Test, bevor sie einen Start melden. Anlass, am
+ * Geraet gemessen am 17.09.2026: ohne die Datei hing der Dienst in einer
+ * Absturzschleife, 212 Neustarts in 56 Minuten, jeder 11 bis 21 Sekunden
+ * Rechenzeit - angestossen alle drei Stunden von der Selbstheilung des Bots.
+ */
+function sg_nativ_fehlt()
+{
+    static $im_jar = null;
+    $b = sg_bogen();
+    if ($b === '' || $b === 'amd64' || is_file(sg_nativ_datei())) { return false; }
+    if ($im_jar === null) {
+        $im_jar = false;
+        $jar = sg_libsignal_jar();
+        if ($b === 'arm64' && $jar !== '') {
+            $aus = array(); $rc = 0;
+            @exec('unzip -l ' . escapeshellarg($jar) . ' 2>/dev/null', $aus, $rc);
+            $im_jar = $rc === 0 && strpos(implode("\n", $aus), 'libsignal_jni_aarch64.so') !== false;
+        }
+    }
+    return !$im_jar;
 }
 
 /** Der Dreiklang, unter dem der Fremdbau die Datei fuehrt. */
