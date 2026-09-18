@@ -26,4 +26,53 @@ LOG=REPLACELBPLOGDIR/signalbot_start.log
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
     : > "$LOG"
 fi
+
+# ---- Waehrend einer Aktualisierung nichts starten (neu in 0.9.23) ----
+#
+# Zwischen der neu abgelegten cron-Datei und postinstall.sh liegt am Geraet
+# fast eine Minute (Regeln/06, an der Einspeisebremse gemessen). Dieser
+# Aufruf hier startete in dieser Luecke bedingungslos - und
+# purge_installation hatte config/plugins/<ordner>/ gerade geloescht.
+#
+# In WSL Ubuntu nachgestellt am 18.09.2026 (Pruefung-SignalBot-0.9.23,
+# Faelle G1 und G2): der Bot lief an (1 Prozess) und legte
+# config/plugins/<ordner>/signalbot.json neu an. Lag die Zweitschrift neben
+# dem Ordner, heilte er daraus - Token und Weissliste blieben. Fehlte sie,
+# schrieb er eine Vorgabe mit NEUEM Aktionstoken und LEERER Weissliste und
+# zog die Zweitschrift darauf nach:
+#
+#     Token in der Konfiguration: sb4UYa45RHxE86xquWMza2shMzCOE02L
+#     Weissliste                : (leer)
+#
+# Damit waeren alle Adressen im Miniserver tot, die das alte Token tragen.
+#
+# preupgrade.sh legt die Marke als Erstes an, postroot.sh entfernt sie als
+# Letztes. Nur eine Marke, die hoechstens eine Stunde alt ist, zaehlt. Aelter,
+# aus der Zukunft oder unlesbar: eine abgebrochene Installation hat sie
+# liegen lassen, und der Bot darf nicht fuer immer stillstehen.
+MARKE=REPLACELBPDATADIR.upgrade_laeuft
+if [ -f "$MARKE" ]; then
+    SEIT=$(cat "$MARKE" 2>/dev/null)
+    case "$SEIT" in
+        ''|*[!0-9]*) SEIT=0 ;;
+    esac
+    # Die Uhr wird gemessen, nicht angenommen. Liefert die Zeitausgabe nichts
+    # - unter Last kann ein fork scheitern -, dann rechnete die Schale mit
+    # einer leeren Zeichenkette, das Alter wuerde unbrauchbar und die
+    # Bedingung fiele durch: der Wecker startete den Bot MITTEN in der
+    # Aktualisierung. Ein Schutz faellt geschlossen aus (Regeln/01): ohne Uhr
+    # wird nicht gestartet, die Marke gilt.
+    JETZT=$(date +%s 2>/dev/null)
+    case "$JETZT" in
+        ''|*[!0-9]*) JETZT="" ;;
+    esac
+    if [ -z "$JETZT" ]; then
+        exit 0
+    fi
+    ALTER=$(( JETZT - SEIT ))
+    if [ "$ALTER" -ge 0 ] && [ "$ALTER" -lt 3600 ]; then
+        exit 0
+    fi
+fi
+
 /usr/bin/php REPLACELBPBINDIR/sg_bot.php >> "$LOG" 2>&1 &

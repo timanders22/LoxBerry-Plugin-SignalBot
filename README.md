@@ -8,6 +8,49 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.23
+
+- **Die Installation erkennt ihren eigenen Bot jetzt argumentweise.** Bis
+  0.9.22 machten `postinstall.sh` und `uninstall/uninstall` aus der
+  Befehlszeile eines Prozesses eine einzige Zeichenkette und suchten darin
+  den Dateinamen. Jeder fremde Prozess, in dessen Befehlszeile `sg_bot.php`
+  irgendwo vorkam, galt damit als eigener. In WSL Ubuntu gemessen am
+  18.09.2026 mit dem Köder `tail -f <botpfad>`:
+  `<OK> Alter Bot-Lauf (PID 683316) beendet.` und
+  `<OK> Bot-Lauf (PID 684972) beendet.` — beide Male starb der Köder, nicht
+  der Bot. Ebenso getroffen: der Bot eines **zweiten** Plugin-Ordners und
+  der Einmallauf `sg_bot.php einmal`.
+- Geprüft wird jetzt: `argv[0]` ist ein PHP-Interpreter, `argv[1]` ist
+  **genau** der eigene Botpfad (bei relativem Start über `/proc/<pid>/cwd`
+  aufgelöst), ein drittes Argument schließt aus, und der Prozess gehört dem
+  Benutzer `loxberry`. Vor jedem Signal wird neu geprüft, auch vor dem
+  harten; hinterher wird die Wirkung nachgesehen statt der Rückgabewert.
+- **Ein Bot ohne Sperrdatei geht jetzt mit.** Bisher war die Sperrdatei die
+  einzige Quelle. Gemessen (Fall F6): mit gelöschter Sperrdatei lief der
+  alte Bot durch die ganze Installation weiter, hinterher liefen **zwei**;
+  beim Entfernen des Plugins blieb er hängen. Gesucht wird jetzt über
+  `/proc`, und **alle** Treffer werden behandelt, nicht nur der erste
+  (Fall F7: zwei Läufe, Sperrdatei kannte nur einen).
+- **Während einer Aktualisierung startet der Wecker den Bot nicht mehr.**
+  Zwischen der neu abgelegten Datei unter `cron.01min` und `postinstall.sh`
+  liegt am Gerät fast eine Minute, und `purge_installation` hat in dieser
+  Lücke `config/plugins/<ordner>/` gerade gelöscht. In WSL nachgestellt
+  (Fälle G1 und G2): der Bot lief an und legte die Konfiguration neu an.
+  Lag die Zweitschrift neben dem Ordner, heilte er daraus — Token und
+  Weißliste blieben. Fehlte sie, schrieb er eine Vorgabe mit **neuem
+  Aktionstoken** und **leerer Weißliste** und zog die Zweitschrift darauf
+  nach; alle Adressen im Miniserver, die das alte Token tragen, wären damit
+  tot gewesen.
+- Neu dafür: `preupgrade.sh` legt als Erstes `data/plugins/<ordner>.upgrade_laeuft`
+  neben den Datenordner, `cron/cron.01min` startet nicht, solange diese
+  Marke jünger als eine Stunde ist, `postroot.sh` entfernt sie über einen
+  `EXIT`-Trap — also auch dann, wenn die Installation vorzeitig aussteigt —,
+  und `uninstall` räumt sie weg. Älter als eine Stunde, aus der Zukunft oder
+  unlesbar zählt die Marke nicht; ohne lesbare Uhr fällt die Prüfung
+  geschlossen aus und der Bot bleibt aus.
+- Der Doppelstart-Schutz des Bots selbst (`flock` in `bin/sg_bot.php`)
+  bleibt unverändert — die Marke tritt neben ihn, nicht an seine Stelle.
+
 ## Neu in 0.9.22
 
 - **Keine Absturzschleife mehr, solange die Bibliothek fehlt.** Am Gerät
@@ -316,7 +359,11 @@ webfrontend/htmlauth/index.php     Bedienoberflaeche, sechs Reiter
 webfrontend/htmlauth/sg_lib.php    Konfiguration, Befehlslogik, RPC, Vorlage
 webfrontend/htmlauth/sg_test.php   Selbstpruefung und Test-Aktionen
 webfrontend/html/index.php         Token-Endpunkt fuer den Miniserver
-postroot.sh                        Java, signal-cli, systemd-Dienst, sudoers
+preupgrade.sh                      Marke "Aktualisierung laeuft" anlegen
+postinstall.sh                     alten Bot beenden, neuen starten
+postroot.sh                        Java, signal-cli, systemd-Dienst, sudoers,
+                                   Marke wieder entfernen
+uninstall/uninstall                Dienst, sudo-Regel, Zweitschrift, Marke
 ```
 
 ## Was in 0.9.2 nachgemessen und geaendert wurde

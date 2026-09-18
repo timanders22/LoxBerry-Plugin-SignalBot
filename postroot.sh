@@ -18,6 +18,25 @@ ARGV3=$3
 ARGV5=$5
 ZIEL=/opt
 
+# ---- Die Marke aus preupgrade.sh wieder entfernen (neu in 0.9.23) ----
+#
+# postroot.sh ist das letzte Hakenskript, das LoxBerry ruft (Reihenfolge nach
+# Regeln/06: preroot, preinstall, preupgrade, postinstall, postupgrade,
+# postroot). Der Bot ist zu diesem Zeitpunkt bereits gestartet - das tut
+# postinstall.sh, und postinstall.sh fragt die Marke bewusst NICHT ab: sein
+# Start ist der gewollte. Die Marke faellt also nach dem Start, nicht davor.
+#
+# UEBER EINEN TRAP, NICHT AM DATEIENDE. Dieses Skript steigt an mehreren
+# Stellen mit "exit 0" aus (keine Java-Laufzeit, unbrauchbare Fassungsangabe,
+# fehlgeschlagener Download). Ohne den Trap bliebe die Marke dort liegen und
+# der Wecker waere bis zu einer Stunde gesperrt, ohne dass irgendwo stuende,
+# warum. In WSL gemessen (Fall G9, 18.09.2026): ohne Trap lag sie nach einem
+# erzwungenen fruehen Ausstieg noch da.
+if [ -n "$ARGV5" ] && [ -n "$ARGV3" ]; then
+    SG_MARKE="$ARGV5/data/plugins/$ARGV3.upgrade_laeuft"
+    trap 'rm -f "$SG_MARKE" 2>/dev/null' EXIT
+fi
+
 BOGEN=$(dpkg --print-architecture 2>/dev/null)
 echo "<INFO> Architektur: $BOGEN"
 
