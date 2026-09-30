@@ -539,7 +539,7 @@ function sg_rpc($methode, $params = array(), $zeit = 20)
         $antwort = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curlfehler = curl_error($ch);
-        curl_close($ch);
+        if (PHP_VERSION_ID < 80000) { curl_close($ch); }
         if ($antwort === false) {
             return array('ok' => 0, 'result' => null, 'fehler' => $curlfehler !== '' ? $curlfehler : 'keine Antwort');
         }
