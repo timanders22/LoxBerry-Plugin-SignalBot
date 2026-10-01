@@ -125,6 +125,23 @@ if [ -n "$ARGV5" ] && [ -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json" 
     echo "<OK> Zweitschrift der Konfiguration entfernt (enthielt Token und Rufnummern)."
 fi
 
+# Beiseitegelegte Zweitschrift und Bestand (preinstall.sh, Bibliothek: .alt)
+# und ein Bestand aus einer abgebrochenen Aktualisierung (I1, I3). Darin
+# stehen Token, PIN-Hash, Rufnummern und das Ereignisprotokoll.
+if [ -n "$ARGV5" ]; then
+    case "$ARGV3" in
+        ''|*/*|*..*) ;;
+        *)
+            for SG_W in "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json.alt" \
+                        "$ARGV5/data/plugins/$ARGV3.bestand" "$ARGV5/data/plugins/$ARGV3.bestand.alt"; do
+                if [ -e "$SG_W" ]; then
+                    rm -rf "${SG_W:?}" && echo "<OK> Entfernt: $SG_W"
+                fi
+            done
+            ;;
+    esac
+fi
+
 # Die Marke aus preupgrade.sh, falls eine Aktualisierung abgebrochen ist.
 # Sie liegt NEBEN dem Datenordner und ueberlebt deshalb auch das Entfernen
 # des Plugins; eine liegengebliebene Marke wuerde nach einer Neuinstallation

@@ -62,7 +62,11 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            /* Seit dem Durchgang 01.10.2026 (I8, Regeln/06 Raumklima-Vorfall) auch
+             * config/system/general.json: auf einem Pruefrechner mit Resten eines
+             * Pruefstands hielt die Suche sonst einen fremden Baum fuer die Wurzel. */
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -77,29 +81,31 @@ function sg_paths()
 {
     $home = getenv('LBHOMEDIR');
     if (!$home || !is_dir($home)) {
-        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-            if (is_dir($k)) { $home = $k; break; }
-        }
+        /* Kein fester Rueckfall mehr auf /home/loxberry/loxberry (I8): ein
+         * fester Systempfad trifft auf einem Pruefrechner die Anlage, auf dem
+         * Geraet findet die Wurzelsuche dieselbe Wurzel. */
+        $home = lb_wurzel_ermitteln();
     }
     $plugin = getenv('LBPPLUGINDIR');
     if (!$plugin) {
         /* Installiert liegt diese Datei in
          *     <home>/webfrontend/htmlauth/plugins/<ordner>/sg_lib.php
-         * dort ist basename(__DIR__) der Ordnername. Im entpackten Archiv
-         * liegt sie in webfrontend/htmlauth/, dort ist es der Ordner drei
-         * Ebenen hoeher.
-         *
-         * Bis 0.9.11 stand hier nur der zweite Fall. Installiert ergab er
-         * 'htmlauth'; gerettet hat das allein der feste Rueckfallwert
-         * 'signalbot' - der bricht, sobald LoxBerry wegen einer
-         * Namenskollision auf einen anderen Ordner ausweicht. Und er haette
-         * den Ordner eines fremden Plugins benutzt, wenn es je ein
-         * config/plugins/htmlauth gaebe.
-         */
+         * dort ist basename(__DIR__) der Ordnername - OHNE weitere Bedingung.
+         * Bis 0.9.25 galt er nur, wenn config/plugins/<ordner> schon da war;
+         * in der Upgrade-Luecke (purge_installation hat den Ordner geraeumt)
+         * fiel die Bibliothek dann auf 'signalbot' zurueck und haette bei einer
+         * Namenskollision den Ordner eines anderen Plugins benutzt (I7, im
+         * Pruefstand gemessen: plugin=signalbot statt des eigenen Ordners).
+         * Im entpackten Archiv liegt sie in webfrontend/htmlauth/, dort ist es
+         * der Ordner drei Ebenen hoeher; nur dort gilt der Rueckfall. */
         $plugin = '';
-        foreach (array(basename(__DIR__), basename(dirname(dirname(__DIR__)))) as $sg_kand) {
-            if ($sg_kand === '' || in_array($sg_kand, array('htmlauth', 'html', 'plugins', 'webfrontend'), true)) { continue; }
-            if (!$home || is_dir($home . '/config/plugins/' . $sg_kand)) { $plugin = $sg_kand; break; }
+        if (basename(dirname(__DIR__)) === 'plugins' && basename(dirname(dirname(__DIR__))) === 'htmlauth') {
+            $plugin = basename(__DIR__);
+        } else {
+            foreach (array(basename(__DIR__), basename(dirname(dirname(__DIR__)))) as $sg_kand) {
+                if ($sg_kand === '' || in_array($sg_kand, array('htmlauth', 'html', 'plugins', 'webfrontend'), true)) { continue; }
+                if (!$home || is_dir($home . '/config/plugins/' . $sg_kand)) { $plugin = $sg_kand; break; }
+            }
         }
         if ($plugin === '') { $plugin = 'signalbot'; }
     }
@@ -108,17 +114,17 @@ function sg_paths()
             'home' => $home, 'plugin' => $plugin,
             'config'    => $home . '/config/plugins/' . $plugin . '/signalbot.json',
             /* Die Zweitschrift liegt NEBEN dem Plugin-Ordner, nicht darin.
-             * LoxBerry entfernt config/plugins/<ordner>/ bei Deinstallation
-             * und Neuinstallation - eine Sicherung im Ordner stirbt also
-             * genau in dem Fall mit, fuer den es sie gibt. So halten es auch
-             * Weissware, Kodi und die uebrigen 18 Linien mit Zweitschrift.
-             * 'sicherung_alt' ist der frueher benutzte Ort; er wird beim
-             * Heilen weiter gelesen, damit bestehende Anlagen ihre
-             * vorhandene Sicherung nicht verlieren. */
+             * LoxBerry entfernt config/plugins/<ordner>/ bei jedem Update -
+             * eine Sicherung im Ordner stuerbe genau in dem Fall mit, fuer den
+             * es sie gibt. Eingespielt wird sie seit dem Durchgang 01.10.2026
+             * nur, wenn die Upgrade-Marke liegt (Entscheidung 1). */
             'sicherung' => $home . '/config/plugins/' . $plugin . '.backup.signalbot.json',
             'sicherung_alt' => $home . '/config/plugins/' . $plugin . '/signalbot.backup.json',
             'configdir' => $home . '/config/plugins/' . $plugin,
             'datadir'      => $home . '/data/plugins/' . $plugin,
+            'marke'     => $home . '/data/plugins/' . $plugin . '.upgrade_laeuft',
+            'bestand'   => $home . '/data/plugins/' . $plugin . '.bestand',
+            'abo'       => $home . '/config/plugins/' . $plugin . '/mqtt_subscriptions.cfg',
             'log'       => $home . '/log/plugins/' . $plugin . '/signalbot.log',
             'tmp'       => '/tmp/' . $plugin,
         );
@@ -130,6 +136,7 @@ function sg_paths()
         'sicherung_alt' => $eigen . '/config/signalbot.backup.json',
         'configdir' => $eigen . '/config',
         'datadir' => sys_get_temp_dir() . '/signalbot',
+        'marke' => '', 'bestand' => '', 'abo' => '',
         'log' => sys_get_temp_dir() . '/signalbot/signalbot.log',
         'tmp' => sys_get_temp_dir() . '/signalbot');
 }
@@ -321,93 +328,388 @@ function sg_vorgaben()
     );
 }
 
-function sg_config()
+/* ==================================================================
+ * Eine Liste fuer alles, was ein Befehl nicht sein darf (U10, M6)
+ *
+ * Bis 0.9.25 standen die reservierten Woerter zweimal da: im Formular
+ * (zehn Woerter) und in der Pruefzeile des Reiters Test (sieben, ohne yes, no,
+ * ok). "ok" wurde beim Speichern beanstandet, die Pruefzeile zeigte trotzdem
+ * einen Haken. Jetzt gibt es diese eine Liste fuer Formular, Zurueckspielen
+ * und Pruefzeile - dazu die eingebauten Woerter quittiert/quittieren/ack und
+ * abbrechen/stop, die ein Befehl gleichen Namens nie erreichen wuerde.
+ * ================================================================== */
+function sg_reserviert()
+{
+    return array('hilfe', 'help', '?', 'status', 'zustand', 'ja', 'nein', 'yes', 'no', 'ok',
+                 'quittiert', 'quittieren', 'ack', 'abbrechen', 'stop');
+}
+
+/** Ein Befehlswort, das der Bot schon selbst belegt - auch "status xyz". */
+function sg_wort_reserviert($wort)
+{
+    $w = (string) $wort;
+    return in_array($w, sg_reserviert(), true)
+        || strpos($w, 'status ') === 0 || strpos($w, 'zustand ') === 0;
+}
+
+/** Themen, die der Bot selbst sendet (Lebenszeichen, Selbstpruefung). */
+function sg_thema_reserviert($thema)
+{
+    $t = strtolower(trim((string) $thema, '/'));
+    foreach (array('online', 'selbsttest') as $r) {
+        if ($t === $r || strpos($t, $r . '/') === 0) { return true; }
+    }
+    return false;
+}
+
+/* ---- Einzelpruefungen: dieselben fuer Formular und Zurueckspielen ---- */
+function sg_ist_nummer($n) { return is_string($n) && preg_match('/^\+[0-9]{6,20}$/', $n) === 1; }
+function sg_ist_ganz($v, $min, $max) { return is_int($v) && $v >= $min && $v <= $max; }
+function sg_ist_schalter($v) { return $v === 0 || $v === 1 || $v === true || $v === false; }
+function sg_ist_text($v, $max)
+{
+    return is_string($v) && strlen($v) <= $max && !preg_match('/[\x00-\x1F\x7F]/', $v);
+}
+/** Rechner und Port, KEIN Pfad - sg_rpc() haengt /api/v1/... selbst an. */
+function sg_rpc_url_gueltig($u)
+{
+    return is_string($u) && preg_match('#^https?://[A-Za-z0-9.\-]+(:[0-9]{1,5})?$#', $u) === 1;
+}
+/** Ein MQTT-Thema(stueck): Buchstaben, Ziffern, _ . - und / als Trenner, ohne leere Stufe. */
+function sg_thema_gueltig($t, $max = 128)
+{
+    return is_string($t) && strlen($t) <= $max
+        && preg_match('#^[A-Za-z0-9_.\-]+(/[A-Za-z0-9_.\-]+)*$#', $t) === 1;
+}
+/** Ein echter Hash aus password_hash() - eine Liste oder ein Wort ist keiner. */
+function sg_pin_hash_gueltig($h)
+{
+    if ($h === '') { return true; }
+    if (!is_string($h) || strlen($h) > 255) { return false; }
+    $i = password_get_info($h);
+    return !empty($i['algo']);
+}
+/** Eine Zahl, wie ein Mensch sie tippt: nur Ziffern (und ein Minus), sonst null. */
+function sg_ganz_lesen($s)
+{
+    if (!is_string($s)) { return null; }
+    $s = trim($s);
+    return preg_match('/^-?[0-9]{1,9}$/', $s) ? (int) $s : null;
+}
+
+/** Beschriftung eines Schluessels fuer Meldungen. */
+function sg_feldname($k)
+{
+    $karte = array(
+        'rpc_url' => 'EINST.L_RPC', 'konto' => 'EINST.L_KONTO', 'erlaubt' => 'EINST.L_ERLAUBT',
+        'pin' => 'EINST.L_PIN', 'pin_hash' => 'EINST.L_PIN', 'pin_versuche' => 'EINST.L_PIN_VERSUCHE',
+        'pin_sperre' => 'EINST.L_PIN_SPERRE', 'bremse' => 'EINST.L_BREMSE', 'stille' => 'EINST.L_STILLE',
+        'zustand_ein' => 'EINST.L_ZUSTAND', 'gesperrt' => 'EINST.H_SPERRE', 'audit' => 'EINST.L_AUDIT',
+        'herzschlag' => 'EINST.L_HERZSCHLAG', 'gruppe' => 'EINST.L_GRUPPE', 'nacht_von' => 'EINST.L_NACHT_VON',
+        'nacht_bis' => 'EINST.L_NACHT_BIS', 'quittung_takt' => 'EINST.L_QUITTUNG_TAKT',
+        'quittung_max' => 'EINST.L_QUITTUNG_MAX', 'mqtt_ein' => 'EINST.L_MQTT_EIN',
+        'mqtt_topic' => 'EINST.L_MQTT_TOPIC', 'aktionstoken' => 'TEST.F_TOKEN', 'befehle' => 'BEF.H_TITEL',
+    );
+    return isset($karte[$k]) ? sg_t($karte[$k]) : (string) $k;
+}
+
+/**
+ * Was an einer (vollstaendigen) Konfiguration nicht stimmt - EINE Pruefung
+ * fuer die drei Formulare, das Zurueckspielen und die Warnung beim Sichern
+ * (C3, U3, U6, X-3). Streng nach Typ: eine Liste ist kein Token, "nein" ist
+ * kein Schalter, 999 ist keine Bremse.
+ *
+ * Anlass (Durchgang 01.10.2026, gemessen): Eine Sicherung mit dem Token als
+ * Liste, einem leeren Token, "erlaubt" als Text, "befehle" als Text,
+ * "bremse 999", "pin_hash" als Liste, "stufe" als Liste, "gesperrt":"nein"
+ * oder "rpc_url":"javascript:..." wurde mit "22 Werte uebernommen" quittiert;
+ * danach waren die Adressen im Miniserver tot, die Weissliste leer, der Bot
+ * gesperrt oder der PIN-Schutz weg, und im Reiter Test stand ein
+ * javascript:-Link.
+ *
+ * Rueckgabe: array(Feldschluessel => Meldung). Befehlszeilen tragen den
+ * Schluessel "befehle.<zeile>.<feld>" (Zeile ab 0). Meldungen sind HTML,
+ * eingesetzte Werte maskiert.
+ */
+function sg_config_maengel($c)
+{
+    $m = array();
+    $setze = function ($k, $text) use (&$m) { if (!isset($m[$k])) { $m[$k] = $text; } };
+    if (!is_array($c)) { return array('*' => sg_t('EINST.SICH_KEIN_JSON')); }
+    $hol = function ($k) use ($c) { return array_key_exists($k, $c) ? $c[$k] : null; };
+
+    if (!sg_rpc_url_gueltig($hol('rpc_url'))) { $setze('rpc_url', sg_t('EINST.FEHLER_URL')); }
+    $k = $hol('konto');
+    if (!($k === '' || sg_ist_nummer($k))) { $setze('konto', sg_t('EINST.FEHLER_KONTO')); }
+
+    $e = $hol('erlaubt');
+    if (!is_array($e) || ($e !== array() && array_keys($e) !== range(0, count($e) - 1))) {
+        $setze('erlaubt', sprintf(sg_t('EINST.FEHLER_NUMMER'), sg_e(is_array($e) ? '…' : (is_scalar($e) ? (string) $e : '…'))));
+        $e = array();
+    } else {
+        $schlecht = array();
+        foreach ($e as $n) { if (!sg_ist_nummer($n)) { $schlecht[] = is_scalar($n) ? (string) $n : '…'; } }
+        if ($schlecht) {
+            $setze('erlaubt', sprintf(sg_t('EINST.FEHLER_NUMMER'), sg_e(implode(', ', $schlecht))));
+        } elseif (count(array_unique($e)) !== count($e)) {
+            $setze('erlaubt', sg_t('EINST.FEHLER_DOPPELT_NUMMER'));
+        }
+    }
+    $p = $hol('pin');
+    if (!($p === '' || (is_string($p) && preg_match('/^[0-9A-Za-z]{4,64}$/', $p)))) {
+        $setze('pin', sg_t('EINST.FEHLER_PIN_ZEICHEN'));
+    }
+    if (!sg_pin_hash_gueltig($hol('pin_hash'))) { $setze('pin', sg_t('EINST.FEHLER_PIN_HASH')); }
+
+    foreach (array('pin_versuche' => array(1, 10), 'pin_sperre' => array(1, 1440), 'bremse' => array(1, 60),
+                   'quittung_takt' => array(1, 120), 'quittung_max' => array(0, 20)) as $bk => $gr) {
+        if (!sg_ist_ganz($hol($bk), $gr[0], $gr[1])) {
+            $setze($bk, sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_e(sg_feldname($bk)), $gr[0], $gr[1]));
+        }
+    }
+    foreach (array('stille', 'zustand_ein', 'gesperrt', 'audit', 'herzschlag', 'mqtt_ein') as $sk) {
+        if (!sg_ist_schalter($hol($sk))) {
+            $setze($sk, sprintf(sg_t('EINST.FEHLER_SCHALTER'), sg_e(sg_feldname($sk))));
+        }
+    }
+    $g = $hol('gruppe');
+    if (!($g === '' || (is_string($g) && preg_match('#^[A-Za-z0-9+/=_\-]{10,}$#', $g)))) {
+        $setze('gruppe', sg_t('EINST.FEHLER_GRUPPE'));
+    }
+    $nv = $hol('nacht_von'); $nb = $hol('nacht_bis');
+    $zf = '/^([01][0-9]|2[0-3]):[0-5][0-9]$/';
+    if (!(($nv === '' && $nb === '')
+          || (is_string($nv) && is_string($nb) && preg_match($zf, $nv) && preg_match($zf, $nb) && $nv !== $nb))) {
+        $setze('nacht_von', sg_t('EINST.FEHLER_NACHT'));
+    }
+    if (!sg_thema_gueltig($hol('mqtt_topic'), 64)) { $setze('mqtt_topic', sg_t('EINST.FEHLER_TOPIC')); }
+    $t = $hol('aktionstoken');
+    if (!is_string($t) || !preg_match('/^[A-Za-z0-9]{24,}$/', $t)) {
+        $setze('aktionstoken', sg_t('EINST.FEHLER_TOKEN'));
+    }
+
+    /* ---- Befehlstabelle ---- */
+    $bef = $hol('befehle');
+    if (!is_array($bef) || count($bef) > SG_BEFEHLE
+        || ($bef !== array() && array_keys($bef) !== range(0, count($bef) - 1))) {
+        $setze('befehle', sprintf(sg_t('BEF.FEHLER_TABELLE'), SG_BEFEHLE));
+        return $m;
+    }
+    $pin_da = sg_pin_gesetzt(array('pin' => is_string($p) ? $p : '',
+                                   'pin_hash' => is_string($hol('pin_hash')) ? $hol('pin_hash') : ''));
+    $erlaubt = is_array($e) ? $e : array();
+    $gesehen = array();
+    $vorgabe = sg_befehl_vorgabe();
+    foreach ($bef as $i => $b) {
+        $z = $i + 1;
+        $s = 'befehle.' . $i . '.';
+        if (!is_array($b)) { $setze($s . 'wort', sprintf(sg_t('BEF.FEHLER_ZEILE'), $z)); continue; }
+        $fremd = array_diff(array_keys($b), array_keys($vorgabe));
+        $fehlt = array_diff(array_keys($vorgabe), array_keys($b));
+        if ($fremd || $fehlt) { $setze($s . 'wort', sprintf(sg_t('BEF.FEHLER_ZEILE'), $z)); continue; }
+        if (!sg_ist_schalter($b['aktiv'])) { $setze($s . 'aktiv', sprintf(sg_t('BEF.FEHLER_ZEILE'), $z)); }
+        if (!sg_ist_text($b['wort'], 60)
+            || $b['wort'] !== sg_klein(trim(preg_replace('/\s+/', ' ', $b['wort'])))) {
+            $setze($s . 'wort', sprintf(sg_t('BEF.FEHLER_WORT'), $z));
+        }
+        if (!($b['thema'] === '' || sg_thema_gueltig($b['thema']))) {
+            $setze($s . 'thema', sprintf(sg_t('BEF.FEHLER_THEMA_ZEICHEN'), $z));
+        }
+        if (!sg_ist_text($b['wert'], 200)) { $setze($s . 'wert', sprintf(sg_t('BEF.FEHLER_WERT_ZEICHEN'), $z)); }
+        if (!in_array($b['wert_art'], array('fest', 'zahl'), true)) {
+            $setze($s . 'wert_art', sprintf(sg_t('BEF.FEHLER_AUSWAHL'), $z));
+        }
+        if (!sg_ist_ganz($b['min'], -1000000, 1000000)) { $setze($s . 'min', sprintf(sg_t('BEF.FEHLER_GANZ'), $z)); }
+        if (!sg_ist_ganz($b['max'], -1000000, 1000000)) { $setze($s . 'max', sprintf(sg_t('BEF.FEHLER_GANZ'), $z)); }
+        if (!in_array($b['stufe'], array('sofort', 'rueckfrage', 'pin'), true)) {
+            $setze($s . 'stufe', sprintf(sg_t('BEF.FEHLER_AUSWAHL'), $z));
+        }
+        if (!is_string($b['absender'])) {
+            $setze($s . 'absender', sprintf(sg_t('BEF.FEHLER_ABSENDER'), '…', $z));
+        } elseif ($b['absender'] !== '') {
+            foreach (explode(',', $b['absender']) as $nr) {
+                if (!sg_ist_nummer($nr)) {
+                    $setze($s . 'absender', sprintf(sg_t('BEF.FEHLER_ABSENDER'), sg_e($nr), $z));
+                }
+            }
+        }
+        if (!($b['zweit'] === '' || sg_ist_nummer($b['zweit']))) {
+            $setze($s . 'zweit', sprintf(sg_t('BEF.FEHLER_ZWEIT'), sg_e(is_scalar($b['zweit']) ? (string) $b['zweit'] : '…'), $z));
+        }
+        if (!sg_ist_text($b['antwort'], 500)) { $setze($s . 'antwort', sprintf(sg_t('BEF.FEHLER_ANTWORT'), $z)); }
+
+        /* Inhaltliche Regeln nur fuer eingeschaltete Zeilen mit Wort - wie bisher. */
+        if (empty($b['aktiv']) || !is_string($b['wort']) || $b['wort'] === '') { continue; }
+        if (sg_wort_reserviert($b['wort'])) {
+            $setze($s . 'wort', sprintf(sg_t('BEF.FEHLER_RESERVIERT'), sg_e($b['wort']), $z));
+        }
+        if (isset($gesehen[$b['wort']])) {
+            $setze($s . 'wort', sprintf(sg_t('BEF.FEHLER_DOPPELT'), sg_e($b['wort']), $z));
+        }
+        $gesehen[$b['wort']] = 1;
+        if ($b['thema'] === '') {
+            $setze($s . 'thema', sprintf(sg_t('BEF.FEHLER_THEMA'), $z));
+        } elseif (is_string($b['thema']) && sg_thema_reserviert($b['thema'])) {
+            $setze($s . 'thema', sprintf(sg_t('BEF.FEHLER_THEMA_RESERVIERT'), sg_e($b['thema']), $z));
+        }
+        if ($b['wert_art'] === 'fest' && $b['wert'] === '') {
+            $setze($s . 'wert', sprintf(sg_t('BEF.FEHLER_WERT_LEER'), $z));
+        }
+        if ($b['wert_art'] === 'zahl' && is_int($b['min']) && is_int($b['max']) && $b['max'] <= $b['min']) {
+            $setze($s . 'max', sprintf(sg_t('BEF.FEHLER_BEREICH'), $z));
+        }
+        if ($b['stufe'] === 'pin' && !$pin_da) {
+            $setze($s . 'stufe', sprintf(sg_t('BEF.FEHLER_KEINE_PIN'), sg_e($b['wort'])));
+        }
+        if (is_string($b['zweit']) && $b['zweit'] !== '' && !in_array($b['zweit'], $erlaubt, true)) {
+            $setze($s . 'zweit', sprintf(sg_t('BEF.FEHLER_ZWEIT_LISTE'), sg_e($b['zweit']), $z));
+        }
+    }
+    return $m;
+}
+
+/** Liegt die Marke einer laufenden Aktualisierung? (Entscheidung 1: ohne Altersvergleich) */
+function sg_upgrade_marke()
 {
     $p = sg_paths();
-    /* Selbstheilung: zuerst am heutigen Ort (neben dem Plugin-Ordner), dann
-     * am frueheren Ort darin - sonst verloere eine bestehende Anlage beim
-     * Update ihre vorhandene Sicherung. */
+    if (!isset($p['marke']) || $p['marke'] === '') { return false; }
+    clearstatcache(true, $p['marke']);
+    return is_file($p['marke']);
+}
+
+/**
+ * Die Lage der Konfigurationsdatei, OHNE etwas zu schreiben (C4, U12):
+ * 'ok' | 'fehlt' | 'leer' | 'kaputt' | 'token' (lesbar, aber kein gueltiges Token).
+ */
+function sg_config_lage()
+{
+    $p = sg_paths();
+    clearstatcache(true, $p['config']);
+    if (!is_file($p['config'])) { return 'fehlt'; }
+    $roh = trim((string) @file_get_contents($p['config']));
+    if ($roh === '' || $roh === '{}') { return 'leer'; }
+    $d = json_decode($roh, true);
+    if (!is_array($d)) { return 'kaputt'; }
+    if (!isset($d['aktionstoken']) || !is_string($d['aktionstoken'])
+        || !preg_match('/^[A-Za-z0-9]{24,}$/', $d['aktionstoken'])) { return 'token'; }
+    return 'ok';
+}
+
+/** Wann die Konfiguration zuletzt aus der Zweitschrift geheilt wurde (0 = nie). */
+function sg_config_geheilt()
+{
+    $p = sg_paths();
+    $f = $p['tmp'] . '/geheilt';
+    return is_file($f) ? (int) @file_get_contents($f) : 0;
+}
+
+/**
+ * Die Konfiguration lesen.
+ *
+ * $anlegen = false (C4): nur lesen, NIE schreiben - weder heilen noch ein
+ * Token wuerfeln. So ruft der unangemeldete Endpunkt. Bis 0.9.25 legte jeder
+ * Abruf des Miniservers auf einem leeren LoxBerry Konfiguration und
+ * Zweitschrift an und wuerfelte bei kaputtem Token ein neues (gemessen).
+ *
+ * Selbstheilung aus der Zweitschrift (I1, Entscheidung 1):
+ *  - Datei FEHLT: nur, wenn die Upgrade-Marke liegt (Aktualisierung). Ohne
+ *    Marke ist es eine Neuinstallation (oder die Datei wurde von Hand
+ *    entfernt): eine liegengebliebene Zweitschrift wird nie eingespielt,
+ *    sondern nach <name>.alt gelegt. Bis 0.9.25 holte eine Neuinstallation
+ *    Token, PIN-Hash und Weissliste einer frueheren Installation zurueck
+ *    (Installer-Pruefstand, Faelle A2/A2L).
+ *  - Datei leer oder "{}": Laufzeitschaden an einer bestehenden Anlage; dann
+ *    ist die Zweitschrift die laufende dieser Installation und wird gelesen.
+ * Die Heilung schreibt mit 0600 (I2; bis 0.9.25 copy() mit den Rechten der
+ * umask, gemessen 644). .alt wird nie gelesen.
+ */
+function sg_config($anlegen = true)
+{
+    $p = sg_paths();
+    clearstatcache(true, $p['config']);
     $sg_vorhanden = is_file($p['config']);
     $roh = $sg_vorhanden ? trim((string) @file_get_contents($p['config'])) : '';
-    if ($roh === '' || $roh === '{}') {
-        /* Nur eine BRAUCHBARE Sicherung zurueckholen.
-         *
-         * Bis 0.9.11 brach die Schleife bei der ersten Datei ab, die es GAB -
-         * auch wenn sie leer war. Eine gute Sicherung am frueheren Ort wurde
-         * dann nie gelesen, weil eine leere am heutigen Ort davorstand. */
-        foreach (array($p['sicherung'], $p['sicherung_alt']) as $sg_quelle) {
+    $sg_beiseite_misslungen = false;
+    if ($anlegen && ($roh === '' || $roh === '{}')) {
+        $sg_quellen = array();
+        if ($sg_vorhanden || sg_upgrade_marke()) {
+            $sg_quellen = array($p['sicherung'], $p['sicherung_alt']);
+        } elseif ($p['sicherung'] !== '' && is_file($p['sicherung'])) {
+            $sg_alt = $p['sicherung'] . '.alt';
+            if (@rename($p['sicherung'], $sg_alt)) {
+                @chmod($sg_alt, 0600);
+                sg_log('Keine Konfiguration und keine Upgrade-Marke: die liegengebliebene Zweitschrift '
+                     . 'wird NICHT eingespielt, sie liegt jetzt als ' . $sg_alt . ' (die Deinstallation raeumt sie ab).');
+            } else {
+                $sg_beiseite_misslungen = true;
+                sg_log_gebremst('zweitschrift_fest', 'Zweitschrift ' . $p['sicherung']
+                    . ' liess sich nicht beiseitelegen - es wird nichts geschrieben.');
+            }
+        }
+        /* Nur eine BRAUCHBARE Sicherung zurueckholen (seit 0.9.12: eine leere
+         * am heutigen Ort darf eine gute am frueheren nicht verdecken). */
+        foreach ($sg_quellen as $sg_quelle) {
             if ($sg_quelle === '' || !is_file($sg_quelle)) { continue; }
             $sg_probe = trim((string) @file_get_contents($sg_quelle));
             if ($sg_probe === '' || !is_array(json_decode($sg_probe, true))) { continue; }
             @mkdir($p['configdir'], 0775, true);
-            @copy($sg_quelle, $p['config']);
-            $roh = trim((string) @file_get_contents($p['config']));
+            if (!sg_write_atomic($p['config'], $sg_probe, 0600)) { continue; }
+            $roh = $sg_probe;
             $sg_vorhanden = true;
+            @mkdir($p['tmp'], 0775, true);
+            @file_put_contents($p['tmp'] . '/geheilt', (string) time());
+            sg_log_gebremst('geheilt', 'Konfiguration aus der Zweitschrift ' . $sg_quelle . ' zurueckgeholt.', 600);
             break;
         }
     }
     $cfg = $roh !== '' ? json_decode($roh, true) : array();
     /* Konnte die Datei NICHT gelesen werden, obwohl sie da ist, wird unten
-     * nichts geschrieben. Sonst ginge genau der Fall schief, um dessentwillen
-     * es die Sicherung gibt: aus einem misslungenen Lesen wuerden Vorgaben,
-     * und die Vorgaben wuerden ueber die echte Konfiguration UND ueber die
-     * Sicherung geschrieben - Weissliste, PIN und Token waeren fort.
-     *
-     * DIE LEERE DATEI ZAEHLT DAZU. Bis 0.9.11 hing der Schutz allein an
-     * is_array($cfg) - und bei leerer Datei entsteht array(), was ein Feld
-     * IST. Der Schutz griff also nur bei kaputtem JSON, nicht bei der
-     * abgeschnittenen Datei. Nachgemessen am 16.08.2026 mit einer
-     * Konfiguration von 0 Byte und einer ebenso leeren Sicherung: Weissliste
-     * leer, PIN fort, NEUES Token - und beides ueber die Sicherung
-     * geschrieben. Damit waren alle Adressen im Miniserver tot, und die
-     * letzte Zuflucht war mit ueberschrieben. Ausloesen konnte das jeder
-     * unangemeldete Aufruf des Endpunkts, denn der ruft sg_config() vor der
-     * Token-Pruefung.
-     *
-     * Die Neuinstallation muss davon unberuehrt bleiben: dort gibt es die
-     * Datei GAR NICHT, und dann soll das Token angelegt werden. Die
-     * Unterscheidung haengt deshalb an is_file(), nicht am Inhalt.
-     * Der Aktualisierungsfall (Datei enthaelt nur "{}") gilt weiter als
-     * lesbar - das ist der Zustand jeder bestehenden Anlage nach einem
-     * Update. */
+     * nichts geschrieben (seit 0.9.12; eine leere Datei zaehlt dazu). Sonst
+     * wuerden aus einem misslungenen Lesen Vorgaben mit neuem Token, und die
+     * Vorgaben ueberschrieben Konfiguration UND Zweitschrift. */
     if ($roh === '' && $sg_vorhanden) {
-        sg_log_gebremst('config_leer',
-            'Konfiguration ist leer und es gibt keine brauchbare Sicherung - '
-            . 'es wird nichts geschrieben. Weissliste, PIN und Token bleiben unangetastet, '
-            . 'bis die Datei wieder Inhalt hat.');
+        if ($anlegen) {
+            sg_log_gebremst('config_leer',
+                'Konfiguration ist leer und es gibt keine brauchbare Sicherung - '
+                . 'es wird nichts geschrieben. Weissliste, PIN und Token bleiben unangetastet, '
+                . 'bis die Datei wieder Inhalt hat.');
+        }
         $lesbar = false;
     } else {
-        $lesbar = is_array($cfg);
+        $lesbar = is_array($cfg) && !$sg_beiseite_misslungen;
     }
-    if (!$lesbar) {
-        if ($roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
+    if (!is_array($cfg)) {
+        if ($anlegen && $roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
         $cfg = array();
     }
     $cfg = array_merge(sg_vorgaben(), $cfg);
 
-    $cfg['rpc_url'] = rtrim(trim((string) $cfg['rpc_url']), '/');
+    /* Beim LESEN wird weiter auf brauchbare Werte gebracht - das ist das Netz
+     * fuer eine von Hand verbogene Datei. Die Eingaenge (Formulare,
+     * Zurueckspielen) weisen solche Werte seit dem Durchgang 01.10.2026 ab
+     * (sg_config_maengel), statt sie still zurechtzubiegen. */
+    $cfg['rpc_url'] = rtrim(trim(is_string($cfg['rpc_url']) ? $cfg['rpc_url'] : ''), '/');
     if ($cfg['rpc_url'] === '') { $cfg['rpc_url'] = 'http://127.0.0.1:8095'; }
-    $cfg['bremse'] = max(1, min(60, (int) $cfg['bremse']));
-    $cfg['pin_versuche'] = max(1, min(10, (int) $cfg['pin_versuche']));
-    $cfg['gesperrt'] = empty($cfg['gesperrt']) ? 0 : 1;
-    $cfg['audit'] = empty($cfg['audit']) ? 0 : 1;
-    $cfg['herzschlag'] = empty($cfg['herzschlag']) ? 0 : 1;
-    $cfg['gruppe'] = preg_replace('#[^A-Za-z0-9+/=_\-]#', '', (string) $cfg['gruppe']);
-    foreach (array('nacht_von', 'nacht_bis') as $sg_nz) {
-        $cfg[$sg_nz] = preg_match('/^([01][0-9]|2[0-3]):[0-5][0-9]$/', (string) $cfg[$sg_nz]) ? (string) $cfg[$sg_nz] : '';
+    foreach (array('bremse' => array(1, 60), 'pin_versuche' => array(1, 10), 'quittung_takt' => array(1, 120),
+                   'quittung_max' => array(0, 20), 'pin_sperre' => array(1, 1440)) as $sg_k => $sg_gr) {
+        $cfg[$sg_k] = max($sg_gr[0], min($sg_gr[1], is_scalar($cfg[$sg_k]) ? (int) $cfg[$sg_k] : $sg_gr[0]));
     }
-    $cfg['quittung_takt'] = max(1, min(120, (int) $cfg['quittung_takt']));
-    $cfg['quittung_max'] = max(0, min(20, (int) $cfg['quittung_max']));
-    $cfg['pin_sperre'] = max(1, min(1440, (int) $cfg['pin_sperre']));
-    $cfg['stille'] = empty($cfg['stille']) ? 0 : 1;
-    $cfg['mqtt_ein'] = empty($cfg['mqtt_ein']) ? 0 : 1;
-    $cfg['zustand_ein'] = empty($cfg['zustand_ein']) ? 0 : 1;
-    $cfg['mqtt_topic'] = preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $cfg['mqtt_topic']);
+    foreach (array('gesperrt', 'audit', 'herzschlag', 'stille', 'mqtt_ein', 'zustand_ein') as $sg_k) {
+        $cfg[$sg_k] = empty($cfg[$sg_k]) ? 0 : 1;
+    }
+    foreach (array('konto', 'pin', 'pin_hash', 'gruppe', 'mqtt_topic', 'aktionstoken', 'nacht_von', 'nacht_bis') as $sg_k) {
+        if (!is_string($cfg[$sg_k])) { $cfg[$sg_k] = ''; }
+    }
+    $cfg['gruppe'] = preg_replace('#[^A-Za-z0-9+/=_\-]#', '', $cfg['gruppe']);
+    foreach (array('nacht_von', 'nacht_bis') as $sg_nz) {
+        $cfg[$sg_nz] = preg_match('/^([01][0-9]|2[0-3]):[0-5][0-9]$/', $cfg[$sg_nz]) ? $cfg[$sg_nz] : '';
+    }
+    $cfg['mqtt_topic'] = trim(preg_replace('#[^A-Za-z0-9_./\-]#', '', $cfg['mqtt_topic']), '/');
     if ($cfg['mqtt_topic'] === '') { $cfg['mqtt_topic'] = 'signalbot'; }
 
     if (!is_array($cfg['erlaubt'])) { $cfg['erlaubt'] = array(); }
     $cfg['erlaubt'] = array_values(array_filter(array_map(function ($n) {
-        $n = preg_replace('/[^0-9+]/', '', (string) $n);
+        $n = preg_replace('/[^0-9+]/', '', is_scalar($n) ? (string) $n : '');
         return preg_match('/^\+[0-9]{6,20}$/', $n) ? $n : '';
     }, $cfg['erlaubt'])));
 
@@ -415,16 +717,19 @@ function sg_config()
     for ($i = 0; $i < SG_BEFEHLE; $i++) {
         $b = isset($cfg['befehle'][$i]) && is_array($cfg['befehle'][$i]) ? $cfg['befehle'][$i] : array();
         $b += sg_befehl_vorgabe();
+        foreach (array('wort', 'thema', 'wert', 'stufe', 'wert_art', 'absender', 'zweit', 'antwort') as $sg_k) {
+            if (!is_scalar($b[$sg_k])) { $b[$sg_k] = ''; }
+        }
         $b['aktiv'] = empty($b['aktiv']) ? 0 : 1;
         // Das Wort wird kleingeschrieben verglichen - "Unscharf" und
         // "unscharf" sollen dasselbe tun.
         $b['wort'] = sg_klein(trim(preg_replace('/\s+/', ' ', (string) $b['wort'])));
-        $b['thema'] = preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $b['thema']);
+        $b['thema'] = preg_replace('#[^A-Za-z0-9_./\-]#', '', (string) $b['thema']);
         $b['wert'] = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $b['wert']));
         $b['stufe'] = in_array($b['stufe'], array('sofort', 'rueckfrage', 'pin'), true) ? $b['stufe'] : 'sofort';
         $b['wert_art'] = in_array($b['wert_art'], array('fest', 'zahl'), true) ? $b['wert_art'] : 'fest';
-        $b['min'] = (int) $b['min'];
-        $b['max'] = (int) $b['max'];
+        $b['min'] = is_scalar($b['min']) ? (int) $b['min'] : 0;
+        $b['max'] = is_scalar($b['max']) ? (int) $b['max'] : 100;
         if ($b['max'] < $b['min']) { $b['max'] = $b['min']; }
         $b['absender'] = implode(',', array_filter(array_map(function ($n) {
             $n = preg_replace('/[^0-9+]/', '', (string) $n);
@@ -435,12 +740,68 @@ function sg_config()
         $b['antwort'] = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $b['antwort']));
         $cfg['befehle'][$i] = $b;
     }
+    $cfg['befehle'] = array_slice(array_values($cfg['befehle']), 0, SG_BEFEHLE);
 
-    if ($lesbar && !preg_match('/^[A-Za-z0-9]{24,}$/', (string) $cfg['aktionstoken'])) {
+    if ($anlegen && $lesbar && !preg_match('/^[A-Za-z0-9]{24,}$/', $cfg['aktionstoken'])) {
         $cfg['aktionstoken'] = sg_token();
         sg_config_write($cfg);
     }
     return $cfg;
+}
+
+/**
+ * Sperre fuer jede Lese-Aendern-Schreib-Folge der Konfiguration (C9).
+ *
+ * Bis 0.9.25 lasen Oberflaeche und Endpunkt (Kill-Schalter aus Loxone) die
+ * ganze Datei, aenderten und schrieben sie ganz zurueck - ohne gemeinsame
+ * Sperre. Kam "sperren" waehrend des Speicherns an, schrieb die Oberflaeche
+ * gesperrt=0 zurueck: die Sperre war still aufgehoben. Verschachtelte
+ * Aufrufe im selben Prozess sind harmlos (Zaehler).
+ */
+function sg_config_sperre($nehmen)
+{
+    static $fp = null, $tiefe = 0;
+    if ($nehmen) {
+        if ($tiefe > 0) { $tiefe++; return true; }
+        $p = sg_paths();
+        if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+        $fp = @fopen($p['tmp'] . '/config.lock', 'c');
+        if ($fp === false || !flock($fp, LOCK_EX)) {
+            if ($fp) { fclose($fp); }
+            $fp = null;
+            return false;
+        }
+        $tiefe = 1;
+        return true;
+    }
+    if ($tiefe > 0) {
+        $tiefe--;
+        if ($tiefe === 0 && $fp) { flock($fp, LOCK_UN); fclose($fp); $fp = null; }
+    }
+    return true;
+}
+
+/**
+ * Lesen - aendern - schreiben unter EINER Sperre, mit frischem Lesen (C9).
+ * $aendern bekommt die frisch gelesene Konfiguration und gibt die neue zurueck,
+ * oder null fuer "nichts schreiben". Rueckgabe: array(geschrieben/ok, Konfiguration).
+ * Ohne Sperre wird nicht geschrieben (faellt geschlossen aus).
+ */
+function sg_config_aendern($aendern)
+{
+    if (!sg_config_sperre(true)) {
+        sg_log_gebremst('config_sperre', 'Konfiguration: Sperre nicht zu bekommen - nichts geschrieben.');
+        return array(false, sg_config());
+    }
+    $cfg = sg_config();
+    $neu = $aendern($cfg);
+    $ok = true;
+    if (is_array($neu)) {
+        $ok = sg_config_write($neu);
+        if ($ok) { $cfg = $neu; }
+    }
+    sg_config_sperre(false);
+    return array($ok, $cfg);
 }
 
 /**
@@ -475,8 +836,17 @@ function sg_write_atomic($datei, $inhalt, $rechte = 0600)
     $ordner = dirname($datei);
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return false; }
     $tmp = $datei . '.' . getmypid() . '.' . mt_rand(1000, 9999) . '.tmp';
-    if (@file_put_contents($tmp, $inhalt) !== strlen($inhalt)) { @unlink($tmp); return false; }
+    /* Seit dem Durchgang 01.10.2026 (C7): die Nebendatei wird leer angelegt
+     * ("x": nie eine fremde uebernehmen), DANN bekommt sie ihre Rechte, erst
+     * danach ihren Inhalt - vorher stand der Inhalt einen Augenblick mit den
+     * Rechten der umask da. */
+    $fp = @fopen($tmp, 'xb');
+    if ($fp === false) { return false; }
     @chmod($tmp, $rechte);
+    $n = @fwrite($fp, $inhalt);
+    $gut = @fflush($fp);
+    @fclose($fp);
+    if ($n !== strlen($inhalt) || !$gut) { @unlink($tmp); return false; }
     if (!@rename($tmp, $datei)) { @unlink($tmp); return false; }
     return true;
 }
@@ -489,12 +859,18 @@ function sg_config_write($cfg)
     // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
     // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
     // Token, PIN und die Liste der erlaubten Rufnummern - nicht fuer alle.
-    if ($js === false || !sg_write_atomic($p['config'], $js, 0600)) { return false; }
+    if ($js === false) { return false; }
+    if (!sg_config_sperre(true)) { return false; }
+    $ok = sg_write_atomic($p['config'], $js, 0600);
     // Die Sicherung erst NACH dem gelungenen Schreiben nachziehen, und
     // ebenfalls unteilbar: sie ist die letzte Zuflucht, wenn die
-    // Konfiguration einmal nicht lesbar ist.
-    sg_write_atomic($p['sicherung'], $js, 0600);
-    return true;
+    // Konfiguration einmal nicht lesbar ist. Misslingt sie, steht es im
+    // Protokoll (bis 0.9.25 blieb das still; I4).
+    if ($ok && !sg_write_atomic($p['sicherung'], $js, 0600)) {
+        sg_log_gebremst('zweitschrift', 'Zweitschrift ' . $p['sicherung'] . ' liess sich nicht schreiben.');
+    }
+    sg_config_sperre(false);
+    return $ok;
 }
 
 function sg_token($laenge = 32)
@@ -564,34 +940,56 @@ function sg_rpc($methode, $params = array(), $zeit = 20)
     return array('ok' => 1, 'result' => isset($d['result']) ? $d['result'] : null, 'fehler' => '');
 }
 
-/** Laeuft der signal-cli-Dienst? Fragt den Lebenszeichen-Endpunkt. */
+/**
+ * Eine Adresse abrufen und den HTTP-Code aus den Kopfzeilen lesen (C6, Bauart A).
+ * Rueckgabe: array(Inhalt oder false, Code; 0 = kein Code erkennbar).
+ *
+ * Ueber fopen() und stream_get_meta_data() statt ueber die alte
+ * Kopfzeilen-Variable von PHP: 8.5 meldet sie als ueberholt (gemessen, auch
+ * schon beim Laden der Bibliothek), und mit PHP 9 hiesse jeder Code 0 - dann
+ * stuende OK=0 dauerhaft. Bauform ap_http_abruf() (APC-UPS 1.2.17). Bei einer
+ * Weiterleitung stehen mehrere Statuszeilen darin; es gilt die letzte.
+ */
+function sg_http_abruf($url, $ctx)
+{
+    $fp = @fopen($url, 'r', false, $ctx);
+    if ($fp === false) {
+        return array(false, 0);
+    }
+    $meta = @stream_get_meta_data($fp);
+    $t = @stream_get_contents($fp, 65536);
+    @fclose($fp);
+    $code = 0;
+    $kopf = (is_array($meta) && isset($meta['wrapper_data']) && is_array($meta['wrapper_data']))
+        ? $meta['wrapper_data'] : array();
+    foreach ($kopf as $z) {
+        if (is_string($z) && preg_match('#^HTTP/\S+\s+([0-9]{3})#', $z, $m)) {
+            $code = (int) $m[1];
+        }
+    }
+    return array($t, $code);
+}
+
 /**
  * Laeuft der signal-cli-Dienst? Fragt den Lebenszeichen-Endpunkt.
  *
- * Ausgewertet wird die STATUSZEILE, nicht das blosse Ankommen einer Antwort.
- * Bis 0.9.11 endete die Funktion auf "return $a !== false;" - und weil zwei
- * Zeilen darueber schon bei $a === false zurueckgekehrt wird, war das ab
- * dort IMMER wahr. Mit ignore_errors kommt auch eine 404- oder 500-Seite als
- * Zeichenkette an: in Loxone stand SIGNAL;OK=1 und im Reiter Test ein gruenes
- * Haekchen, waehrend keine einzige Nachricht durchging.
- *
- * $http_response_header ist innerhalb der Funktion gueltig, die den Strom
- * oeffnet - in PHP 7.4 wie in 8.x. Bei einer Weiterleitung stehen mehrere
- * Statuszeilen darin; es gilt die letzte.
+ * Ausgewertet wird die STATUSZEILE, nicht das blosse Ankommen einer Antwort
+ * (seit 0.9.12: mit ignore_errors kommt auch eine 404- oder 500-Seite an).
+ * Rueckgabe von sg_daemon_pruefen(): array(lebt, HTTP-Code; 0 = keine Antwort).
  */
-function sg_daemon_lebt()
+function sg_daemon_pruefen()
 {
     $cfg = sg_config();
     $ctx = stream_context_create(array('http' => array('timeout' => 3, 'ignore_errors' => true)));
-    $a = @file_get_contents($cfg['rpc_url'] . '/api/v1/check', false, $ctx);
-    if ($a === false) { return false; }
-    $code = 0;
-    if (isset($http_response_header) && is_array($http_response_header)) {
-        foreach ($http_response_header as $z) {
-            if (preg_match('#^HTTP/\S+\s+([0-9]{3})#', $z, $m)) { $code = (int) $m[1]; }
-        }
-    }
-    return $code >= 200 && $code < 300;
+    list($a, $code) = sg_http_abruf($cfg['rpc_url'] . '/api/v1/check', $ctx);
+    if ($a === false) { return array(false, 0); }
+    return array($code >= 200 && $code < 300, $code);
+}
+
+function sg_daemon_lebt()
+{
+    list($lebt, ) = sg_daemon_pruefen();
+    return $lebt;
 }
 
 function sg_dienst_laeuft()
@@ -771,13 +1169,21 @@ function sg_bremse_frei($nummer)
         return false;
     }
     $liste[] = $jetzt;
+    $js = json_encode($liste);
     ftruncate($fp, 0);
     rewind($fp);
-    fwrite($fp, json_encode($liste));
-    fflush($fp);
+    $n = fwrite($fp, $js);
+    $gut = fflush($fp);
     flock($fp, LOCK_UN);
     fclose($fp);
     @chmod($f, 0600);
+    /* Ein Zaehlschritt, der nicht geschrieben wurde, ist keiner (C8): bei
+     * vollem /tmp blieb der Zaehler bis 0.9.25 stehen, und die Bremse - die
+     * einzige Grenze fuer das PIN-Raten - fiel offen aus. */
+    if ($n !== strlen($js) || !$gut) {
+        sg_log_gebremst('bremse_schreiben', 'Bremse: ' . $f . ' liess sich nicht schreiben - Befehl abgewiesen.');
+        return false;
+    }
     return true;
 }
 
@@ -823,7 +1229,18 @@ function sg_pin_fehlversuch($nummer)
 {
     $cfg = sg_config();
     $f = sg_tmpdir() . '/pinfehl_' . md5((string) $nummer) . '.json';
-    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
+    $notfall = max(60, (int) $cfg['pin_sperre'] * 60);
+    /* Unter Sperre und mit Laengenpruefung (C8), wie die Bremse. Bis 0.9.25
+     * wurde ungeprueft geschrieben; scheiterte das, zaehlte nichts mit, und
+     * das Raten war unbegrenzt. Jetzt gilt: nicht gezaehlt = gesperrt. */
+    $fp = @fopen($f, 'c+');
+    if ($fp === false || !flock($fp, LOCK_EX)) {
+        if ($fp) { fclose($fp); }
+        sg_log_gebremst('pinfehl_defekt', 'PIN-Fehlzaehler ' . $f . ' nicht nutzbar - PIN-Befehle sind gesperrt.');
+        return $notfall;
+    }
+    $roh = (string) stream_get_contents($fp);
+    $d = $roh !== '' ? json_decode($roh, true) : array();
     if (!is_array($d)) { $d = array(); }
     $n = isset($d['n']) ? (int) $d['n'] + 1 : 1;
     $bis = 0;
@@ -833,9 +1250,35 @@ function sg_pin_fehlversuch($nummer)
         sg_log('PIN-Sperre fuer ' . sg_maske($nummer) . ': ' . (int) $cfg['pin_sperre']
              . ' Minuten nach ' . (int) $cfg['pin_versuche'] . ' Fehlversuchen.');
     }
-    @file_put_contents($f, json_encode(array('n' => $n, 'bis' => $bis)));
+    $js = json_encode(array('n' => $n, 'bis' => $bis));
+    ftruncate($fp, 0);
+    rewind($fp);
+    $w = fwrite($fp, $js);
+    $gut = fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
     @chmod($f, 0600);
+    if ($w !== strlen($js) || !$gut) {
+        sg_log_gebremst('pinfehl_schreiben', 'PIN-Fehlzaehler ' . $f . ' liess sich nicht schreiben - gesperrt.');
+        return $notfall;
+    }
     return $bis > 0 ? $bis - time() : 0;
+}
+
+/**
+ * Laesst sich der PIN-Fehlzaehler dieses Absenders fuehren? (C8)
+ * Vor einer PIN-Anforderung gefragt: ohne Zaehler keine PIN-Abfrage.
+ */
+function sg_pin_zaehler_bereit($nummer)
+{
+    $f = sg_tmpdir() . '/pinfehl_' . md5((string) $nummer) . '.json';
+    $fp = @fopen($f, 'c+');
+    if ($fp === false) { return false; }
+    $ok = flock($fp, LOCK_EX);
+    if ($ok) { flock($fp, LOCK_UN); }
+    fclose($fp);
+    @chmod($f, 0600);
+    return $ok;
 }
 
 /** Verbleibende Sperrzeit in Sekunden, 0 = frei. */
@@ -1032,6 +1475,12 @@ function sg_mqtt_wert_saeubern($v)
     return trim(preg_replace('/ {2,}/', ' ', $wert));
 }
 
+/** Das volle Thema, wie es hinausgeht - EINE Stelle fuer Sendecode und Themenliste. */
+function sg_mqtt_thema_voll($cfg, $thema)
+{
+    return $cfg['mqtt_topic'] . '/' . ltrim((string) $thema, '/');
+}
+
 function sg_mqtt_pulsen($thema, $wert)
 {
     $cfg = sg_config();
@@ -1041,9 +1490,90 @@ function sg_mqtt_pulsen($thema, $wert)
         sg_log('MQTT: kein UDP-Eingangsport in der general.json - Gateway eingerichtet?');
         return 0;
     }
-    $voll = $cfg['mqtt_topic'] . '/' . ltrim((string) $thema, '/');
-    $msg = 'publish ' . $voll . ' ' . sg_mqtt_wert_saeubern($wert);
-    return sg_udp_senden($z['udpport'], $msg);
+    $voll = sg_mqtt_thema_voll($cfg, $thema);
+    $w = sg_mqtt_wert_saeubern($wert);
+    /* Ein leerer Wert geht nicht hinaus (M5): am Miniserver kommt er als 0
+     * an, ein Befehl loeste also nie aus - und der Bot meldete Erfolg. */
+    if ($w === '') {
+        sg_log('MQTT: leerer Wert fuer ' . $voll . ' - nicht gesendet.');
+        return 0;
+    }
+    return sg_udp_senden($z['udpport'], 'publish ' . $voll . ' ' . $w);
+}
+
+/**
+ * Ein echter Impuls fuer einen festen Befehl (M3, Entscheidung 28): Wert
+ * senden, nach einer Sekunde 0 - beides fluechtig (publish).
+ *
+ * Bis 0.9.25 blieb der Wert stehen. Ein virtueller Eingang reagiert auf eine
+ * Aenderung; ab dem zweiten gleichen Befehl ("licht an" zweimal) sah Loxone
+ * nichts mehr, und der Bot meldete trotzdem "erledigt" (gemessen an der
+ * Gateway-Attrappe: 1, 1 ohne 0 dazwischen). Ein fester Wert 0 hat keine
+ * Rueckstellung - er ist schon die Ruhelage.
+ */
+function sg_mqtt_impuls($thema, $wert)
+{
+    $ok = sg_mqtt_pulsen($thema, $wert);
+    if (!$ok || sg_mqtt_wert_saeubern($wert) === '0') { return $ok; }
+    usleep(1000000);
+    if (!sg_mqtt_pulsen($thema, '0')) {
+        sg_log('MQTT: Rueckstellung von ' . $thema . ' auf 0 nicht gesendet - der naechste gleiche Befehl kann in Loxone ausbleiben.');
+    }
+    return $ok;
+}
+
+/**
+ * Was der Bot auf MQTT sendet - EINE Liste fuer Sendecode, Themenliste im
+ * Reiter MQTT und Pruefzeile (M8, U12, U18). Je Eintrag: thema (voll),
+ * wert (Anzeige), retained (immer 0 - Impulse, Lebenszeichen und Probe sind
+ * fluechtig, Entscheidung 3), quelle (Befehlswort, 'online' oder 'selbsttest').
+ */
+function sg_mqtt_themen($cfg)
+{
+    $aus = array();
+    foreach ($cfg['befehle'] as $b) {
+        if (empty($b['aktiv']) || $b['wort'] === '' || $b['thema'] === '') { continue; }
+        $aus[] = array(
+            'thema' => sg_mqtt_thema_voll($cfg, $b['thema']),
+            'wert' => $b['wert_art'] === 'zahl'
+                ? (int) $b['min'] . '..' . (int) $b['max']
+                : ($b['wert'] === '0' ? '0' : sprintf(sg_t('MQTT.W_IMPULS'), $b['wert'])),
+            'retained' => 0, 'quelle' => $b['wort'], 'art' => $b['wert_art'],
+        );
+    }
+    if (!empty($cfg['herzschlag'])) {
+        $aus[] = array('thema' => sg_mqtt_thema_voll($cfg, 'online'), 'wert' => sg_t('MQTT.W_ZEITSTEMPEL'),
+                       'retained' => 0, 'quelle' => 'online', 'art' => 'online');
+    }
+    $aus[] = array('thema' => sg_mqtt_thema_voll($cfg, 'selbsttest'), 'wert' => sg_t('MQTT.W_PROBE'),
+                   'retained' => 0, 'quelle' => 'selbsttest', 'art' => 'selbsttest');
+    return $aus;
+}
+
+/**
+ * Die Abo-Datei des MQTT-Gateways: config/plugins/<ordner>/mqtt_subscriptions.cfg (M9).
+ *
+ * Das Gateway V1 liest sie selbst und abonniert jede Zeile (am Geraet belegt
+ * 13.09.2026 an Midea2Lox, Bauform Einspeisebremse 0.9.20 eb_abo_datei()).
+ * Der Praefix ist einstellbar - deshalb wird sie beim Speichern im Reiter MQTT
+ * und beim Start des Bots auf den aktuellen Praefix nachgeschrieben, wenn sie
+ * abweicht. Rueckgabe: array(Pfad, traegt das Abo).
+ */
+function sg_abo_datei($praefix, $schreiben = false)
+{
+    $p = sg_paths();
+    $pfad = isset($p['abo']) ? $p['abo'] : '';
+    if ($pfad === '') { return array('', false); }
+    $soll = trim((string) $praefix, '/') . '/#';
+    $roh = is_readable($pfad) ? (string) @file_get_contents($pfad) : '';
+    $da = in_array($soll, array_map('trim', preg_split('/\r?\n/', $roh)), true);
+    if ($schreiben && $roh !== $soll . "\n" && is_dir($p['configdir'])) {
+        if (sg_write_atomic($pfad, $soll . "\n", 0644)) {
+            sg_log('Gateway-Abo gesetzt: ' . $soll);
+            $da = true;
+        }
+    }
+    return array($pfad, $da);
 }
 
 /**
@@ -1309,7 +1839,10 @@ function sg_verarbeite($von, $text, $trocken = false)
     /* ---- Schicht 1: Weissliste ---- */
     if (!sg_erlaubt($von)) {
         sg_log('Abgewiesen: ' . sg_maske($von) . ' (nicht auf der Weissliste)');
-        sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'nicht auf der Weissliste');
+        /* Der Trockenlauf merkt nichts (I3): bis 0.9.25 trug der Probelauf
+         * von postinstall.sh bei jeder Installation ein erfundenes
+         * "abgewiesen" ins Ereignisprotokoll ein (Installer-Pruefstand B8). */
+        if (!$trocken) { sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'nicht auf der Weissliste'); }
         // Bewusst schweigen: eine Antwort wuerde Fremden bestaetigen, dass
         // hier ein Bot horcht. Wer die Nummer nur vertippt hat, merkt es am
         // ausbleibenden Echo genauso.
@@ -1475,7 +2008,7 @@ function sg_verarbeite($von, $text, $trocken = false)
             }
             if (!$sg_darf) {
                 sg_log('Nicht zustaendig: ' . sg_maske($von) . ' fuer "' . $b['wort'] . '"');
-                sg_ereignis_merken(sg_maske($von), 'abgewiesen', $b['wort'] . ' (nicht zustaendig)');
+                if (!$trocken) { sg_ereignis_merken(sg_maske($von), 'abgewiesen', $b['wort'] . ' (nicht zustaendig)'); }
                 return array('antwort' => sg_t('BOT.NICHT_ZUSTAENDIG'), 'grund' => 'nicht_zustaendig');
             }
         }
@@ -1489,6 +2022,9 @@ function sg_verarbeite($von, $text, $trocken = false)
             if ($sg_offen > 0) {
                 return array('antwort' => sprintf(sg_t('BOT.PIN_GESPERRT'), (int) ceil($sg_offen / 60)),
                              'grund' => 'pin_gesperrt');
+            }
+            if (!$trocken && !sg_pin_zaehler_bereit($von)) {
+                return array('antwort' => sg_t('BOT.PIN_STOERUNG'), 'grund' => 'pin_stoerung');
             }
             if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit)); }
             return array('antwort' => sg_t('BOT.PIN_BITTE'), 'grund' => 'pin_angefordert');
@@ -1527,11 +2063,15 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
     // Der mitgeschickte Wert schlaegt die feste Nutzlast der Zeile.
     $nutz = $wert === null ? (string) $b['wert'] : (string) $wert;
     $wortzeile = $b['wort'] . ($wert === null ? '' : ' ' . $wert);
+    /* Fester Befehl = Impuls (Wert, nach 1 s 0); Zahl-Befehl = Wert ohne
+     * Rueckstellung (Entscheidung 28). */
+    $impuls = ($wert === null);
 
     if ($trocken) {
         sg_log('Trockenlauf: "' . $wortzeile . '" wuerde ' . $b['thema'] . '=' . $nutz
+             . ($impuls && $nutz !== '0' ? ', nach 1 s ' . $b['thema'] . '=0' : '')
              . ' senden (es wurde nichts gesendet)');
-        $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $wortzeile);
+        $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.UEBERGEBEN'), $wortzeile);
         return array('antwort' => $antwort, 'grund' => 'wuerde_ausfuehren');
     }
 
@@ -1550,23 +2090,28 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
                      'grund' => 'zweitfreigabe');
     }
 
-    $ok = sg_mqtt_pulsen($b['thema'], $nutz);
-    // Unabhaengig vom Ereignisprotokoll festhalten, wann zuletzt etwas
-    // geschaltet wurde - Loxone fragt das ueber die Statuszeile ab und kann
-    // daran erkennen, ob der Bot noch arbeitet.
+    $ok = $impuls ? sg_mqtt_impuls($b['thema'], $nutz) : sg_mqtt_pulsen($b['thema'], $nutz);
+    /* WAS "ok" HEISST (M2, Entscheidung 28): das Paket ist an den UDP-Eingang
+     * des MQTT-Gateways UEBERGEBEN. Ob es den Miniserver erreicht, sieht der
+     * Bot nicht - der Eingang verwirft unter Last Pakete, ohne dass der
+     * Absender etwas merkt (Regeln/07). Bis 0.9.25 antwortete der Bot
+     * "erledigt", auch wenn auf dem Port niemand hoerte. Jetzt: "an Loxone
+     * uebergeben", das Ereignis heisst "uebergeben". letzter.json ist der
+     * Zeitpunkt der letzten Uebergabe. */
     if ($ok) {
         sg_write_atomic(sg_datadir() . '/letzter.json',
             json_encode(array('ts' => time(), 'wort' => $wortzeile)), 0644);
     }
     sg_log('Befehl "' . $wortzeile . '" von ' . sg_maske($von) . ' -> '
-         . $b['thema'] . '=' . $nutz . ' (' . ($ok ? 'gesendet' : 'FEHLGESCHLAGEN') . ')');
-    sg_ereignis_merken(sg_maske($von), $ok ? 'ausgefuehrt' : 'fehlgeschlagen',
+         . $b['thema'] . '=' . $nutz . ($impuls && $nutz !== '0' ? ', dann 0' : '')
+         . ' (' . ($ok ? 'an das Gateway uebergeben, unbestaetigt' : 'FEHLGESCHLAGEN') . ')');
+    sg_ereignis_merken(sg_maske($von), $ok ? 'uebergeben' : 'fehlgeschlagen',
                 $wortzeile . ' -> ' . $b['thema'] . '=' . $nutz);
     if (!$ok) {
         return array('antwort' => sg_t('BOT.MQTT_FEHLER'), 'grund' => 'mqtt_fehler');
     }
-    $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.ERLEDIGT'), $wortzeile);
-    return array('antwort' => $antwort, 'grund' => 'ausgefuehrt');
+    $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.UEBERGEBEN'), $wortzeile);
+    return array('antwort' => $antwort, 'grund' => 'uebergeben');
 }
 
 /** Die Hilfe, die der Bot auf "hilfe" schickt. */
@@ -1777,22 +2322,84 @@ function sg_endpunkt($aktion = 'status')
          . '?token=' . $cfg['aktionstoken'] . '&aktion=' . $aktion;
 }
 
-/** Die Felder der Statuszeile: name => array(analog, min, max, Sprachschluessel). */
+/* ---- Herzschlag des Bots (C2, Entscheidung 4) ----
+ *
+ * Der Bot legt in jedem Takt (nach der Uhr, hoechstens alle 20 s) den
+ * Zeitstempel in <tmp>/herz ab. Der Endpunkt meldet daraus BOT und ALTER, und
+ * OK=1 nur, wenn signal-cli antwortet UND das Lebenszeichen hoechstens
+ * SG_HERZ_GRENZE Sekunden alt ist (3 x 60 s Takt). Bis 0.9.25 hiess OK nur
+ * "signal-cli antwortet auf /check" - ob jemand den Ereignisstrom abhoert,
+ * stand nirgends (gemessen: OK=1 ohne laufenden Bot). Lesen legt nichts an.
+ */
+define('SG_HERZ_GRENZE', 180);
+
+function sg_herz_datei()
+{
+    $p = sg_paths();
+    return $p['tmp'] . '/herz';
+}
+
+function sg_herz_schreiben()
+{
+    return sg_write_atomic(sg_tmpdir() . '/herz', (string) time(), 0644);
+}
+
+/** Sekunden seit dem letzten Lebenszeichen des Bots; -1 = keines. */
+function sg_herz_alter()
+{
+    $f = sg_herz_datei();
+    clearstatcache(true, $f);
+    if (!is_file($f)) { return -1; }
+    $t = (int) trim((string) @file_get_contents($f));
+    return $t > 0 ? max(0, time() - $t) : -1;
+}
+
+/** Haelt ein Bot die Sperre? Legt nichts an, wenn es die Sperrdatei nicht gibt. */
+function sg_bot_laeuft()
+{
+    $p = sg_paths();
+    $sperre = $p['tmp'] . '/bot.lock';
+    if (!is_file($sperre)) { return false; }
+    $fh = @fopen($sperre, 'r');
+    if (!$fh) { return false; }
+    // Laesst sich die Sperre nehmen, laeuft niemand.
+    $laeuft = !flock($fh, LOCK_EX | LOCK_NB);
+    if (!$laeuft) { flock($fh, LOCK_UN); }
+    fclose($fh);
+    return $laeuft;
+}
+
+/**
+ * Die Felder der Statuszeile: name => array(analog, min, max, Sprachschluessel, Einheit).
+ * Die Spalte "Bedeutung" (FELD.*) steht in der Oberflaeche und als HintText
+ * in der Vorlage; der Kommentar der Vorlage ist ein eigener kurzer Text
+ * (VORLAGE.C_*, hoechstens 40 Zeichen - laengere schneidet Loxone Config ab).
+ */
 function sg_felder()
 {
     return array(
-        'OK'        => array(0, 0, 1, 'FELD.OK'),
-        'DAEMON'    => array(0, 0, 1, 'FELD.DAEMON'),
-        'KONTO'     => array(0, 0, 1, 'FELD.KONTO'),
-        'ERLAUBTE'  => array(1, 0, 100, 'FELD.ERLAUBTE'),
-        'BEFEHLE'   => array(1, 0, SG_BEFEHLE, 'FELD.BEFEHLE'),
-        'ZUSTAENDE' => array(1, 0, 50, 'FELD.ZUSTAENDE'),
-        'GESPERRT'  => array(0, 0, 1, 'FELD.GESPERRT'),
-        'OFFEN'     => array(1, 0, 200, 'FELD.OFFEN'),
-        'LETZTER'   => array(1, -1, 86400, 'FELD.LETZTER'),
-        'ABGEWIESEN'=> array(1, 0, 500, 'FELD.ABGEWIESEN'),
-        'PINFEHL'   => array(1, 0, 500, 'FELD.PINFEHL'),
+        'OK'        => array(0, 0, 1, 'FELD.OK', ''),
+        'DAEMON'    => array(0, 0, 1, 'FELD.DAEMON', ''),
+        'KONTO'     => array(0, 0, 1, 'FELD.KONTO', ''),
+        'ERLAUBTE'  => array(1, 0, 100, 'FELD.ERLAUBTE', ''),
+        'BEFEHLE'   => array(1, 0, SG_BEFEHLE, 'FELD.BEFEHLE', ''),
+        'ZUSTAENDE' => array(1, 0, 50, 'FELD.ZUSTAENDE', ''),
+        'GESPERRT'  => array(0, 0, 1, 'FELD.GESPERRT', ''),
+        'OFFEN'     => array(1, 0, 200, 'FELD.OFFEN', ''),
+        /* LETZTER und ALTER bis ein Jahr (bis 0.9.25 LETZTER bis 86400: nach
+         * einem Tag ohne Befehl lag der Wert ueber MaxVal - Klasse 9). */
+        'LETZTER'   => array(1, -1, 31536000, 'FELD.LETZTER', 's'),
+        'ABGEWIESEN'=> array(1, 0, 500, 'FELD.ABGEWIESEN', ''),
+        'PINFEHL'   => array(1, 0, 500, 'FELD.PINFEHL', ''),
+        'BOT'       => array(0, 0, 1, 'FELD.BOT', ''),
+        'ALTER'     => array(1, -1, 31536000, 'FELD.ALTER', 's'),
     );
+}
+
+/** Ein Sprachwert als reiner Text (fuer Vorlagen und HintText). */
+function sg_klartext($schluessel)
+{
+    return trim(preg_replace('/\s+/', ' ', strip_tags(html_entity_decode(sg_t($schluessel), ENT_QUOTES, 'UTF-8'))));
 }
 
 function sg_xml_virtual_in_http($kopf, $cmds)
@@ -1800,11 +2407,14 @@ function sg_xml_virtual_in_http($kopf, $cmds)
     $crlf = "\r\n";
     $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
     $o .= '<VirtualInHttp ';
+    $o .= 'HintText="' . sg_x(isset($kopf['hint']) ? $kopf['hint'] : '') . '" ';
     $o .= 'Title="' . sg_x($kopf['title']) . '" ';
     $o .= 'Comment="' . sg_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
     $o .= 'Address="' . sg_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
     $o .= 'PollingTime="' . sg_x(isset($kopf['polling']) ? $kopf['polling'] : '60') . '"';
     $o .= '>' . $crlf;
+    // Bauform APC-UPS 1.2.17 (U15): Info als erstes Kind, Unit und HintText je Eintrag.
+    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
     foreach ($cmds as $c) {
         $o .= "\t" . '<VirtualInHttpCmd ';
         $o .= 'Title="' . sg_x($c['title']) . '" ';
@@ -1818,7 +2428,9 @@ function sg_xml_virtual_in_http($kopf, $cmds)
         $o .= 'DestValHigh="1" ';
         $o .= 'DefVal="0" ';
         $o .= 'MinVal="' . (int) $c['min'] . '" ';
-        $o .= 'MaxVal="' . (int) $c['max'] . '"';
+        $o .= 'MaxVal="' . (int) $c['max'] . '" ';
+        $o .= 'Unit="' . sg_x($c['unit']) . '" ';
+        $o .= 'HintText="' . sg_x(isset($c['hint']) ? $c['hint'] : '') . '"';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualInHttp>' . $crlf;
@@ -1826,61 +2438,54 @@ function sg_xml_virtual_in_http($kopf, $cmds)
 }
 
 /**
- * Die Vorlage fuer Loxone Config.
- *
- * Nur EINGAENGE, bewusst. Fuer das Senden aus Loxone gibt es keinen
- * virtuellen Ausgang in der Vorlage: die Adresse traegt den Meldungstext,
- * und der ist je Anwendungsfall ein anderer. Ein vorgefertigter Ausgang
- * mit Platzhaltertext waere ein Baustein, den ohnehin jeder umschreibt -
- * die fertige Adresse steht statt dessen im Reiter zum Kopieren.
+ * Die Vorlage fuer Loxone Config: die Statuszeile als virtueller HTTP-Eingang.
+ * Kommentare hoechstens 40 Zeichen (U15; bis 0.9.25 fuenf von zwoelf
+ * laenger, der Kopf 163), die Erklaerung steht im HintText. Titel und Texte
+ * aus der Sprachdatei (U16).
  */
 function sg_vorlage()
 {
     $cmds = array();
     foreach (sg_felder() as $name => $d) {
-        list($analog, $min, $max, $schluessel) = $d;
+        list($analog, $min, $max, $schluessel, $einheit) = $d;
         $cmds[] = array(
             'title' => 'SIGNAL_' . $name,
-            'comment' => trim(strip_tags(html_entity_decode(sg_t($schluessel), ENT_QUOTES, 'UTF-8'))),
+            'comment' => sg_klartext('VORLAGE.C_' . $name),
+            'hint' => sg_klartext($schluessel),
             'check' => '\i' . $name . '=\i\v',
             'analog' => $analog, 'min' => $min, 'max' => $max,
+            'unit' => $einheit === '' ? '<v>' : '<v> ' . $einheit,
         );
     }
     return array('VI_signalbot.xml', sg_xml_virtual_in_http(array(
-        'title'   => 'Signal Bot',
+        'title'   => sg_klartext('VORLAGE.ITITEL'),
         'address' => sg_endpunkt('status'),
         'polling' => '60',
-        'comment' => 'Erzeugt vom LoxBerry-Plugin Signal Bot (' . date('d.m.Y') . '). '
-                   . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
-                   . 'zweimal eingelesen ergibt doppelte Bausteine.',
+        'comment' => sg_klartext('VORLAGE.IKOPF'),
+        'hint'    => sprintf(sg_klartext('VORLAGE.HINT_KOPF'), date('d.m.Y')),
     ), $cmds));
 }
 
 /**
  * Die zweite Vorlage: ein virtueller AUSGANG zum Senden.
  *
- * Bis 0.9.11 gab es nur Eingaenge, mit der Begruendung, der Meldungstext sei
- * je Anwendungsfall ein anderer. Das ueberzeugt nicht: die URL-Kodierung, das
- * Token in der Adresse und die Trennung von Adresse und Befehl sind genau
- * die Stellen, an denen es haendisch schiefgeht. Der Text laesst sich danach
- * in Loxone Config in einer Zeile aendern.
- *
- * Aufbau und Attributreihenfolge stammen aus dem gemessenen Muster
- * VQ_KEBA_P30_UDP.xml aus dem Arbeitsordner: Wurzel mit Title, Comment,
- * Address, CloseAfterSend, CmdSep; Kind mit Title, Comment, CmdOn, wahlweise
- * CmdOff, dann Analog. Tabulator vor den Kindern, CRLF als Zeilenende.
+ * Aufbau und Attributreihenfolge aus dem gemessenen Muster VQ_KEBA_P30_UDP.xml;
+ * dazu (U15) Info templateType 3 (virtueller Ausgang, Bauform Midea2Lox 4.5.12)
+ * und HintText am Wurzelelement und je Befehl.
  */
 function sg_xml_virtual_out($kopf, $cmds)
 {
     $crlf = "\r\n";
     $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
     $o .= '<VirtualOut ';
+    $o .= 'HintText="' . sg_x(isset($kopf['hint']) ? $kopf['hint'] : '') . '" ';
     $o .= 'Title="' . sg_x($kopf['title']) . '" ';
     $o .= 'Comment="' . sg_x($kopf['comment']) . '" ';
     $o .= 'Address="' . sg_x($kopf['address']) . '" ';
     $o .= 'CloseAfterSend="true" ';
     $o .= 'CmdSep=""';
     $o .= '>' . $crlf;
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
     foreach ($cmds as $c) {
         $o .= "\t" . '<VirtualOutCmd ';
         $o .= 'Title="' . sg_x($c['title']) . '" ';
@@ -1889,7 +2494,8 @@ function sg_xml_virtual_out($kopf, $cmds)
         if (isset($c['off']) && $c['off'] !== '') {
             $o .= 'CmdOff="' . sg_x($c['off']) . '" ';
         }
-        $o .= 'Analog="' . (!empty($c['analog']) ? 'true' : 'false') . '"';
+        $o .= 'Analog="' . (!empty($c['analog']) ? 'true' : 'false') . '" ';
+        $o .= 'HintText="' . sg_x(isset($c['hint']) ? $c['hint'] : '') . '"';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualOut>' . $crlf;
@@ -1904,27 +2510,29 @@ function sg_vorlage_out()
         ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
         : (gethostname() ?: 'loxberry');
     $pfad = '/plugins/' . $p['plugin'] . '/index.php?token=' . $cfg['aktionstoken'] . '&aktion=';
+    $text = function ($k) { return rawurlencode(sg_klartext($k)); };
     $cmds = array(
-        array('title' => 'Signal - Meldung senden',
-              'comment' => sg_t('VORLAGE.Q1'),
-              'on' => $pfad . 'senden&text=Meldung%20aus%20Loxone', 'analog' => 0),
-        array('title' => 'Signal - Meldung mit Wert',
-              'comment' => sg_t('VORLAGE.Q2'),
-              'on' => $pfad . 'senden&text=Wert%3A%20<v.0>', 'analog' => 1),
-        array('title' => 'Signal - dringende Meldung',
-              'comment' => sg_t('VORLAGE.Q3'),
-              'on' => $pfad . 'senden&dringend=1&text=Alarm%20ausgeloest', 'analog' => 0),
-        array('title' => 'Signal - Zustand melden',
-              'comment' => sg_t('VORLAGE.Q4'),
+        array('title' => sg_klartext('VORLAGE.T1'), 'comment' => sg_klartext('VORLAGE.Q1'),
+              'hint' => sg_klartext('VORLAGE.H1'),
+              'on' => $pfad . 'senden&text=' . $text('VORLAGE.TEXT1'), 'analog' => 0),
+        array('title' => sg_klartext('VORLAGE.T2'), 'comment' => sg_klartext('VORLAGE.Q2'),
+              'hint' => sg_klartext('VORLAGE.H2'),
+              'on' => $pfad . 'senden&text=' . $text('VORLAGE.TEXT2') . '%20<v.0>', 'analog' => 1),
+        array('title' => sg_klartext('VORLAGE.T3'), 'comment' => sg_klartext('VORLAGE.Q3'),
+              'hint' => sg_klartext('VORLAGE.H3'),
+              'on' => $pfad . 'senden&dringend=1&text=' . $text('VORLAGE.TEXT3'), 'analog' => 0),
+        array('title' => sg_klartext('VORLAGE.T4'), 'comment' => sg_klartext('VORLAGE.Q4'),
+              'hint' => sg_klartext('VORLAGE.H4'),
               'on' => $pfad . 'zustand&name=alarm&wert=<v.0>', 'analog' => 1),
-        array('title' => 'Signal - Bot sperren',
-              'comment' => sg_t('VORLAGE.Q5'),
+        array('title' => sg_klartext('VORLAGE.T5'), 'comment' => sg_klartext('VORLAGE.Q5'),
+              'hint' => sg_klartext('VORLAGE.H5'),
               'on' => $pfad . 'sperren', 'off' => $pfad . 'entsperren', 'analog' => 0),
     );
     return array('VQ_signalbot.xml', sg_xml_virtual_out(array(
-        'title'   => 'Signal Bot Befehle',
+        'title'   => sg_klartext('VORLAGE.QTITEL'),
         'address' => 'http://' . $host,
-        'comment' => sg_t('VORLAGE.QKOPF'),
+        'comment' => sg_klartext('VORLAGE.QKOPF'),
+        'hint'    => sg_klartext('VORLAGE.HINT_QKOPF'),
     ), $cmds));
 }
 
@@ -1970,14 +2578,20 @@ function sg_t($schluessel)
 /**
  * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
  *
- * Die sieben Punkte aus REGELN_2, und der wichtigste ist der dritte: eine
- * halb gueltige Datei ueberschreibt GAR NICHTS. Wer eine Sicherung
- * zurueckspielt, will entweder den ganzen Stand oder gar keinen - eine zur
- * Haelfte uebernommene Konfiguration ist schlimmer als die alte, und man
- * sieht es ihr nicht an.
+ * Eine halb gueltige Datei ueberschreibt GAR NICHTS. Unbekannte und fehlende
+ * Schluessel sind eine Beanstandung (seit 0.9.12 bzw. 07.09.2026).
  *
- * Unbekannte Schluessel sind eine Beanstandung, kein stiller Verlust: sie
- * stammen aus einer anderen Fassung oder einem anderen Plugin.
+ * Seit dem Durchgang 01.10.2026 (C3, Bauart E, Klasse 12) wird jeder WERT
+ * mit derselben Pruefung wie die Formulare geprueft (sg_config_maengel):
+ * Typ, Muster, Bereich, Befehlszeilen. Bis 0.9.25 ging hier jeder Wert durch,
+ * und erst sg_config() bog ihn beim Lesen zurecht: ein Token als Liste wurde
+ * zu einem neuen Token, eine Weissliste als Text zu einer leeren, "gesperrt":
+ * "nein" sperrte den Bot, "rpc_url":"javascript:..." stand als Link im
+ * Reiter Test - alles mit "22 Werte uebernommen" quittiert (gemessen).
+ *
+ * Schluessel mit "_" vorn sind der lesbare Kopf (_plugin, _stand, _hinweis,
+ * _warnung; Kernschicht 9) und werden uebersprungen (U6; bis 0.9.25
+ * "Unbekannte Einstellung in der Datei: _hinweis").
  *
  * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
  */
@@ -1985,54 +2599,103 @@ function sg_sicherung_lesen($roh)
 {
     $mangel = array();
     $daten = json_decode((string) $roh, true);
-    if (!is_array($daten)) {
+    if (!is_array($daten) || ($daten !== array() && array_keys($daten) === range(0, count($daten) - 1))) {
         return array(null, array(sg_t('EINST.SICH_KEIN_JSON')), 0);
     }
     $neu = sg_vorgaben();
     $bekannt = array_keys($neu);
     $anzahl = 0;
+    $gesehen = array();
     foreach ($daten as $k => $w) {
+        if (is_string($k) && $k !== '' && $k[0] === '_') { continue; }
         if (!in_array($k, $bekannt, true)) {
             $mangel[] = sprintf(sg_t('EINST.SICH_FREMD'),
                                  htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
             continue;
         }
         $neu[$k] = $w;
+        $gesehen[] = $k;
         $anzahl++;
     }
     if ($anzahl === 0) {
         $mangel[] = sg_t('EINST.SICH_LEER');
     }
-    /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
-     *
-     * Bis hierher war die Vorgabenliste der Ausgangspunkt, und nur was in
-     * der Datei stand wurde darueber geschrieben. Eine Datei mit einem
-     * einzigen Schluessel lief damit ohne Beanstandung durch, wurde
-     * gespeichert, und alle uebrigen Einstellungen fielen auf Werk
-     * zurueck - quittiert mit "1 Wert uebernommen".
-     *
-     * Gemessen an VolkswagenID 0.9.11 am 03.09.2026 unter PHP 7.4 und 8.4:
-     * dort fiel dabei auch das Aktionstoken auf '', und jede im Miniserver
-     * eingetragene Adresse war stumm ungueltig. Am 07.09.2026 ueber den
-     * Bestand ausgerollt (30 Linien).
-     *
-     * Der Hausstandard sagt: eine halb gueltige Datei aendert gar nichts.
-     * Verglichen wird gegen die VORGABEN, nicht gegen $bekannt: was
-     * ausserhalb der Konfigurationsdatei liegt - Zugangsdaten in einer
-     * eigenen Datei - faellt nicht auf Werk zurueck und darf hier fehlen. */
-    $fehlend = array();
-    foreach (array_keys(sg_vorgaben()) as $fk) {
-        if (!array_key_exists($fk, $daten)) {
-            $fehlend[] = $fk;
-        }
-    }
+    $fehlend = array_values(array_diff($bekannt, $gesehen));
     if ($fehlend) {
         $mangel[] = sprintf(sg_t('EINST.SICH_FEHLEND'), count($fehlend),
             htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
     }
+    if (!$mangel) {
+        foreach (sg_config_maengel($neu) as $feld => $text) {
+            $mangel[] = '<span class="sm-mono">' . sg_e($feld) . '</span>: ' . $text;
+        }
+    }
     return array($mangel ? null : $neu, $mangel, $anzahl);
 }
 
+/**
+ * Die Sicherungsdatei: die Konfiguration mit lesbarem _-Kopf (U6). Genau diese
+ * Datei nimmt sg_sicherung_lesen() wieder an. Bestuende sie das Zurueckspielen
+ * nicht (X-3), steht es im Kopf (_warnung, nur Namen) - geliefert wird trotzdem.
+ */
+function sg_sicherung_json($cfg)
+{
+    $aus = array(
+        '_plugin'  => 'Signal Bot (' . sg_paths()['plugin'] . ')',
+        '_stand'   => date('Y-m-d H:i:s'),
+        '_hinweis' => sg_klartext('EINST.SICH_KOPF_HINWEIS'),
+    );
+    $m = sg_sicherung_eigene_maengel($cfg);
+    if ($m) {
+        $aus['_warnung'] = sprintf(sg_klartext('EINST.SICH_KOPF_WARNUNG'), implode(', ', $m));
+    }
+    foreach (array_keys(sg_vorgaben()) as $k) {
+        $aus[$k] = $cfg[$k];
+    }
+    return json_encode($aus, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * X-3: Bestuende die eigene Sicherung das Zurueckspielen? Geprueft mit
+ * sg_config_maengel() - derselben Funktion wie beim Zurueckspielen.
+ * Rueckgabe: die beanstandeten Schluessel (nur Namen), leer = besteht.
+ */
+function sg_sicherung_eigene_maengel($cfg)
+{
+    $werte = array();
+    foreach (array_keys(sg_vorgaben()) as $k) { $werte[$k] = $cfg[$k]; }
+    return array_keys(sg_config_maengel($werte));
+}
+
+/* ==================================================================
+ * Einmalmeldung nach einer Umleitung (U2, Regeln/04)
+ *
+ * Jeder POST-Handler endet seit dem Durchgang 01.10.2026 mit 303 auf die
+ * Seite. Das Ergebnis reist in data/plugins/<ordner>/einmalmeldung.json,
+ * Rechte 0600, wird NUR beim GET gelesen und dabei geloescht; aelter als
+ * 120 s wird verworfen. Nie darin: PIN, Konto, Token.
+ * ================================================================== */
+function sg_flash_datei()
+{
+    return sg_datadir() . '/einmalmeldung.json';
+}
+
+function sg_flash_schreiben($inhalt)
+{
+    $inhalt['zeit'] = time();
+    $js = json_encode($inhalt, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $js !== false && sg_write_atomic(sg_flash_datei(), $js, 0600);
+}
+
+function sg_flash_lesen()
+{
+    $f = sg_flash_datei();
+    if (!is_file($f)) { return array(); }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || time() - (int) $d['zeit'] > 120) { return array(); }
+    return $d;
+}
 
 /* ==================================================================
  * WACHPOSTEN GEGEN FREMDE FORMULARE
@@ -2084,17 +2747,11 @@ function sg_merkwort()
     if (!is_dir($verz)) {
         @mkdir($verz, 0775, true);
     }
-    /* Rechte VOR dem Inhalt: zwischen Anlegen und chmod laege sonst ein
-     * Fenster, in dem das Merkwort fuer alle lesbar ist. */
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $neu) !== false) {
-        @chmod($tmp, 0600);
-        if (@rename($tmp, $datei)) {
-            @chmod($datei, 0600);
-        } else {
-            @unlink($tmp);
-        }
-    }
+    /* Ueber sg_write_atomic() (C7): Nebendatei mit PID, Rechte VOR dem
+     * Inhalt, Laengenvergleich. Bis 0.9.25 hiess die Nebendatei fest
+     * formmerkwort.tmp, "!== false" galt als Erfolg, und chmod kam nach dem
+     * Inhalt - entgegen dem Kommentar an dieser Stelle. */
+    sg_write_atomic($datei, $neu, 0600);
     $wort = $neu;
     return $wort;
 }

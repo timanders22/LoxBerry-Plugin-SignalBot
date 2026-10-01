@@ -14,6 +14,8 @@ BOT_R=$(readlink -f "$BOT" 2>/dev/null)
 BOT_UID=$(id -u loxberry 2>/dev/null)
 [ -n "$BOT_UID" ] || BOT_UID=$(id -u)
 SPERRE="/tmp/$ARGV3/bot.lock"
+MARKE="$ARGV5/data/plugins/$ARGV3.upgrade_laeuft"
+BESTAND="$ARGV5/data/plugins/$ARGV3.bestand"
 
 # ---- Den alten Dauerlaeufer beenden ----
 #
@@ -134,6 +136,44 @@ if [ -f "$SPERRE" ]; then
     fi
 fi
 
+# ---- Bestand zurueckspielen (I3) ----
+#
+# Nur bei einer Aktualisierung (Marke liegt, Entscheidung 1) und erst JETZT:
+# der alte Bot ist beendet, der neue laeuft noch nicht. Was der alte Bot in
+# der Luecke schon neu geschrieben hat, wird hinten angehaengt, nicht
+# ueberschrieben. Bei einer Neuinstallation hat preinstall.sh einen
+# liegengebliebenen Bestand nach .alt gelegt.
+case "$ARGV3" in ''|*/*|*..*) BESTAND="" ;; esac
+if [ -n "$BESTAND" ] && [ -f "$MARKE" ] && [ -d "$BESTAND" ]; then
+    SG_N=$(/usr/bin/php -r '
+        $b = $argv[1]; $d = $argv[2]; $n = 0;
+        foreach (array("ereignisse.json" => 300, "ausgang.json" => 200) as $f => $max) {
+            if (!is_file("$b/$f")) { continue; }
+            $alt = json_decode((string) @file_get_contents("$b/$f"), true);
+            if (!is_array($alt)) { continue; }
+            $neu = is_file("$d/$f") ? json_decode((string) @file_get_contents("$d/$f"), true) : array();
+            if (!is_array($neu)) { $neu = array(); }
+            $js = json_encode(array_values(array_slice(array_merge($alt, $neu), -$max)));
+            $t = "$d/$f." . getmypid() . ".tmp";
+            $h = @fopen($t, "xb");
+            if ($h === false) { continue; }
+            @chmod($t, 0600);
+            $w = fwrite($h, $js);
+            fclose($h);
+            if ($w === strlen($js) && @rename($t, "$d/$f")) { $n++; } else { @unlink($t); }
+        }
+        if (is_file("$b/letzter.json")) {
+            $a = json_decode((string) @file_get_contents("$b/letzter.json"), true);
+            $j = is_file("$d/letzter.json") ? json_decode((string) @file_get_contents("$d/letzter.json"), true) : null;
+            if (is_array($a) && (!is_array($j) || (int) @$j["ts"] < (int) @$a["ts"])
+                && @copy("$b/letzter.json", "$d/letzter.json")) { @chmod("$d/letzter.json", 0644); $n++; }
+        }
+        echo $n;
+    ' "$BESTAND" "$ARGV5/data/plugins/$ARGV3" 2>/dev/null)
+    rm -rf "${BESTAND:?}"
+    echo "<OK> Ereignisprotokoll und Warteschlange aus dem Update zurueckgespielt (${SG_N:-0} Dateien)."
+fi
+
 # ---- Den Dienst EINMAL von Hand aufrufen ----
 #
 # Hausregel seit dem 16.08.2026: jeden Cron-Dienst nach der Installation
@@ -141,6 +181,8 @@ fi
 # sonst nach /dev/null, und ein Dienst, der bei jedem Lauf sofort abbricht,
 # faellt jahrelang niemandem auf. Der Trockenlauf schaltet nichts: die
 # Rufnummer steht auf keiner Weissliste, und 'test' laeuft ohnehin trocken.
+# Er schreibt auch nichts ins Ereignisprotokoll (I3; bis 0.9.25 stand nach
+# jeder Installation ein erfundenes "abgewiesen" darin).
 if [ -f "$BOT" ]; then
     if AUSGABE=$(/usr/bin/php "$BOT" test "+490000000000" "hilfe" 2>&1); then
         echo "<OK> Der Hintergrunddienst laesst sich starten und findet seine Bibliothek."
@@ -156,5 +198,18 @@ else
     echo "<FAIL> $BOT fehlt - der Bot kann nicht starten."
 fi
 
-echo "<OK> Fertig. Die Oberflaeche legt beim ersten Aufruf ein Zugriffstoken an."
+# Die Konfiguration traegt Token, PIN-Hash und Weissliste: 0600 auch dann,
+# wenn sie erst der Probelauf oder der Start eben angelegt oder geheilt hat
+# (I2; bis 0.9.25 stand das chmod nur oben, vor beiden - gemessen 644).
+[ -f "$ARGV5/config/plugins/$ARGV3/signalbot.json" ] && chmod 0600 "$ARGV5/config/plugins/$ARGV3/signalbot.json"
+[ -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json" ] && chmod 0600 "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json"
+
+# Schlusstext (I6): nach einer Aktualisierung keine Schritte der
+# Erstinstallation; der Satz "Die Oberflaeche legt beim ersten Aufruf ein
+# Zugriffstoken an" stimmte nie - das Token legt schon der Probelauf an.
+if [ -f "$MARKE" ]; then
+    echo "<OK> Aktualisierung abgeschlossen - es ist nichts weiter zu tun."
+else
+    echo "<OK> Fertig. Naechster Schritt: im Plugin den Reiter Einstellungen oeffnen, das Signal-Konto verknuepfen und die erlaubten Absender eintragen."
+fi
 exit 0

@@ -110,6 +110,10 @@ $cfg = sg_config();
 $ende = ($modus === 'einmal') ? time() + 30 : 0;   // 0 = ohne Ende
 
 sg_log('Bot gestartet' . ($ende ? ' (Testlauf, 30 s)' : ''));
+/* Das Gateway-Abo auf den aktuellen Praefix bringen (M9, sg_abo_datei) und
+ * gleich ein erstes Lebenszeichen ablegen (C2). */
+sg_abo_datei($cfg['mqtt_topic'], true);
+sg_herz_schreiben();
 
 /** Eine Zeile des Ereignisstroms auswerten und gegebenenfalls antworten.
  *
@@ -145,25 +149,33 @@ function sg_strom_zeile($json)
 }
 
 /**
- * Der Takt zwischen zwei Nachrichten.
+ * Der Takt des Bots - NACH DER UHR (C1, M1).
  *
- * Wird immer dann gerufen, wenn der Ereignisstrom eine Weile still war -
- * also regelmaessig, ohne dass dafuer ein eigener Zeitgeber noetig waere.
- * Zwei Aufgaben:
+ * Drei Aufgaben:
  *
- *   1. HERZSCHLAG. Loxone kann sonst nicht erkennen, ob der Bot noch lebt:
- *      ein virtueller Eingang behaelt seinen letzten Wert, in der App sieht
- *      ein toter Bot deshalb genauso aus wie ein stiller. Der Bot schreibt
- *      seinen Zeitstempel auf <praefix>/online; in Loxone laesst sich daraus
- *      mit einer Einschaltverzoegerung eine echte Ausfallmeldung bauen.
- *   2. WARTESCHLANGE. Meldungen, die wegen der Nachtruhe zurueckgehalten
- *      wurden, und dringende, die noch nicht quittiert sind.
+ *   1. LEBENSZEICHEN fuer den Endpunkt: <tmp>/herz bekommt in jedem Takt den
+ *      Zeitstempel. Daraus meldet der Endpunkt BOT und ALTER, und OK=0, wenn
+ *      es aelter als 180 s ist (Entscheidung 4).
+ *   2. HERZSCHLAG auf MQTT: <praefix>/online mit dem Zeitstempel, hoechstens
+ *      einmal je 60 s. In Loxone wird daraus mit I1-I2 (aktuelle Zeit minus
+ *      online) und einem Vergleicher eine echte Ausfallmeldung.
+ *   3. WARTESCHLANGE: Meldungen aus der Nachtruhe und unquittierte dringende.
+ *
+ * Bis 0.9.25 lief der Takt nur, wenn der Ereignisstrom 20 s lang schwieg.
+ * Kam oefter irgendeine Zeile - Wachhaltezeilen des Servers, Lesebestaetigungen,
+ * Tippanzeigen -, liefen Herzschlag und Warteschlange NIE (gemessen mit
+ * Attrappen: Kommentarzeile alle 15 s oder Datenzeile alle 10 s -> 0
+ * Herzschlaege in 95 s, die Meldung aus der Nachtruhe blieb liegen). Im
+ * Ruhefall lag der Takt bei etwa 78 s statt "jede Minute".
  */
+$sg_takt_letzt = 0;
+
 function sg_takt()
 {
     static $letzter = 0;
     $cfg = sg_config();
     $jetzt = time();
+    sg_herz_schreiben();
     if (!empty($cfg['herzschlag']) && $jetzt - $letzter >= 60) {
         $letzter = $jetzt;
         sg_mqtt_pulsen('online', (string) $jetzt);
@@ -171,64 +183,57 @@ function sg_takt()
     sg_warteschlange_arbeiten();
 }
 
+/** Den Takt rufen, sobald er faellig ist - hoechstens alle 10 s. */
+function sg_takt_wenn_faellig()
+{
+    global $sg_takt_letzt;
+    if (time() - $sg_takt_letzt >= 10) {
+        $sg_takt_letzt = time();
+        sg_takt();
+    }
+}
+
 /** Einmal am Ereignisstrom hoeren, bis er abreisst. */
 function sg_lauschen($ende)
 {
     $cfg = sg_config();
     $url = $cfg['rpc_url'] . '/api/v1/events';
-    /* Zwanzig Sekunden statt fuenf Minuten.
-     *
-     * Nicht, weil der Strom schneller antworten muesste - sondern weil der
-     * Bot zwischen zwei Nachrichten etwas zu tun hat: Herzschlag und
-     * Warteschlange. Beides braucht einen regelmaessigen Takt, und den gibt
-     * es ohne eigenen Zeitgeber nur hier. Nach fuenfzehn stillen Runden -
-     * also nach fuenf Minuten, wie bisher - wird die Verbindung erneuert. */
+    /* Zehn Sekunden Zeitgrenze: so kommt die Schleife auch bei voelliger
+     * Stille spaetestens alle 10 s an der Uhr vorbei. fgets blockiert nach
+     * einer Zeitgrenze erneut, der Socket bleibt brauchbar (seit 0.9.0 in
+     * PHP 7.4 und 8.1 gemessen). */
     $ctx = stream_context_create(array('http' => array(
         'method' => 'GET',
-        'timeout' => 20,
+        'timeout' => 10,
         'header' => "Accept: text/event-stream\r\nUser-Agent: LoxBerry-SignalBot",
     )));
     $fp = @fopen($url, 'r', false, $ctx);
     if ($fp === false) { return false; }
-    stream_set_timeout($fp, 20);
-    $still = 0;
+    stream_set_timeout($fp, 10);
+    $letztes_byte = time();
     while (!feof($fp)) {
         if ($ende && time() > $ende) { break; }
         $zeile = fgets($fp);
+        /* Nach JEDER Rueckkehr - Zeile oder Zeitgrenze - die Uhr fragen. */
+        sg_takt_wenn_faellig();
         if ($zeile === false) {
             $st = stream_get_meta_data($fp);
             if (!empty($st['timed_out'])) {
-                sg_takt();
-                $still++;
-                if ($still < 15) { continue; }
-                /* Bis 0.9.0 stand hier "continue" - weiterhoeren, es war ja
-                 * nur Stille.
-                 *
-                 * Die Sorge, das ergebe eine rasende Schleife mit voller
-                 * Prozessorlast, hat sich NICHT bestaetigt: nachgemessen mit
-                 * einer Zeitgrenze von einer Sekunde gegen ein Gegenstueck,
-                 * das die Kopfzeilen schickt und dann schweigt, lief die
-                 * Schleife genau EINE Runde je Sekunde - fgets blockiert nach
-                 * einer Zeitgrenze erneut, in PHP 7.4 wie in 8.1. Der Socket
-                 * bleibt brauchbar.
-                 *
-                 * Neu verbunden wird trotzdem, aus einem anderen Grund: Der
-                 * Strom kann tot sein, ohne dass das Betriebssystem es merkt
-                 * - signal-cli neu gestartet, Container weg, eine NAT-Tabelle
-                 * abgelaufen. Dann liegt hier ein Socket, aus dem nie wieder
-                 * etwas kommt, und der Bot wartet stumm weiter. Genau das
-                 * waere der schlimmste Fall: Der Kopf dieser Datei sagt, dass
-                 * Nachrichten verloren gehen, wenn niemand am Strom hoert.
-                 *
-                 * Fuenf Minuten ohne ein einziges Byte sind ein hinreichender
-                 * Verdacht. Neu verbinden kostet nichts.
-                 */
+                if (time() - $letztes_byte < 300) { continue; }
+                /* Neu verbunden wird nach fuenf Minuten ohne ein einziges Byte:
+                 * der Strom kann tot sein, ohne dass das Betriebssystem es
+                 * merkt (signal-cli neu gestartet, Container weg, NAT-Tabelle
+                 * abgelaufen). Gezaehlt wird die Zeit, nicht die Zahl der
+                 * stillen Runden - bis 0.9.25 wurde der Zaehler nie
+                 * zurueckgesetzt, und eine Zeile zwischendurch verschob die
+                 * Neuverbindung nicht. */
                 sg_log_gebremst('strom_still',
                     'Ereignisstrom fuenf Minuten still - Verbindung wird erneuert.');
                 break;
             }
             break;
         }
+        $letztes_byte = time();
         $zeile = trim($zeile);
         if ($zeile === '' || strpos($zeile, 'data:') !== 0) { continue; }
         sg_strom_zeile(trim(substr($zeile, 5)));
@@ -277,10 +282,10 @@ while (true) {
         for ($i = 0; $i < $pause; $i++) {
             if ($ende && time() > $ende) { break 2; }
             sleep(1);
+            // Auch ohne Ereignisstrom weiterarbeiten: Lebenszeichen und
+            // Warteschlange laufen nach der Uhr weiter (C1).
+            sg_takt_wenn_faellig();
         }
-        // Auch ohne Ereignisstrom weiterarbeiten: Meldungen aus Loxone
-        // stehen in der Warteschlange und sollen raus, sobald es geht.
-        sg_takt();
         continue;
     }
     if ($fehler_folge > 0) { sg_log('Ereignisstrom wieder da.'); }

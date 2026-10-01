@@ -218,6 +218,25 @@ mkdir -p /var/lib/signal-cli
 chown -R signalcli:signalcli /var/lib/signal-cli
 chmod 0700 /var/lib/signal-cli
 
+# ---- Bei einer Aktualisierung den Zustand des Dienstes uebernehmen (I5) ----
+#
+# Regeln/06: ein bewusst angehaltener Dienst bleibt angehalten. Bis 0.9.25
+# schaltete jedes Update Autostart und Lauf von signal-cli wieder ein, auch
+# wenn der Anwender beides abgeschaltet hatte - etwa weil rpc_url auf ein
+# signal-cli auf einem anderen Rechner zeigt (im Pruefstand gemessen:
+# enable + start trotz "disabled"). Gelesen wird VOR dem Schreiben der Unit;
+# die Marke aus preupgrade.sh liegt zu diesem Zeitpunkt noch (der Trap oben
+# raeumt sie erst am Ende weg). Verglichen wird die Ausgabe, nicht der
+# Rueckgabewert.
+SG_UPDATE=0
+SG_VORHER_AN=0
+SG_VORHER_LAEUFT=0
+if [ -n "${SG_MARKE:-}" ] && [ -f "$SG_MARKE" ]; then
+    SG_UPDATE=1
+    [ "$(systemctl is-enabled signal-cli-loxberry 2>/dev/null)" = "enabled" ] && SG_VORHER_AN=1
+    [ "$(systemctl is-active signal-cli-loxberry 2>/dev/null)" = "active" ] && SG_VORHER_LAEUFT=1
+fi
+
 # Heredoc OHNE Anfuehrungszeichen: $NATIVDIR und $NATIVBEDINGUNG muessen
 # ersetzt werden. Andere Dollarzeichen kommen in der Unit nicht vor.
 #
@@ -275,7 +294,10 @@ systemctl daemon-reload
 # Nur einschalten, wenn der Dienst auch arbeiten kann. Ein Dienst, der ab
 # Werk in einer Startschleife haengt, ist schlimmer als keiner: er fuellt das
 # Journal und sieht in jeder Statusanzeige nach einem Defekt des Plugins aus.
-if [ "$STARTBAR" = "1" ]; then
+if [ "$STARTBAR" = "1" ] && [ "$SG_UPDATE" = "1" ]; then
+    [ "$SG_VORHER_AN" = "1" ] && systemctl enable signal-cli-loxberry >/dev/null 2>&1
+    [ "$SG_VORHER_LAEUFT" = "1" ] && systemctl start signal-cli-loxberry >/dev/null 2>&1
+elif [ "$STARTBAR" = "1" ]; then
     systemctl enable signal-cli-loxberry >/dev/null 2>&1
     systemctl start signal-cli-loxberry >/dev/null 2>&1
 else
@@ -309,7 +331,12 @@ if ! visudo -cf /etc/sudoers.d/loxberry-signalbot >/dev/null 2>&1; then
     rm -f /etc/sudoers.d/loxberry-signalbot
 fi
 
-if [ "$STARTBAR" = "1" ]; then
+if [ "$STARTBAR" = "1" ] && [ "$SG_UPDATE" = "1" ]; then
+    # Schlusstext einer Aktualisierung (I6): keine Schritte der Erstinstallation.
+    [ "$SG_VORHER_AN" = "1" ] && SG_A="ein" || SG_A="aus"
+    [ "$SG_VORHER_LAEUFT" = "1" ] && SG_L="laeuft" || SG_L="angehalten"
+    echo "<OK> Dienst signal-cli-loxberry aktualisiert; Autostart $SG_A und Dienst $SG_L - wie vor der Aktualisierung."
+elif [ "$STARTBAR" = "1" ]; then
     echo "<OK> Dienst signal-cli-loxberry eingerichtet und gestartet, JSON-RPC auf 127.0.0.1:8095"
     echo "<INFO> Naechster Schritt: im Plugin den Reiter Einstellungen oeffnen und"
     echo "<INFO> das Signal-Konto als Zweitgeraet verknuepfen."

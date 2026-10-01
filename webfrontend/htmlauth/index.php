@@ -69,45 +69,107 @@ if (isset($_GET['form']) && preg_match($sg_muster, 'tab-' . $_GET['form'])) {
 $sg_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 $sg_meldungen = array();
 $sg_fehler = array();
-
-/* ---------------------------------------------------------------- *
- * Der Wachposten - EIN Posten, vor allen Handlern.
- * Abgewiesen heisst gemeldet, und es wird NICHTS ausgefuehrt: $_POST
- * wird geleert, nur der aktive Reiter bleibt stehen, damit der Bediener
- * nach der Abweisung dort steht, wo er war.
- * ---------------------------------------------------------------- */
-$sg_wache = sg_wachposten();
-if ($sg_wache !== '') {
-    $sg_reiter_merk = isset($_POST['activetab']) && is_string($_POST['activetab'])
-        ? (string) $_POST['activetab'] : null;
-    $_POST = array();
-    if ($sg_reiter_merk !== null) {
-        $_POST['activetab'] = $sg_reiter_merk;
-    }
-    $sg_fehler[] = $sg_wache;
-}
-
 $sg_qr = '';
 
 /* ==================================================================
  * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
  * ==================================================================
  *
- * Stand der Kopf davor, war er beim Aufruf von header() schon
- * geschrieben - "Cannot modify header information", und der Knopf
- * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON
- * statt einer Datei.
+ * Stand der Kopf davor, war er beim Aufruf von header() schon geschrieben -
+ * "Cannot modify header information", und "Einstellungen sichern" lieferte
+ * eine Seite mit angehaengtem JSON statt einer Datei. Am PHP-CLI ist das
+ * unsichtbar: header() ist dort wirkungslos.
  *
- * Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos und
- * headers_sent() immer falsch. Und wer OHNE gueltiges Formularmerkmal
- * misst, wird vom Wachposten abgewiesen, bevor der Handler anlaeuft.
- * Beides hat den Fehler lange verdeckt.
+ * JEDER POST-HANDLER ENDET MIT EINER UMLEITUNG (U2, Regeln/04, seit dem
+ * Durchgang 01.10.2026). Bis 0.9.25 wurde die Seite unmittelbar nach dem POST
+ * gerendert: F5 wiederholte die Handlung - "Token neu erzeugen" wuerfelte ein
+ * zweites Token, und die eben abgeschriebene Adresse war schon wieder
+ * ungueltig (gemessen: drei Tokens bei zweimal Absenden). Das Ergebnis reist
+ * als Einmalmeldung (sg_flash_*). Ausgenommen sind nur die Downloads
+ * (Vorlagen, Sicherung): sie liefern ihre Datei unmittelbar.
  *
- * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
- * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * BEI EINER BEANSTANDUNG WIRD NICHTS GESPEICHERT (U3, Nr. 16) - auch nicht
+ * die uebrigen, richtigen Felder. Die Eingaben kommen zurueck ins Formular
+ * (U5, X-2), das Feld ist markiert. Bis 0.9.25 wurde "melden, nicht
+ * blockieren" gespeichert: ein Tippfehler in "Wer darf" machte aus einem
+ * Befehl, den nur eine Nummer ausloesen durfte, einen fuer alle Erlaubten,
+ * und eine ungueltige 2. Freigabe wurde geleert - der Befehl blieb scharf
+ * (gemessen).
+ *
+ * Jede Pruefung eines Wertes ist sg_config_maengel() - dieselbe fuer die
+ * Formulare, das Zurueckspielen und die Warnung beim Sichern. Geschrieben
+ * wird nur ueber sg_config_aendern() (Sperre, frisch gelesen; C9).
  * ================================================================== */
-/* ================= Vorlage herunterladen (vor jeder Ausgabe) ================= */
-if ($sg_post && isset($_POST['vorlage']) || $sg_post && isset($_POST['vorlage_out'])) {
+
+/** Ende jedes POST-Handlers: Ergebnis in die Einmalmeldung, 303 auf die Seite. */
+function sg_umleiten($tab, $meldungen, $fehler, $zusatz = array())
+{
+    $inhalt = array('tab' => $tab, 'meldungen' => array_values($meldungen),
+                    'fehler' => array_values(array_unique($fehler)));
+    foreach ($zusatz as $k => $v) { $inhalt[$k] = $v; }
+    sg_flash_schreiben($inhalt);
+    header('Location: index.php?form=' . rawurlencode(preg_replace('/^tab-/', '', $tab)), true, 303);
+    exit;
+}
+
+/** Ein Formularwert als Zeichenkette - eine Liste (feld[]=x) zaehlt als leer. */
+function sg_post_text($k)
+{
+    return (isset($_POST[$k]) && is_string($_POST[$k])) ? $_POST[$k] : '';
+}
+
+/** Ein Tabellenfeld b_xxx[i] als Zeichenkette ('' wenn es fehlt oder keine ist). */
+function sg_post_zelle($feld, $i)
+{
+    if (!isset($_POST[$feld]) || !is_array($_POST[$feld]) || !isset($_POST[$feld][$i])) { return ''; }
+    return is_string($_POST[$feld][$i]) ? $_POST[$feld][$i] : '';
+}
+
+/** Feldschluessel aus sg_config_maengel() -> Name des Formularfelds. */
+function sg_formfeld($k)
+{
+    if (preg_match('/^befehle\.([0-9]+)\.([a-z_]+)$/', $k, $m)) { return 'b_' . $m[2] . '[' . $m[1] . ']'; }
+    if ($k === 'pin_hash') { return 'pin'; }
+    return $k;
+}
+
+/**
+ * Die Eingaben eines beanstandeten Formulars fuer X-2: nur die genannten
+ * Felder, nur Zeichenketten (oder Felder von Zeichenketten), gueltiges UTF-8,
+ * hoechstens 2100 Byte je Wert. PIN und Konto reisen nie mit.
+ */
+function sg_eingaben_sammeln($formular, $felder, $falsch)
+{
+    $werte = array();
+    foreach ($felder as $f) {
+        if (!isset($_POST[$f])) { continue; }
+        $w = $_POST[$f];
+        if (is_string($w)) {
+            if (strlen($w) <= 2100 && preg_match('//u', $w)) { $werte[$f] = $w; }
+        } elseif (is_array($w)) {
+            $liste = array();
+            foreach ($w as $i => $x) {
+                if (is_string($x) && strlen($x) <= 2100 && preg_match('//u', $x)) { $liste[(string) (int) $i] = $x; }
+            }
+            $werte[$f] = $liste;
+        }
+    }
+    return array('formular' => $formular, 'werte' => $werte, 'falsch' => array_values(array_unique($falsch)));
+}
+
+/* ---------------- Der Wachposten - EIN Posten, vor allen Handlern ----------------
+ * Abgewiesen heisst gemeldet, und es wird NICHTS ausgefuehrt; auch die
+ * Abweisung endet mit einer Umleitung. */
+if ($sg_post) {
+    $sg_wache = sg_wachposten();
+    if ($sg_wache !== '') {
+        $_POST = array();
+        sg_umleiten($sg_tab, array(), array($sg_wache));
+    }
+}
+
+/* ================= Downloads (vor jeder Ausgabe, ohne Umleitung) ================= */
+if ($sg_post && (isset($_POST['vorlage']) || isset($_POST['vorlage_out']))) {
     list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage();
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $sg_vname . '"');
@@ -115,373 +177,437 @@ if ($sg_post && isset($_POST['vorlage']) || $sg_post && isset($_POST['vorlage_ou
     exit;
 }
 
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * Ausgegeben wird die volle Konfiguration - samt Aktionstoken - mit lesbarem
+ * _-Kopf (U6). Bestuende sie das Zurueckspielen nicht, sagt es der Kopf
+ * (_warnung, X-3) und die gelbe Warnung am Knopf; geliefert wird trotzdem. */
+if ($sg_post && isset($_POST['sg_sichern'])) {
+    $sg_js = sg_sicherung_json(sg_config());
+    if ($sg_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="signalbot_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        echo $sg_js;
+        exit;
+    }
+    sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_SCHREIBFEHLER')));
+}
+
 /* ================= Protokoll leeren ================= */
 if ($sg_post && isset($_POST['clearlog'])) {
     $sg_lf = sg_paths()['log'];
     @mkdir(dirname($sg_lf), 0775, true);
-    sg_log_setzen($sg_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
-    $sg_tab = 'tab-log';
+    if (sg_log_setzen($sg_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n")) {
+        sg_umleiten('tab-log', array(sg_t('LOG.M_LEER')), array());
+    }
+    sg_umleiten('tab-log', array(), array(sg_t('LOG.M_NICHT_LEER')));
 }
 
 /* ================= Verknuepfung ================= */
 if ($sg_post && isset($_POST['link_start'])) {
     $a = sg_rpc('startLink', array(), 30);
     if ($a['ok'] && isset($a['result']['deviceLinkUri'])) {
-        @file_put_contents(sg_tmpdir() . '/linkuri.txt', (string) $a['result']['deviceLinkUri']);
-        @chmod(sg_tmpdir() . '/linkuri.txt', 0600);
-        $sg_meldungen[] = sg_t('EINST.LINK_GESTARTET');
-    } else {
-        $sg_fehler[] = sprintf(sg_t('EINST.LINK_FEHLER'), sg_e($a['fehler']));
+        sg_write_atomic(sg_tmpdir() . '/linkuri.txt', (string) $a['result']['deviceLinkUri'], 0600);
+        sg_umleiten('tab-settings', array(sg_t('EINST.LINK_GESTARTET')), array());
     }
-    $sg_tab = 'tab-settings';
+    sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.LINK_FEHLER'), sg_e($a['fehler']))));
 }
 if ($sg_post && isset($_POST['link_fertig'])) {
     $uri = @file_get_contents(sg_tmpdir() . '/linkuri.txt');
     if (!$uri) {
-        $sg_fehler[] = sg_t('EINST.LINK_KEINE_URI');
-    } else {
-        // finishLink wartet auf das Handy - deshalb die lange Frist.
-        $a = sg_rpc('finishLink', array('deviceLinkUri' => (string) $uri,
-                                        'deviceName' => 'LoxBerry Signal Bot'), 150);
-        if ($a['ok']) {
-            @unlink(sg_tmpdir() . '/linkuri.txt');
-            $sg_meldungen[] = sg_t('EINST.LINK_FERTIG');
-            // Das neue Konto gleich uebernehmen, wenn es genau eines gibt.
-            $k = sg_konten();
-            if (count($k) === 1) {
-                $c = sg_config();
-                $c['konto'] = $k[0];
-                sg_config_write($c);
-            }
-        } else {
-            $sg_fehler[] = sprintf(sg_t('EINST.LINK_FEHLER'), sg_e($a['fehler']));
-        }
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.LINK_KEINE_URI')));
     }
-    $sg_tab = 'tab-settings';
+    // finishLink wartet auf das Handy - deshalb die lange Frist.
+    $a = sg_rpc('finishLink', array('deviceLinkUri' => (string) $uri,
+                                    'deviceName' => 'LoxBerry Signal Bot'), 150);
+    if (!$a['ok']) {
+        sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.LINK_FEHLER'), sg_e($a['fehler']))));
+    }
+    @unlink(sg_tmpdir() . '/linkuri.txt');
+    // Das neue Konto gleich uebernehmen, wenn es genau eines gibt.
+    $k = sg_konten();
+    if (count($k) === 1 && sg_ist_nummer($k[0])) {
+        sg_config_aendern(function ($c) use ($k) { $c['konto'] = $k[0]; return $c; });
+    }
+    sg_umleiten('tab-settings', array(sg_t('EINST.LINK_FERTIG')), array());
 }
 
 /* ================= Verknuepfung loesen =================
  *
- * WAS HIER BEWUSST NICHT PASSIERT
- * signal-cli kennt drei Befehle, die nach "Verknuepfung weg" klingen, und
- * zwei davon waeren hier falsch:
- *
- *   unregister    schaltet nur DIESES Geraet ab; mit --delete-account loescht
- *                 es das ganze Konto vom Server ("Cannot be undone without
- *                 loss"). Die Handbuchseite sagt ausdruecklich: fuer ein
- *                 verknuepftes Geraet ist removeDevice der Weg.
- *   removeDevice  entfernt eine Verknuepfung - aber nur vom HAUPTGERAET aus,
- *                 also vom Handy. Von hier aus geht das nicht.
- *   deleteLocalAccountData   loescht die oertlichen Schluessel. Genau das ist
- *                 hier richtig, und mehr kann und darf diese Seite nicht.
- *
- * Die Verknuepfung selbst wird deshalb am Handy geloest (Signal -> Gekoppelte
- * Geraete). Dieser Knopf raeumt die Seite des LoxBerry auf: ohne ihn blieben
- * die Schluessel in /var/lib/signal-cli liegen, und die naechste Verknuepfung
- * traefe auf ein Konto, das der Bot noch zu kennen glaubt.
- */
+ * WAS HIER BEWUSST NICHT PASSIERT: unregister (schaltet nur dieses Geraet ab,
+ * mit --delete-account das ganze Konto) und removeDevice (nur vom Handy aus).
+ * deleteLocalAccountData loescht die oertlichen Schluessel - genau das ist
+ * hier richtig; die Verknuepfung selbst wird am Handy geloest. */
 if ($sg_post && isset($_POST['link_loesen'])) {
     $sg_lcfg = sg_config();
     if (empty($_POST['loesen_ok'])) {
-        $sg_fehler[] = sg_t('EINST.M_LOESEN_UNBESTAETIGT');
-    } elseif ((string) $sg_lcfg['konto'] === '') {
-        $sg_fehler[] = sg_t('EINST.M_LOESEN_KEIN_KONTO');
-    } else {
-        $sg_a = sg_rpc('deleteLocalAccountData',
-                       array('account' => (string) $sg_lcfg['konto'], 'ignoreRegistered' => true), 60);
-        if ($sg_a['ok']) {
-            sg_log('Verknuepfung geloest: oertliche Schluessel fuer ' . sg_maske($sg_lcfg['konto']) . ' geloescht.');
-            sg_ereignis_merken('Oberflaeche', 'Verknuepfung geloest', sg_maske($sg_lcfg['konto']));
-            $sg_lcfg['konto'] = '';
-            sg_config_write($sg_lcfg);
-            @unlink(sg_tmpdir() . '/linkuri.txt');
-            $sg_meldungen[] = sg_t('EINST.M_LOESEN_OK');
-        } else {
-            $sg_fehler[] = sprintf(sg_t('EINST.M_LOESEN_FEHLER'), sg_e($sg_a['fehler']));
-        }
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.M_LOESEN_UNBESTAETIGT')));
     }
-    $sg_tab = 'tab-settings';
+    if ((string) $sg_lcfg['konto'] === '') {
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.M_LOESEN_KEIN_KONTO')));
+    }
+    $sg_a = sg_rpc('deleteLocalAccountData',
+                   array('account' => (string) $sg_lcfg['konto'], 'ignoreRegistered' => true), 60);
+    if (!$sg_a['ok']) {
+        sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.M_LOESEN_FEHLER'), sg_e($sg_a['fehler']))));
+    }
+    sg_log('Verknuepfung geloest: oertliche Schluessel fuer ' . sg_maske($sg_lcfg['konto']) . ' geloescht.');
+    sg_ereignis_merken('Oberflaeche', 'Verknuepfung geloest', sg_maske($sg_lcfg['konto']));
+    sg_config_aendern(function ($c) { $c['konto'] = ''; return $c; });
+    @unlink(sg_tmpdir() . '/linkuri.txt');
+    sg_umleiten('tab-settings', array(sg_t('EINST.M_LOESEN_OK')), array());
 }
 
 /* ================= Kill-Schalter ================= */
 if ($sg_post && isset($_POST['sperre'])) {
-    $sg_scfg = sg_config();
-    $sg_scfg['gesperrt'] = $_POST['sperre'] === 'ein' ? 1 : 0;
-    if (sg_config_write($sg_scfg)) {
-        sg_log($sg_scfg['gesperrt'] ? 'Bot in der Oberflaeche gesperrt.' : 'Bot in der Oberflaeche entsperrt.');
-        sg_ereignis_merken('Oberflaeche', $sg_scfg['gesperrt'] ? 'gesperrt' : 'entsperrt', '');
-        $sg_meldungen[] = $sg_scfg['gesperrt'] ? sg_t('EINST.M_GESPERRT') : sg_t('EINST.M_ENTSPERRT');
-    } else {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
+    $sg_soll = sg_post_text('sperre');
+    if ($sg_soll !== 'ein' && $sg_soll !== 'aus') {
+        sg_umleiten('tab-settings', array(), array(sg_t('TEST.M_UNBEKANNT')));
     }
-    $sg_tab = 'tab-settings';
+    $sg_neu = $sg_soll === 'ein' ? 1 : 0;
+    list($sg_ok, ) = sg_config_aendern(function ($c) use ($sg_neu) { $c['gesperrt'] = $sg_neu; return $c; });
+    if (!$sg_ok) {
+        sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    sg_log($sg_neu ? 'Bot in der Oberflaeche gesperrt.' : 'Bot in der Oberflaeche entsperrt.');
+    sg_ereignis_merken('Oberflaeche', $sg_neu ? 'gesperrt' : 'entsperrt', '');
+    sg_umleiten('tab-settings', array($sg_neu ? sg_t('EINST.M_GESPERRT') : sg_t('EINST.M_ENTSPERRT')), array());
 }
 
 /* ================= Ereignisprotokoll leeren ================= */
 if ($sg_post && isset($_POST['clearaudit'])) {
-    sg_write_atomic(sg_datadir() . '/ereignisse.json', json_encode(array()), 0600);
-    $sg_meldungen[] = sg_t('LOG.M_AUDIT_LEER');
-    $sg_tab = 'tab-log';
+    if (sg_write_atomic(sg_datadir() . '/ereignisse.json', json_encode(array()), 0600)) {
+        sg_umleiten('tab-log', array(sg_t('LOG.M_AUDIT_LEER')), array());
+    }
+    sg_umleiten('tab-log', array(), array(sg_t('LOG.M_AUDIT_NICHT_LEER')));
 }
 
 /* ================= Test-Aktionen ================= */
 if ($sg_post && isset($_POST['testaktion'])) {
-    $sg_zusatz = isset($_POST['trockentext']) ? (string) $_POST['trockentext'] : '';
-    list($sg_ok, $sg_text) = sg_test_aktion((string) $_POST['testaktion'], $sg_zusatz);
-    if ($sg_ok) { $sg_meldungen[] = $sg_text; } else { $sg_fehler[] = $sg_text; }
-    $sg_tab = 'tab-test';
+    $sg_zusatz = sg_post_text('trockentext');
+    list($sg_ok, $sg_text) = sg_test_aktion(sg_post_text('testaktion'), $sg_zusatz);
+    $sg_extra = array();
+    if (sg_post_text('testaktion') === 'trocken' && strlen($sg_zusatz) <= 500 && preg_match('//u', $sg_zusatz)) {
+        $sg_extra['trockentext'] = $sg_zusatz;
+    }
+    sg_umleiten('tab-test', $sg_ok ? array($sg_text) : array(), $sg_ok ? array() : array($sg_text), $sg_extra);
 }
 
-/* ================= Einstellungen speichern =================
-   Beanstandungen werden GESAMMELT, nicht ueberschrieben. */
+/* ================= Einstellungen speichern ================= */
 if ($sg_post && isset($_POST['speichern'])) {
-    $sg_cfg = sg_config();
+    $sg_formfelder = array('rpc_url', 'erlaubt', 'stille', 'bremse', 'pin_versuche', 'pin_sperre',
+                           'zustand_ein', 'audit', 'herzschlag', 'gruppe', 'nacht_von', 'nacht_bis',
+                           'quittung_takt', 'quittung_max', 'pin_loeschen');
+    $sg_eigene = array('rpc_url', 'konto', 'erlaubt', 'pin', 'bremse', 'pin_versuche', 'pin_sperre',
+                       'gruppe', 'nacht_von', 'nacht_bis', 'quittung_takt', 'quittung_max',
+                       'stille', 'zustand_ein', 'audit', 'herzschlag');
+    $sg_falsch = array();   // Formularfeld => Meldung
+    $sg_werte = array();    // Schluessel => Wert
 
-    /* Die Adresse ist Rechner und Port - KEIN Pfad.
-     *
-     * Bis 0.9.0 liess das Muster einen beliebigen Pfad zu ((/\S*)?). Das
-     * hatte zwei Folgen, und die zweite ist die haeufigere:
-     *
-     * 1. sg_rpc() haengt selbst '/api/v1/rpc' an. Wer die Adresse aus der
-     *    Anleitung von signal-cli abschreibt und dabei den Pfad mitnimmt,
-     *    bekommt 'http://127.0.0.1:8095/api/v1/rpc/api/v1/rpc' - und eine
-     *    Fehlermeldung, die nicht sagt warum.
-     * 2. Ein Pfad im Feld liesse Abrufe an andere oertliche Dienste
-     *    zusammenbauen. Das setzt zwar einen angemeldeten LoxBerry-Verwalter
-     *    voraus, der ohnehin mehr darf - ein Eingabefeld, das nur eine Sache
-     *    annimmt, ist trotzdem das bessere Feld.
-     *
-     * Ein versehentlich mitgeschriebener Pfad wird nicht abgewiesen, sondern
-     * abgeschnitten: Das ist die haeufigste Eingabe, und eine Fehlermeldung
-     * dafuer waere unfreundlich.
-     */
-    $sg_url = trim((string) (isset($_POST['rpc_url']) ? $_POST['rpc_url'] : ''));
-    if (preg_match('#^(https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?)(/.*)?$#', $sg_url, $sg_tr)) {
-        $sg_url = $sg_tr[1];
-    }
-    if ($sg_url === '' || !preg_match('#^https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?$#', $sg_url)) {
-        $sg_fehler[] = sg_t('EINST.FEHLER_URL');
-    } else {
-        $sg_cfg['rpc_url'] = $sg_url;
+    /* Die Adresse ist Rechner und Port - KEIN Pfad. sg_rpc() haengt
+     * '/api/v1/rpc' selbst an. Bis 0.9.25 wurde ein mitgeschriebener Pfad
+     * still abgeschnitten (U4, Nr. 19); jetzt beanstandet. */
+    $sg_werte['rpc_url'] = trim(sg_post_text('rpc_url'));
+
+    /* Das Konto steht nicht mehr im Feld (U17): leer = unveraendert. */
+    $sg_k = trim(sg_post_text('konto'));
+    if ($sg_k !== '') {
+        if (!sg_ist_nummer($sg_k)) { $sg_falsch['konto'] = sg_t('EINST.FEHLER_KONTO'); }
+        else { $sg_werte['konto'] = $sg_k; }
     }
 
-    $sg_k = preg_replace('/[^0-9+]/', '', (string) (isset($_POST['konto']) ? $_POST['konto'] : ''));
-    if ($sg_k !== '' && !preg_match('/^\+[0-9]{6,20}$/', $sg_k)) {
-        $sg_fehler[] = sg_t('EINST.FEHLER_KONTO');
-    } else {
-        $sg_cfg['konto'] = $sg_k;
-    }
-
-    // Erlaubte Absender: eine je Zeile. Jede Zeile wird geprueft und die
-    // fehlerhaften einzeln gemeldet - nicht die ganze Eingabe verworfen.
-    $sg_roh = (string) (isset($_POST['erlaubt']) ? $_POST['erlaubt'] : '');
+    /* Erlaubte Absender: eine je Zeile (auch Komma/Semikolon). Jede Zeile wird
+     * geprueft, nicht gesaeubert - bis 0.9.25 wurde aus "+49 170-123x4567"
+     * still "+491701234567" (U4). Doppelte werden beanstandet statt verworfen. */
     $sg_liste = array();
     $sg_schlecht = array();
-    foreach (preg_split('/[\r\n,;]+/', $sg_roh) as $sg_z) {
-        $sg_z = preg_replace('/[^0-9+]/', '', trim($sg_z));
+    foreach (preg_split('/[\r\n,;]+/', sg_post_text('erlaubt')) as $sg_z) {
+        $sg_z = trim($sg_z);
         if ($sg_z === '') { continue; }
-        if (preg_match('/^\+[0-9]{6,20}$/', $sg_z)) { $sg_liste[] = $sg_z; }
-        else { $sg_schlecht[] = $sg_z; }
+        if (sg_ist_nummer($sg_z)) { $sg_liste[] = $sg_z; } else { $sg_schlecht[] = $sg_z; }
     }
     if ($sg_schlecht) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_NUMMER'), sg_e(implode(', ', $sg_schlecht)));
+        $sg_falsch['erlaubt'] = sprintf(sg_t('EINST.FEHLER_NUMMER'), sg_e(implode(', ', $sg_schlecht)));
+    } elseif (count(array_unique($sg_liste)) !== count($sg_liste)) {
+        $sg_falsch['erlaubt'] = sg_t('EINST.FEHLER_DOPPELT_NUMMER');
     } else {
-        $sg_cfg['erlaubt'] = array_values(array_unique($sg_liste));
+        $sg_werte['erlaubt'] = $sg_liste;
     }
 
-    // PIN: leeres Feld laesst die gespeicherte PIN unberuehrt, sonst waere
-    // sie nach jedem Speichern weg - sie wird ja nicht angezeigt.
-    if (isset($_POST['pin']) && (string) $_POST['pin'] !== '') {
-        $sg_pin = preg_replace('/[^0-9A-Za-z]/', '', (string) $_POST['pin']);
-        if (strlen($sg_pin) < 4) {
-            $sg_fehler[] = sg_t('EINST.FEHLER_PIN_KURZ');
+    /* PIN: leeres Feld laesst die gespeicherte unberuehrt (Geheimnisfeld).
+     * Fremdzeichen werden beanstandet, nicht entfernt - bis 0.9.25 wurde aus
+     * "12-34" still der Hash von "1234" (U4). */
+    $sg_pin = sg_post_text('pin');
+    if ($sg_pin !== '' && !preg_match('/^[0-9A-Za-z]{4,64}$/', $sg_pin)) {
+        $sg_falsch['pin'] = sg_t('EINST.FEHLER_PIN_ZEICHEN');
+    }
+
+    foreach (array('bremse', 'pin_versuche', 'pin_sperre', 'quittung_takt', 'quittung_max') as $sg_zk) {
+        $sg_v = sg_ganz_lesen(sg_post_text($sg_zk));
+        if ($sg_v === null) {
+            $sg_falsch[$sg_zk] = sprintf(sg_t('EINST.FEHLER_ZAHL'), sg_e(sg_feldname($sg_zk)));
         } else {
-            /* Die PIN wird als Hash abgelegt, nicht im Klartext.
-             * Sie steht sonst lesbar in einer Datei, die auch die Zweitschrift
-             * mitfuehrt - und ein Klartext-Geheimnis ist eines, das man
-             * versehentlich weitergibt. */
-            $sg_cfg['pin_hash'] = password_hash($sg_pin, PASSWORD_DEFAULT);
-            $sg_cfg['pin'] = '';
+            $sg_werte[$sg_zk] = $sg_v;
         }
     }
-    if (!empty($_POST['pin_loeschen'])) { $sg_cfg['pin'] = ''; $sg_cfg['pin_hash'] = ''; }
-    // Altbestand: eine noch im Klartext gespeicherte PIN beim ersten
-    // Speichern still in einen Hash umschreiben.
-    if ((string) $sg_cfg['pin'] !== '' && (string) $sg_cfg['pin_hash'] === '') {
-        $sg_cfg['pin_hash'] = password_hash((string) $sg_cfg['pin'], PASSWORD_DEFAULT);
-        $sg_cfg['pin'] = '';
+    $sg_werte['gruppe'] = trim(sg_post_text('gruppe'));
+    $sg_werte['nacht_von'] = trim(sg_post_text('nacht_von'));
+    $sg_werte['nacht_bis'] = trim(sg_post_text('nacht_bis'));
+    /* mqtt_ein und mqtt_topic wohnen im Reiter MQTT und haben dort ein eigenes
+     * Formular; sie werden hier nicht angefasst. */
+    foreach (array('stille', 'zustand_ein', 'audit', 'herzschlag') as $sg_hk) {
+        $sg_werte[$sg_hk] = isset($_POST[$sg_hk]) ? 1 : 0;
     }
 
-    $sg_br = (int) (isset($_POST['bremse']) ? $_POST['bremse'] : 10);
-    if ($sg_br < 1 || $sg_br > 60) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_BREMSE'), 1, 60);
-    } else {
-        $sg_cfg['bremse'] = $sg_br;
+    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_werte, $sg_pin, $sg_eigene, &$sg_falsch) {
+        $neu = $alt;
+        foreach ($sg_werte as $k => $v) { $neu[$k] = $v; }
+        if (!isset($sg_falsch['pin'])) {
+            if (!empty($_POST['pin_loeschen'])) {
+                $neu['pin'] = ''; $neu['pin_hash'] = '';
+            } elseif ($sg_pin !== '') {
+                /* Die PIN wird als Hash abgelegt, nicht im Klartext. */
+                $neu['pin_hash'] = password_hash($sg_pin, PASSWORD_DEFAULT);
+                $neu['pin'] = '';
+            } elseif ((string) $neu['pin'] !== '' && (string) $neu['pin_hash'] === '') {
+                // Altbestand: eine noch im Klartext gespeicherte PIN in einen Hash umschreiben.
+                $neu['pin_hash'] = password_hash((string) $neu['pin'], PASSWORD_DEFAULT);
+                $neu['pin'] = '';
+            }
+        }
+        /* Beanstandet wird, was an DIESEM Formular haengt, und was die Aenderung
+         * neu verursacht (etwa: eine Nummer aus der Weissliste nehmen, die eine
+         * 2. Freigabe ist; die PIN loeschen, waehrend Befehle sie verlangen).
+         * Alte Maengel anderer Reiter halten das Speichern nicht auf - sie stehen
+         * im Reiter Test und als Warnung am Sichern-Knopf. */
+        $ma = sg_config_maengel($alt);
+        foreach (sg_config_maengel($neu) as $k => $t) {
+            if (!in_array($k, $sg_eigene, true) && isset($ma[$k])) { continue; }
+            $f = sg_formfeld($k);
+            if (preg_match('/^b_zweit\[/', $f)) { $f = 'erlaubt'; }
+            elseif (preg_match('/^b_stufe\[/', $f)) { $f = 'pin'; }
+            if (!isset($sg_falsch[$f])) { $sg_falsch[$f] = $t; }
+        }
+        return $sg_falsch ? null : $neu;
+    });
+    if ($sg_falsch) {
+        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.NICHT_GESPEICHERT')), array_values($sg_falsch)),
+            array('eingaben' => sg_eingaben_sammeln('settings', $sg_formfelder, array_keys($sg_falsch))));
     }
-
-    /* mqtt_ein und mqtt_topic werden hier NICHT mehr angefasst: sie
-     * wohnen im Reiter MQTT und haben dort ein eigenes Formular. Die
-     * Konfiguration kommt aus sg_config(), die Werte ueberleben also
-     * unveraendert. */
-
-    $sg_cfg['stille'] = isset($_POST['stille']) ? 1 : 0;
-    $sg_cfg['zustand_ein'] = isset($_POST['zustand_ein']) ? 1 : 0;
-    $sg_cfg['audit'] = isset($_POST['audit']) ? 1 : 0;
-    $sg_cfg['herzschlag'] = isset($_POST['herzschlag']) ? 1 : 0;
-
-    // PIN-Sperre
-    $sg_pv = (int) (isset($_POST['pin_versuche']) ? $_POST['pin_versuche'] : 3);
-    if ($sg_pv < 1 || $sg_pv > 10) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_PIN_VERSUCHE'), 1, 10);
-    } else { $sg_cfg['pin_versuche'] = $sg_pv; }
-    $sg_ps = (int) (isset($_POST['pin_sperre']) ? $_POST['pin_sperre'] : 15);
-    if ($sg_ps < 1 || $sg_ps > 1440) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_PIN_SPERRE'), 1, 1440);
-    } else { $sg_cfg['pin_sperre'] = $sg_ps; }
-
-    // Gruppen-Kennung: signal-cli gibt sie als Base64 aus.
-    $sg_gr = trim((string) (isset($_POST['gruppe']) ? $_POST['gruppe'] : ''));
-    if ($sg_gr !== '' && !preg_match('#^[A-Za-z0-9+/=_\-]{10,}$#', $sg_gr)) {
-        $sg_fehler[] = sg_t('EINST.FEHLER_GRUPPE');
-    } else { $sg_cfg['gruppe'] = $sg_gr; }
-
-    // Nachtruhe: entweder beide Zeiten oder keine.
-    $sg_nv = trim((string) (isset($_POST['nacht_von']) ? $_POST['nacht_von'] : ''));
-    $sg_nb = trim((string) (isset($_POST['nacht_bis']) ? $_POST['nacht_bis'] : ''));
-    $sg_zeitform = '/^([01][0-9]|2[0-3]):[0-5][0-9]$/';
-    if ($sg_nv === '' && $sg_nb === '') {
-        $sg_cfg['nacht_von'] = ''; $sg_cfg['nacht_bis'] = '';
-    } elseif (preg_match($sg_zeitform, $sg_nv) && preg_match($sg_zeitform, $sg_nb) && $sg_nv !== $sg_nb) {
-        $sg_cfg['nacht_von'] = $sg_nv; $sg_cfg['nacht_bis'] = $sg_nb;
-    } else {
-        $sg_fehler[] = sg_t('EINST.FEHLER_NACHT');
+    if (!$sg_ok) {
+        sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
     }
-
-    $sg_qt = (int) (isset($_POST['quittung_takt']) ? $_POST['quittung_takt'] : 5);
-    if ($sg_qt < 1 || $sg_qt > 120) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_QUITTUNG_TAKT'), 1, 120);
-    } else { $sg_cfg['quittung_takt'] = $sg_qt; }
-    $sg_qm = (int) (isset($_POST['quittung_max']) ? $_POST['quittung_max'] : 3);
-    if ($sg_qm < 0 || $sg_qm > 20) {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_t('EINST.L_QUITTUNG_MAX'), 0, 20);
-    } else { $sg_cfg['quittung_max'] = $sg_qm; }
-
-    /* GESPEICHERT WIRD AUCH DANN, WENN EINZELNE FELDER BEANSTANDET SIND.
-     *
-     * Bis 0.9.11 stand hier "if (!$sg_fehler)". Eine halb ausgefuellte Zeile
-     * in der Weissliste verhinderte damit das Speichern ALLER Felder - der
-     * Benutzer aenderte die Bremse, bekam eine Meldung ueber eine Rufnummer
-     * und wunderte sich, warum die Bremse alt blieb. Genau dieser Fehler
-     * steht in REGELN_1 als eigener Punkt: melden ist richtig, blockieren
-     * nicht. Die beanstandeten Felder behalten ihren alten Wert, alle
-     * uebrigen werden uebernommen. */
-    if (sg_config_write($sg_cfg)) {
-        $sg_meldungen[] = $sg_fehler ? sg_t('EINST.GESPEICHERT_TEIL') : sg_t('EINST.GESPEICHERT');
-        sg_log('Einstellungen gespeichert' . ($sg_fehler ? ' (mit Beanstandungen)' : ''));
-    } else {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
-    }
-    $sg_tab = 'tab-settings';
+    sg_log('Einstellungen gespeichert');
+    sg_umleiten('tab-settings', array(sg_t('EINST.GESPEICHERT')), array());
 }
 
 /* ---------------- MQTT (eigener Reiter, eigenes Formular) ----------------
- *
- * Eigenes Formular UND eigener Handler gehoeren zusammen. Loesten beide
- * Formulare denselben Handler aus, setzte dieser die Haken des jeweils
- * nicht abgeschickten Formulars per isset() auf 0 - der Benutzer verloere
- * Werte, die er nie gesehen hat. */
+ * Eigenes Formular UND eigener Handler: loesten beide Formulare denselben
+ * Handler aus, setzte dieser die Haken des nicht abgeschickten Formulars auf 0. */
 if ($sg_post && isset($_POST['save_mqtt'])) {
-    $sg_mcfg = sg_config();
-    $sg_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
-    $sg_mtopic = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-        (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
-    if ($sg_mtopic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $sg_mtopic)) {
-        $sg_fehler[] = sg_t('EINST.FEHLER_TOPIC');
-    } else {
-        $sg_mcfg['mqtt_topic'] = trim($sg_mtopic, '/');
+    $sg_falsch = array();
+    /* Geprueft, nicht gesaeubert (U4, M4): bis 0.9.25 wurden Steuer- und
+     * Anfuehrungszeichen still entfernt und Schraegstriche am Rand still
+     * abgeschnitten. Der Punkt ist erlaubt. */
+    $sg_mtopic = trim(sg_post_text('mqtt_topic'));
+    if (!sg_thema_gueltig($sg_mtopic, 64)) {
+        $sg_falsch['mqtt_topic'] = sg_t('EINST.FEHLER_TOPIC');
     }
-    if (!$sg_fehler) {
-        if (sg_config_write($sg_mcfg)) {
-            $sg_meldungen[] = sg_t('EINST.GESPEICHERT');
+    $sg_mein = isset($_POST['mqtt_ein']) ? 1 : 0;
+    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_mtopic, $sg_mein, &$sg_falsch) {
+        if ($sg_falsch) { return null; }
+        $neu = $alt;
+        $neu['mqtt_ein'] = $sg_mein;
+        $neu['mqtt_topic'] = $sg_mtopic;
+        $ma = sg_config_maengel($alt);
+        foreach (sg_config_maengel($neu) as $k => $t) {
+            if (in_array($k, array('mqtt_topic', 'mqtt_ein'), true) || !isset($ma[$k])) {
+                if (!isset($sg_falsch[$k])) { $sg_falsch[$k] = $t; }
+            }
         }
+        return $sg_falsch ? null : $neu;
+    });
+    if ($sg_falsch) {
+        sg_umleiten('tab-mqtt', array(), array_merge(array(sg_t('EINST.NICHT_GESPEICHERT')), array_values($sg_falsch)),
+            array('eingaben' => sg_eingaben_sammeln('mqtt', array('mqtt_ein', 'mqtt_topic'), array_keys($sg_falsch))));
     }
-    $sg_tab = 'tab-mqtt';
+    if (!$sg_ok) {
+        sg_umleiten('tab-mqtt', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    // Das Gateway-Abo auf den neuen Praefix bringen (M9).
+    sg_abo_datei($sg_mtopic, true);
+    sg_umleiten('tab-mqtt', array(sg_t('EINST.GESPEICHERT')), array());
 }
 
 /* ================= Befehlstabelle speichern ================= */
 if ($sg_post && isset($_POST['befehle_speichern'])) {
-    $sg_cfg = sg_config();
-    $sg_neu = array();
-    $sg_gesehen = array();
-    $sg_reserviert = array('hilfe', 'help', '?', 'status', 'zustand', 'ja', 'nein', 'yes', 'no', 'ok');
+    $sg_falsch = array();
+    $sg_zeilen = array();
+    $sg_alt = sg_config();
     for ($sg_i = 0; $sg_i < SG_BEFEHLE; $sg_i++) {
-        $sg_g = function ($feld, $def = '') use ($sg_i) {
-            $a = isset($_POST[$feld]) ? (array) $_POST[$feld] : array();
-            return isset($a[$sg_i]) ? $a[$sg_i] : $def;
-        };
-        $sg_wort = sg_klein(trim(preg_replace('/\s+/', ' ',
-            preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wort')))));
-        $sg_stufe = (string) $sg_g('b_stufe', 'sofort');
-        $sg_wart = (string) $sg_g('b_wert_art', 'fest');
-        $sg_b = array(
-            'aktiv' => (int) $sg_g('b_aktiv', 0) ? 1 : 0,
-            'wort' => $sg_wort,
-            'thema' => preg_replace('#[^A-Za-z0-9_/\-]#', '', (string) $sg_g('b_thema')),
-            'wert' => trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_wert', '1'))),
-            'wert_art' => in_array($sg_wart, array('fest', 'zahl'), true) ? $sg_wart : 'fest',
-            'min' => (int) $sg_g('b_min', 0),
-            'max' => (int) $sg_g('b_max', 100),
-            'stufe' => in_array($sg_stufe, array('sofort', 'rueckfrage', 'pin'), true) ? $sg_stufe : 'sofort',
-            'absender' => trim((string) $sg_g('b_absender')),
-            'zweit' => trim((string) $sg_g('b_zweit')),
-            'antwort' => trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $sg_g('b_antwort'))),
-        );
-        // Rufnummern in den beiden neuen Feldern werden GEPRUEFT, nicht
-        // zurechtgebogen - eine stillschweigend verstuemmelte Nummer waere
-        // eine Berechtigung, die niemand mehr nachvollziehen kann.
-        if ($sg_b['absender'] !== '') {
-            $sg_liste2 = array();
-            foreach (preg_split('/[\s,;]+/', $sg_b['absender']) as $sg_nr) {
+        $sg_v = sg_befehl_vorgabe();
+        $sg_altz = isset($sg_alt['befehle'][$sg_i]) ? $sg_alt['befehle'][$sg_i] : $sg_v;
+        $sg_v['aktiv'] = (isset($_POST['b_aktiv']) && is_array($_POST['b_aktiv']) && isset($_POST['b_aktiv'][$sg_i])) ? 1 : 0;
+
+        /* Steuerzeichen werden beanstandet, nicht entfernt (U4). Das Wort
+         * wird kleingeschrieben und sein Leerraum zusammengezogen - so wird
+         * auch der Chattext verglichen (Vergleichsform, keine Aenderung der
+         * Bedeutung; wie das Kleinschreiben der Themen). */
+        $sg_roh = sg_post_zelle('b_wort', $sg_i);
+        if (preg_match('/[\x00-\x1F\x7F]/', $sg_roh)) {
+            $sg_falsch['b_wort[' . $sg_i . ']'] = sprintf(sg_t('BEF.FEHLER_WORT'), $sg_i + 1);
+        }
+        $sg_v['wort'] = sg_klein(trim(preg_replace('/\s+/', ' ', $sg_roh)));
+
+        /* Das Thema wird geprueft, nicht gesaeubert (M4): bis 0.9.25 wurde aus
+         * "garage.tor auf" still "garagetorauf" - in Loxone kam nie etwas an.
+         * Der Punkt ist erlaubt. */
+        $sg_v['thema'] = trim(sg_post_zelle('b_thema', $sg_i));
+        $sg_v['wert'] = trim(sg_post_zelle('b_wert', $sg_i));
+        $sg_v['antwort'] = trim(sg_post_zelle('b_antwort', $sg_i));
+        foreach (array('wert_art' => array('fest', 'zahl'), 'stufe' => array('sofort', 'rueckfrage', 'pin')) as $sg_ak => $sg_erl) {
+            $sg_w = sg_post_zelle('b_' . $sg_ak, $sg_i);
+            if (in_array($sg_w, $sg_erl, true)) { $sg_v[$sg_ak] = $sg_w; }
+            else {
+                $sg_v[$sg_ak] = $sg_altz[$sg_ak];
+                $sg_falsch['b_' . $sg_ak . '[' . $sg_i . ']'] = sprintf(sg_t('BEF.FEHLER_AUSWAHL'), $sg_i + 1);
+            }
+        }
+        foreach (array('min', 'max') as $sg_mk) {
+            $sg_z = sg_ganz_lesen(sg_post_zelle('b_' . $sg_mk, $sg_i));
+            if ($sg_z === null) {
+                $sg_v[$sg_mk] = $sg_altz[$sg_mk];
+                $sg_falsch['b_' . $sg_mk . '[' . $sg_i . ']'] = sprintf(sg_t('BEF.FEHLER_GANZ'), $sg_i + 1);
+            } else {
+                $sg_v[$sg_mk] = $sg_z;
+            }
+        }
+        /* Rufnummern werden GEPRUEFT. Eine ungueltige Nummer setzt das Feld
+         * nie mehr auf leer (= alle Erlaubten) - es wird nichts gespeichert. */
+        $sg_abs = trim(sg_post_zelle('b_absender', $sg_i));
+        $sg_liste2 = array();
+        if ($sg_abs !== '') {
+            foreach (preg_split('/[\s,;]+/', $sg_abs) as $sg_nr) {
                 if ($sg_nr === '') { continue; }
-                if (preg_match('/^\+[0-9]{6,20}$/', $sg_nr)) { $sg_liste2[] = $sg_nr; }
-                else { $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_ABSENDER'), sg_e($sg_nr), $sg_i + 1); }
-            }
-            $sg_b['absender'] = implode(',', $sg_liste2);
-        }
-        if ($sg_b['zweit'] !== '' && !preg_match('/^\+[0-9]{6,20}$/', $sg_b['zweit'])) {
-            $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_ZWEIT'), sg_e($sg_b['zweit']), $sg_i + 1);
-            $sg_b['zweit'] = '';
-        }
-        if ($sg_b['aktiv'] && $sg_b['wert_art'] === 'zahl' && $sg_b['max'] <= $sg_b['min']) {
-            $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_BEREICH'), $sg_i + 1);
-        }
-        if ($sg_b['aktiv'] && $sg_b['wort'] !== '') {
-            if (in_array($sg_b['wort'], $sg_reserviert, true)) {
-                $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_RESERVIERT'), sg_e($sg_b['wort']), $sg_i + 1);
-            }
-            if (isset($sg_gesehen[$sg_b['wort']])) {
-                $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_DOPPELT'), sg_e($sg_b['wort']), $sg_i + 1);
-            }
-            $sg_gesehen[$sg_b['wort']] = 1;
-            if ($sg_b['thema'] === '') {
-                $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_THEMA'), $sg_i + 1);
-            }
-            if ($sg_b['stufe'] === 'pin' && !sg_pin_gesetzt($sg_cfg)) {
-                $sg_fehler[] = sprintf(sg_t('BEF.FEHLER_KEINE_PIN'), sg_e($sg_b['wort']));
+                if (sg_ist_nummer($sg_nr)) { $sg_liste2[] = $sg_nr; }
+                elseif (!isset($sg_falsch['b_absender[' . $sg_i . ']'])) {
+                    $sg_falsch['b_absender[' . $sg_i . ']'] = sprintf(sg_t('BEF.FEHLER_ABSENDER'), sg_e($sg_nr), $sg_i + 1);
+                }
             }
         }
-        $sg_neu[$sg_i] = $sg_b;
+        $sg_v['absender'] = implode(',', $sg_liste2);
+        $sg_v['zweit'] = trim(sg_post_zelle('b_zweit', $sg_i));
+        $sg_zeilen[$sg_i] = $sg_v;
     }
-    /* Auch hier gilt: melden, nicht blockieren. Bis 0.9.11 verwarf ein
-     * doppeltes Wort in Zeile 17 die Bearbeitung aller zwanzig Zeilen. */
-    $sg_cfg['befehle'] = $sg_neu;
-    if (sg_config_write($sg_cfg)) {
-        $sg_meldungen[] = $sg_fehler ? sg_t('BEF.GESPEICHERT_TEIL') : sg_t('BEF.GESPEICHERT');
-        sg_log('Befehlstabelle gespeichert' . ($sg_fehler ? ' (mit Beanstandungen)' : ''));
-    } else {
-        $sg_fehler[] = sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']));
+    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_zeilen, &$sg_falsch) {
+        $neu = $alt;
+        $neu['befehle'] = $sg_zeilen;
+        $ma = sg_config_maengel($alt);
+        foreach (sg_config_maengel($neu) as $k => $t) {
+            if (strpos($k, 'befehle') !== 0 && isset($ma[$k])) { continue; }
+            $f = sg_formfeld($k);
+            if (!isset($sg_falsch[$f])) { $sg_falsch[$f] = $t; }
+        }
+        return $sg_falsch ? null : $neu;
+    });
+    if ($sg_falsch) {
+        sg_umleiten('tab-befehle', array(), array_merge(array(sg_t('BEF.NICHT_GESPEICHERT')), array_values($sg_falsch)),
+            array('eingaben' => sg_eingaben_sammeln('befehle',
+                array('b_aktiv', 'b_wort', 'b_thema', 'b_wert_art', 'b_wert', 'b_min', 'b_max', 'b_stufe',
+                      'b_absender', 'b_zweit', 'b_antwort'), array_keys($sg_falsch))));
     }
-    $sg_tab = 'tab-befehle';
+    if (!$sg_ok) {
+        sg_umleiten('tab-befehle', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    sg_log('Befehlstabelle gespeichert');
+    sg_umleiten('tab-befehle', array(sg_t('BEF.GESPEICHERT')), array());
+}
+
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST, dann die Groessengrenze, dann JEDER Wert mit
+ * derselben Pruefung wie die Formulare (C3). Eine halb gueltige Datei
+ * aendert nichts. */
+if ($sg_post && isset($_POST['sg_zurueck'])) {
+    if (!isset($_FILES['sg_sicherung']) || !is_array($_FILES['sg_sicherung'])
+        || !isset($_FILES['sg_sicherung']['tmp_name']) || !is_string($_FILES['sg_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['sg_sicherung']['tmp_name'])) {
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_KEINE_DATEI')));
+    }
+    if ((int) $_FILES['sg_sicherung']['size'] > 262144) {
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_ZU_GROSS')));
+    }
+    list($sg_neu, $sg_mangel, $sg_n) = sg_sicherung_lesen(
+        (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name']));
+    if ($sg_neu === null) {
+        /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird nichts. */
+        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.SICH_ABGELEHNT')), $sg_mangel));
+    }
+    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_neu) { return $sg_neu; });
+    if (!$sg_ok) {
+        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_SCHREIBFEHLER')));
+    }
+    sg_abo_datei($sg_neu['mqtt_topic'], true);
+    sg_log('Einstellungen aus einer Sicherung zurueckgespielt (' . (int) $sg_n . ' Werte).');
+    sg_umleiten('tab-settings', array(sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n)), array());
+}
+
+/* Ein POST, den kein Handler kennt, endet ebenfalls mit einer Umleitung. */
+if ($sg_post) {
+    sg_umleiten($sg_tab, array(), array(sg_t('TEST.M_UNBEKANNT')));
+}
+
+/* ---------------- GET: die Einmalmeldung lesen (und loeschen) ---------------- */
+$sg_flash = sg_flash_lesen();
+if (!empty($sg_flash['tab']) && is_string($sg_flash['tab']) && preg_match($sg_muster, $sg_flash['tab'])) {
+    $sg_tab = $sg_flash['tab'];
+}
+foreach (array('meldungen' => 'sg_meldungen', 'fehler' => 'sg_fehler') as $sg_fk => $sg_fv) {
+    if (isset($sg_flash[$sg_fk]) && is_array($sg_flash[$sg_fk])) {
+        foreach ($sg_flash[$sg_fk] as $sg_ft) { if (is_string($sg_ft)) { ${$sg_fv}[] = $sg_ft; } }
+    }
+}
+$sg_eingaben = (isset($sg_flash['eingaben']) && is_array($sg_flash['eingaben'])
+    && isset($sg_flash['eingaben']['formular'], $sg_flash['eingaben']['werte'], $sg_flash['eingaben']['falsch'])
+    && is_array($sg_flash['eingaben']['werte']) && is_array($sg_flash['eingaben']['falsch']))
+    ? $sg_flash['eingaben'] : null;
+$sg_trockentext = (isset($sg_flash['trockentext']) && is_string($sg_flash['trockentext'])) ? $sg_flash['trockentext'] : 'hilfe';
+
+/* ---------------- X-2: Werte und Markierung nach einer Beanstandung ---------------- */
+/** Ist dieses Formular das beanstandete? */
+function sg_fa($formular)
+{
+    global $sg_eingaben;
+    return is_array($sg_eingaben) && $sg_eingaben['formular'] === $formular;
+}
+/** Wert eines Feldes: nach einer Beanstandung die Eingabe, sonst der gespeicherte Wert. */
+function sg_fw($formular, $feld, $gespeichert, $idx = null)
+{
+    global $sg_eingaben;
+    if (sg_fa($formular)) {
+        $w = isset($sg_eingaben['werte'][$feld]) ? $sg_eingaben['werte'][$feld] : null;
+        if ($idx !== null) { $w = (is_array($w) && isset($w[(string) (int) $idx])) ? $w[(string) (int) $idx] : null; }
+        if (is_string($w)) { return $w; }
+    }
+    return (string) $gespeichert;
+}
+/** Haken: nach einer Beanstandung so, wie er abgeschickt wurde. */
+function sg_fh($formular, $feld, $gespeichert, $idx = null)
+{
+    global $sg_eingaben;
+    if (!sg_fa($formular)) { return (bool) $gespeichert; }
+    $w = isset($sg_eingaben['werte'][$feld]) ? $sg_eingaben['werte'][$feld] : null;
+    if ($idx !== null) { return is_array($w) && isset($w[(string) (int) $idx]); }
+    return $w !== null;
+}
+/** Markierung eines beanstandeten Felds (Attribute, schon maskiert). */
+function sg_fm($feld, $idx = null)
+{
+    global $sg_eingaben;
+    $n = (string) $feld . ($idx !== null ? '[' . (int) $idx . ']' : '');
+    return (is_array($sg_eingaben) && in_array($n, $sg_eingaben['falsch'], true))
+        ? ' class="sm-beanstandet" aria-invalid="true"' : '';
 }
 
 $sg_cfg = sg_config();
@@ -495,54 +621,6 @@ $sg_uri = @file_get_contents(sg_tmpdir() . '/linkuri.txt');
 if ($sg_uri) {
     $sg_png = @shell_exec('qrencode -t PNG -s 6 -o - ' . escapeshellarg($sg_uri) . ' 2>/dev/null');
     if ($sg_png) { $sg_qr = 'data:image/png;base64,' . base64_encode($sg_png); }
-}
-
-
-/* ---------------- Einstellungen sichern ----------------
- *
- * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
- * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
- * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
- * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
-if ($sg_post && isset($_POST['sg_sichern'])) {
-    $sg_js = json_encode(sg_config(),
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($sg_js !== false) {
-        header('Content-Type: application/json; charset=utf-8');
-        header('Content-Disposition: attachment; filename="signalbot_einstellungen_'
-               . date('Ymd_His') . '.json"');
-        echo $sg_js;
-        exit;
-    }
-    $sg_fehler[] = sg_t('EINST.SICH_SCHREIBFEHLER');
-}
-
-/* ---------------- Einstellungen zurueckspielen ----------------
- *
- * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
- * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
-if ($sg_post && isset($_POST['sg_zurueck'])) {
-    if (!isset($_FILES['sg_sicherung']) || !is_array($_FILES['sg_sicherung'])
-        || !isset($_FILES['sg_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['sg_sicherung']['tmp_name'])) {
-        $sg_fehler[] = sg_t('EINST.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['sg_sicherung']['size'] > 262144) {
-        $sg_fehler[] = sg_t('EINST.SICH_ZU_GROSS');
-    } else {
-        list($sg_neu, $sg_mangel, $sg_n) = sg_sicherung_lesen(
-            (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name']));
-        if ($sg_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. */
-            $sg_fehler[] = sg_t('EINST.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $sg_mangel);
-        } elseif (sg_config_write($sg_neu)) {
-            $sg_meldungen[] = sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n);
-        } else {
-            $sg_fehler[] = sg_t('EINST.SICH_SCHREIBFEHLER');
-        }
-    }
 }
 
 
@@ -642,6 +720,10 @@ if (class_exists('LBWeb', false)) {
     background-repeat: no-repeat; background-position: right 10px center;
     padding-right: 32px; cursor: pointer; }
 .sm-tbl select { padding-right: 28px; background-position: right 7px center; }
+/* X-2 (Durchgang 01.10.2026): ein beanstandetes Feld ist markiert; die
+   Markierung traegt zusaetzlich aria-invalid. */
+.sm-wrap .sm-beanstandet { border: 2px solid #c62828 !important; background: #fff5f5 !important; }
+.sm-wrap input[type=checkbox].sm-beanstandet { outline: 2px solid #c62828; outline-offset: 2px; }
 
 </style>
 
@@ -719,9 +801,9 @@ $sg_reiter = array(
     <b class="<?= empty($sg_cfg['gesperrt']) ? 'sm-an' : 'sm-aus' ?>"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('ALLG.FREI') : sg_t('ALLG.GESPERRT')) ?></b></div>
 </div>
 
+<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span> <span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <h2><?= sg_e(sg_t('EINST.H_SPERRE')) ?></h2>
 <div class="sm-warnung"><?= sg_t('EINST.SPERRE_TEXT') ?></div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span> <span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
@@ -747,7 +829,6 @@ $sg_reiter = array(
   </form>
 </div>
 <?php } else { ?>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
@@ -772,7 +853,6 @@ $sg_reiter = array(
       <?= sg_e(sg_t('EINST.L_LOESEN_OK')) ?>
     </label>
   </div>
-  <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
   <div class="sm-knopfreihe">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('EINST.K_LOESEN')) ?></button>
   </div>
@@ -788,12 +868,12 @@ $sg_reiter = array(
 <div class="sm-row">
   <div class="sm-feld">
     <label for="rpc_url"><?= sg_e(sg_t('EINST.L_RPC')) ?></label>
-    <input data-role="none" type="text" id="rpc_url" name="rpc_url" value="<?= sg_e($sg_cfg['rpc_url']) ?>" placeholder="http://127.0.0.1:8095">
+    <input data-role="none" type="text" id="rpc_url" name="rpc_url" value="<?= sg_e(sg_fw('settings', 'rpc_url', $sg_cfg['rpc_url'])) ?>"<?= sg_fm('rpc_url') ?> placeholder="http://127.0.0.1:8095">
     <div class="sm-hilfe"><?= sg_t('EINST.H_RPC') ?></div>
   </div>
   <div class="sm-feld">
     <label for="konto"><?= sg_e(sg_t('EINST.L_KONTO')) ?></label>
-    <input data-role="none" type="text" id="konto" name="konto" value="<?= sg_e($sg_cfg['konto']) ?>" placeholder="+49...">
+    <input data-role="none" type="text" id="konto" name="konto" value=""<?= sg_fm('konto') ?> placeholder="<?= sg_e((string) $sg_cfg['konto'] !== '' ? sprintf(sg_t('EINST.P_KONTO'), sg_maske($sg_cfg['konto'])) : '+49...') ?>">
     <div class="sm-hilfe"><?= $sg_konten ? sprintf(sg_t('EINST.H_KONTO_GEFUNDEN'), sg_e(implode(', ', $sg_konten))) : sg_t('EINST.H_KONTO') ?></div>
   </div>
 </div>
@@ -802,12 +882,12 @@ $sg_reiter = array(
 <div class="sm-warnung"><?= sg_t('EINST.ABSICHERUNG_TEXT') ?></div>
 <div class="sm-feld">
   <label for="erlaubt"><?= sg_e(sg_t('EINST.L_ERLAUBT')) ?></label>
-  <textarea data-role="none" id="erlaubt" name="erlaubt" rows="4" style="width:100%;max-width:520px;" placeholder="+491701234567"><?= sg_e(implode("\n", $sg_cfg['erlaubt'])) ?></textarea>
+  <textarea data-role="none" id="erlaubt" name="erlaubt" rows="4" style="width:100%;max-width:520px;" placeholder="+491701234567"<?= sg_fm('erlaubt') ?>><?= sg_e(sg_fw('settings', 'erlaubt', implode("\n", $sg_cfg['erlaubt']))) ?></textarea>
   <div class="sm-hilfe"><?= sg_t('EINST.H_ERLAUBT') ?></div>
 </div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="stille" value="1" <?= !empty($sg_cfg['stille']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="stille" value="1" <?= sg_fh('settings', 'stille', !empty($sg_cfg['stille'])) ? 'checked' : '' ?>>
     <?= sg_e(sg_t('EINST.L_STILLE')) ?>
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_STILLE') ?></div>
@@ -815,27 +895,27 @@ $sg_reiter = array(
 <div class="sm-row">
   <div class="sm-feld">
     <label for="pin"><?= sg_e(sg_t('EINST.L_PIN')) ?></label>
-    <input data-role="none" type="password" id="pin" name="pin" value="" placeholder="<?= sg_e((string) $sg_cfg['pin'] !== '' ? sg_t('EINST.P_GESETZT') : sg_t('EINST.P_LEER')) ?>">
+    <input data-role="none" type="password" id="pin" name="pin" value=""<?= sg_fm('pin') ?> placeholder="<?= sg_e(sg_pin_gesetzt($sg_cfg) ? sg_t('EINST.P_GESETZT') : sg_t('EINST.P_LEER')) ?>">
     <div class="sm-hilfe"><?= sg_t('EINST.H_PIN') ?></div>
     <label style="display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:400;">
-      <input data-role="none" type="checkbox" name="pin_loeschen" value="1"> <?= sg_e(sg_t('EINST.L_PIN_LOESCHEN')) ?>
+      <input data-role="none" type="checkbox" name="pin_loeschen" value="1" <?= sg_fh('settings', 'pin_loeschen', false) ? 'checked' : '' ?>> <?= sg_e(sg_t('EINST.L_PIN_LOESCHEN')) ?>
     </label>
   </div>
   <div class="sm-feld">
     <label for="bremse"><?= sg_e(sg_t('EINST.L_BREMSE')) ?></label>
-    <input data-role="none" type="number" id="bremse" name="bremse" value="<?= (int) $sg_cfg['bremse'] ?>" min="1" max="60">
+    <input data-role="none" type="text" inputmode="numeric" id="bremse" name="bremse" value="<?= sg_e(sg_fw('settings', 'bremse', (int) $sg_cfg['bremse'])) ?>"<?= sg_fm('bremse') ?>>
     <div class="sm-hilfe"><?= sg_t('EINST.H_BREMSE') ?></div>
   </div>
 </div>
 <div class="sm-row">
   <div class="sm-feld">
     <label for="pin_versuche"><?= sg_e(sg_t('EINST.L_PIN_VERSUCHE')) ?></label>
-    <input data-role="none" type="number" id="pin_versuche" name="pin_versuche" value="<?= (int) $sg_cfg['pin_versuche'] ?>" min="1" max="10">
+    <input data-role="none" type="text" inputmode="numeric" id="pin_versuche" name="pin_versuche" value="<?= sg_e(sg_fw('settings', 'pin_versuche', (int) $sg_cfg['pin_versuche'])) ?>"<?= sg_fm('pin_versuche') ?>>
     <div class="sm-hilfe"><?= sg_t('EINST.H_PIN_VERSUCHE') ?></div>
   </div>
   <div class="sm-feld">
     <label for="pin_sperre"><?= sg_e(sg_t('EINST.L_PIN_SPERRE')) ?></label>
-    <input data-role="none" type="number" id="pin_sperre" name="pin_sperre" value="<?= (int) $sg_cfg['pin_sperre'] ?>" min="1" max="1440">
+    <input data-role="none" type="text" inputmode="numeric" id="pin_sperre" name="pin_sperre" value="<?= sg_e(sg_fw('settings', 'pin_sperre', (int) $sg_cfg['pin_sperre'])) ?>"<?= sg_fm('pin_sperre') ?>>
     <div class="sm-hilfe"><?= sg_t('EINST.H_PIN_SPERRE') ?></div>
   </div>
 </div>
@@ -843,21 +923,21 @@ $sg_reiter = array(
 <h2><?= sg_e(sg_t('EINST.H_WEITERES')) ?></h2>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="zustand_ein" value="1" <?= !empty($sg_cfg['zustand_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="zustand_ein" value="1" <?= sg_fh('settings', 'zustand_ein', !empty($sg_cfg['zustand_ein'])) ? 'checked' : '' ?>>
     <?= sg_e(sg_t('EINST.L_ZUSTAND')) ?>
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_ZUSTAND') ?></div>
 </div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="audit" value="1" <?= !empty($sg_cfg['audit']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="audit" value="1" <?= sg_fh('settings', 'audit', !empty($sg_cfg['audit'])) ? 'checked' : '' ?>>
     <?= sg_e(sg_t('EINST.L_AUDIT')) ?>
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_AUDIT') ?></div>
 </div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="herzschlag" value="1" <?= !empty($sg_cfg['herzschlag']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="herzschlag" value="1" <?= sg_fh('settings', 'herzschlag', !empty($sg_cfg['herzschlag'])) ? 'checked' : '' ?>>
     <?= sg_e(sg_t('EINST.L_HERZSCHLAG')) ?>
   </label>
   <div class="sm-hilfe"><?= sg_t('EINST.H_HERZSCHLAG') ?></div>
@@ -866,28 +946,28 @@ $sg_reiter = array(
 <h2><?= sg_e(sg_t('EINST.H_MELDEWEGE')) ?></h2>
 <div class="sm-feld">
   <label for="gruppe"><?= sg_e(sg_t('EINST.L_GRUPPE')) ?></label>
-  <input data-role="none" type="text" id="gruppe" name="gruppe" value="<?= sg_e($sg_cfg['gruppe']) ?>">
+  <input data-role="none" type="text" id="gruppe" name="gruppe" value="<?= sg_e(sg_fw('settings', 'gruppe', $sg_cfg['gruppe'])) ?>"<?= sg_fm('gruppe') ?>>
   <div class="sm-hilfe"><?= sg_t('EINST.H_GRUPPE') ?></div>
 </div>
 <div class="sm-row">
   <div class="sm-feld">
     <label for="nacht_von"><?= sg_e(sg_t('EINST.L_NACHT_VON')) ?></label>
-    <input data-role="none" type="text" id="nacht_von" name="nacht_von" value="<?= sg_e($sg_cfg['nacht_von']) ?>" placeholder="22:00">
+    <input data-role="none" type="text" id="nacht_von" name="nacht_von" value="<?= sg_e(sg_fw('settings', 'nacht_von', $sg_cfg['nacht_von'])) ?>"<?= sg_fm('nacht_von') ?> placeholder="22:00">
   </div>
   <div class="sm-feld">
     <label for="nacht_bis"><?= sg_e(sg_t('EINST.L_NACHT_BIS')) ?></label>
-    <input data-role="none" type="text" id="nacht_bis" name="nacht_bis" value="<?= sg_e($sg_cfg['nacht_bis']) ?>" placeholder="07:00">
+    <input data-role="none" type="text" id="nacht_bis" name="nacht_bis" value="<?= sg_e(sg_fw('settings', 'nacht_bis', $sg_cfg['nacht_bis'])) ?>"<?= sg_fm('nacht_von') ?> placeholder="07:00">
   </div>
 </div>
 <div class="sm-hilfe"><?= sg_t('EINST.H_NACHT') ?></div>
 <div class="sm-row">
   <div class="sm-feld">
     <label for="quittung_takt"><?= sg_e(sg_t('EINST.L_QUITTUNG_TAKT')) ?></label>
-    <input data-role="none" type="number" id="quittung_takt" name="quittung_takt" value="<?= (int) $sg_cfg['quittung_takt'] ?>" min="1" max="120">
+    <input data-role="none" type="text" inputmode="numeric" id="quittung_takt" name="quittung_takt" value="<?= sg_e(sg_fw('settings', 'quittung_takt', (int) $sg_cfg['quittung_takt'])) ?>"<?= sg_fm('quittung_takt') ?>>
   </div>
   <div class="sm-feld">
     <label for="quittung_max"><?= sg_e(sg_t('EINST.L_QUITTUNG_MAX')) ?></label>
-    <input data-role="none" type="number" id="quittung_max" name="quittung_max" value="<?= (int) $sg_cfg['quittung_max'] ?>" min="0" max="20">
+    <input data-role="none" type="text" inputmode="numeric" id="quittung_max" name="quittung_max" value="<?= sg_e(sg_fw('settings', 'quittung_max', (int) $sg_cfg['quittung_max'])) ?>"<?= sg_fm('quittung_max') ?>>
   </div>
 </div>
 <div class="sm-hilfe"><?= sg_t('EINST.H_QUITTUNG') ?></div>
@@ -902,6 +982,14 @@ $sg_reiter = array(
 <h2><?= sg_t('EINST.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= sg_t('EINST.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= sg_t('EINST.SICH_WARNUNG') ?></div>
+<?php
+/* X-3: Bestuende die eigene Sicherung das Zurueckspielen nicht, steht es
+ * hier - geprueft mit derselben Funktion wie beim Zurueckspielen. Genannt
+ * werden die Einstellungen, nicht ihre Werte. */
+$sg_sich_mangel = sg_sicherung_eigene_maengel($sg_cfg);
+if ($sg_sich_mangel) { ?>
+<div class="sm-warnung" id="sg-sicherung-warnung"><?= sprintf(sg_t('EINST.SICH_EIGEN_WARNUNG'), sg_e(implode(', ', $sg_sich_mangel))) ?></div>
+<?php } ?>
 <div class="sm-knopfreihe">
   <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
        exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
@@ -923,6 +1011,7 @@ $sg_reiter = array(
 
 <!-- ================= Reiter: Befehle ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-befehle' ? ' sm-active' : '' ?>" id="tab-befehle">
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <h2><?= sg_e(sg_t('BEF.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('BEF.ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= sg_t('BEF.STUFEN') ?></div>
@@ -945,37 +1034,36 @@ $sg_reiter = array(
 </tr>
 <?php for ($sg_i = 0; $sg_i < SG_BEFEHLE; $sg_i++) { $sg_b = $sg_cfg['befehle'][$sg_i]; ?>
 <tr>
-  <td style="text-align:center;"><input data-role="none" type="checkbox" name="b_aktiv[<?= $sg_i ?>]" value="1" <?= !empty($sg_b['aktiv']) ? 'checked' : '' ?>></td>
-  <td><input data-role="none" type="text" name="b_wort[<?= $sg_i ?>]" value="<?= sg_e($sg_b['wort']) ?>" placeholder="<?= $sg_i === 0 ? 'licht an' : '' ?>"></td>
-  <td><input data-role="none" type="text" name="b_thema[<?= $sg_i ?>]" value="<?= sg_e($sg_b['thema']) ?>" placeholder="<?= $sg_i === 0 ? 'licht/wohnen' : '' ?>"></td>
+  <td style="text-align:center;"><input data-role="none" type="checkbox" name="b_aktiv[<?= $sg_i ?>]" value="1" <?= sg_fh('befehle', 'b_aktiv', !empty($sg_b['aktiv']), $sg_i) ? 'checked' : '' ?><?= sg_fm('b_aktiv', $sg_i) ?>></td>
+  <td><input data-role="none" type="text" name="b_wort[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_wort', $sg_b['wort'], $sg_i)) ?>"<?= sg_fm('b_wort', $sg_i) ?> placeholder="<?= $sg_i === 0 ? 'licht an' : '' ?>"></td>
+  <td><input data-role="none" type="text" name="b_thema[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_thema', $sg_b['thema'], $sg_i)) ?>"<?= sg_fm('b_thema', $sg_i) ?> placeholder="<?= $sg_i === 0 ? 'licht/wohnen' : '' ?>"></td>
   <td>
-    <select data-role="none" name="b_wert_art[<?= $sg_i ?>]">
+<?php $sg_wa_ist = sg_fw('befehle', 'b_wert_art', $sg_b['wert_art'], $sg_i); ?>
+    <select data-role="none" name="b_wert_art[<?= $sg_i ?>]"<?= sg_fm('b_wert_art', $sg_i) ?>>
 <?php foreach (array('fest', 'zahl') as $sg_wa) { ?>
-      <option value="<?= $sg_wa ?>"<?= $sg_b['wert_art'] === $sg_wa ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.WERT_' . strtoupper($sg_wa))) ?></option>
+      <option value="<?= $sg_wa ?>"<?= $sg_wa_ist === $sg_wa ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.WERT_' . strtoupper($sg_wa))) ?></option>
 <?php } ?>
     </select>
-    <input data-role="none" type="text" name="b_wert[<?= $sg_i ?>]" value="<?= sg_e($sg_b['wert']) ?>" placeholder="1">
+    <input data-role="none" type="text" name="b_wert[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_wert', $sg_b['wert'], $sg_i)) ?>"<?= sg_fm('b_wert', $sg_i) ?> placeholder="1">
     <span class="sm-hilfe" style="display:block;">
-      <input data-role="none" type="number" name="b_min[<?= $sg_i ?>]" value="<?= (int) $sg_b['min'] ?>" style="width:45%;">
-      <input data-role="none" type="number" name="b_max[<?= $sg_i ?>]" value="<?= (int) $sg_b['max'] ?>" style="width:45%;">
+      <input data-role="none" type="text" inputmode="numeric" name="b_min[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_min', (int) $sg_b['min'], $sg_i)) ?>"<?= sg_fm('b_min', $sg_i) ?> style="width:45%;">
+      <input data-role="none" type="text" inputmode="numeric" name="b_max[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_max', (int) $sg_b['max'], $sg_i)) ?>"<?= sg_fm('b_max', $sg_i) ?> style="width:45%;">
     </span>
   </td>
-  <td><select data-role="none" name="b_stufe[<?= $sg_i ?>]">
+<?php $sg_st_ist = sg_fw('befehle', 'b_stufe', $sg_b['stufe'], $sg_i); ?>
+  <td><select data-role="none" name="b_stufe[<?= $sg_i ?>]"<?= sg_fm('b_stufe', $sg_i) ?>>
 <?php foreach (array('sofort', 'rueckfrage', 'pin') as $sg_s) { ?>
-    <option value="<?= $sg_s ?>"<?= $sg_b['stufe'] === $sg_s ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.STUFE_' . strtoupper($sg_s))) ?></option>
+    <option value="<?= $sg_s ?>"<?= $sg_st_ist === $sg_s ? ' selected' : '' ?>><?= sg_e(sg_t('BEF.STUFE_' . strtoupper($sg_s))) ?></option>
 <?php } ?>
   </select></td>
-  <td><input data-role="none" type="text" name="b_absender[<?= $sg_i ?>]" value="<?= sg_e($sg_b['absender']) ?>" placeholder="<?= sg_e(sg_t('BEF.P_ALLE')) ?>"></td>
-  <td><input data-role="none" type="text" name="b_zweit[<?= $sg_i ?>]" value="<?= sg_e($sg_b['zweit']) ?>" placeholder="+49..."></td>
-  <td><input data-role="none" type="text" name="b_antwort[<?= $sg_i ?>]" value="<?= sg_e($sg_b['antwort']) ?>" placeholder="<?= sg_e(sg_t('BEF.P_ANTWORT')) ?>"></td>
+  <td><input data-role="none" type="text" name="b_absender[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_absender', $sg_b['absender'], $sg_i)) ?>"<?= sg_fm('b_absender', $sg_i) ?> placeholder="<?= sg_e(sg_t('BEF.P_ALLE')) ?>"></td>
+  <td><input data-role="none" type="text" name="b_zweit[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_zweit', $sg_b['zweit'], $sg_i)) ?>"<?= sg_fm('b_zweit', $sg_i) ?> placeholder="+49..."></td>
+  <td><input data-role="none" type="text" name="b_antwort[<?= $sg_i ?>]" value="<?= sg_e(sg_fw('befehle', 'b_antwort', $sg_b['antwort'], $sg_i)) ?>"<?= sg_fm('b_antwort', $sg_i) ?> placeholder="<?= sg_e(sg_t('BEF.P_ANTWORT')) ?>"></td>
 </tr>
 <?php } ?>
 </table>
 </div>
 <div class="sm-hilfe"><?= sg_t('BEF.SPALTEN_TEXT') ?></div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i><?= sg_t('LEGENDE.AKTION') ?></span>
-</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -987,6 +1075,7 @@ $sg_reiter = array(
 
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 
 <h2><?= sg_e(sg_t('MQTT.H_EINSTELLUNG')) ?></h2>
 <form action="index.php" method="post">
@@ -995,15 +1084,14 @@ $sg_reiter = array(
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($sg_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= sg_fh('mqtt', 'mqtt_ein', !empty($sg_cfg['mqtt_ein'])) ? 'checked' : '' ?>>
     <?= sg_e(sg_t('EINST.L_MQTT_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= sg_e(sg_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sg_e($sg_cfg['mqtt_topic']) ?>" placeholder="signalbot">
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sg_e(sg_fw('mqtt', 'mqtt_topic', $sg_cfg['mqtt_topic'])) ?>"<?= sg_fm('mqtt_topic') ?> placeholder="signalbot">
 </div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -1028,31 +1116,32 @@ $sg_reiter = array(
 <div class="sm-step"><b><?= sg_e(sg_t('MQTT.H_ABO')) ?></b><br>
 <?= sg_t('MQTT.ABO_TEXT') ?>
 <div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/#</div>
-<?= sg_abo_text() ?>
+<?php list($sg_abo_pfad, $sg_abo_da) = sg_abo_datei($sg_cfg['mqtt_topic']); ?>
+<?= $sg_abo_da ? sg_t('MQTT.ABO_MITGELIEFERT') : sg_abo_text() ?>
 </div>
 
 <h3><?= sg_e(sg_t('MQTT.H_THEMEN')) ?></h3>
 <p class="sm-hilfe"><?= sg_t('MQTT.THEMEN_TEXT') ?></p>
+<?php /* Aus sg_mqtt_themen() - derselben Liste, aus der der Sendecode das
+         Thema baut (U18, M8). Bis 0.9.25 zeigte die Spalte "Wert" bei einer
+         Zahl-Zeile den festen Wert 1, gesendet wurde aber die mitgeschickte
+         Zahl; eine Spalte "retained" fehlte (Entscheidung 3). */ ?>
 <table class="sm-tbl">
-<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('MQTT.T_WERT')) ?></th><th><?= sg_e(sg_t('MQTT.T_BEFEHL')) ?></th></tr>
-<?php $sg_leer = true; foreach ($sg_cfg['befehle'] as $sg_b) {
-    if (empty($sg_b['aktiv']) || $sg_b['wort'] === '' || $sg_b['thema'] === '') { continue; }
-    $sg_leer = false; ?>
-<tr><td><span class="sm-mono"><?= sg_e($sg_cfg['mqtt_topic']) ?>/<?= sg_e($sg_b['thema']) ?></span></td>
-    <td><span class="sm-mono"><?= sg_e($sg_b['wert']) ?></span></td>
-    <td><span class="sm-mono"><?= sg_e($sg_b['wort']) ?></span></td></tr>
+<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('MQTT.T_WERT')) ?></th><th><?= sg_e(sg_t('MQTT.T_RETAINED')) ?></th><th><?= sg_e(sg_t('MQTT.T_BEFEHL')) ?></th></tr>
+<?php $sg_leer = true; foreach (sg_mqtt_themen($sg_cfg) as $sg_th) {
+    if ($sg_th['art'] === 'fest' || $sg_th['art'] === 'zahl') { $sg_leer = false; } ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_th['thema']) ?></span></td>
+    <td><span class="sm-mono"><?= sg_e($sg_th['wert']) ?></span></td>
+    <td><?= sg_e($sg_th['retained'] ? sg_t('MQTT.JA') : sg_t('MQTT.NEIN')) ?></td>
+    <td><?= $sg_th['art'] === 'online' ? sg_t('MQTT.T_ONLINE') : ($sg_th['art'] === 'selbsttest' ? sg_t('MQTT.T_SELBSTTEST') : '<span class="sm-mono">' . sg_e($sg_th['quelle']) . '</span>') ?></td></tr>
 <?php } ?>
-<?php if ($sg_leer) { ?><tr><td colspan="3"><?= sg_t('MQTT.KEINE_BEFEHLE') ?></td></tr><?php } ?>
-<?php if (!empty($sg_cfg['herzschlag'])) { ?>
-<tr><td><span class="sm-mono"><?= sg_e($sg_cfg['mqtt_topic']) ?>/online</span></td>
-    <td><span class="sm-mono"><?= sg_e(sg_t('MQTT.W_ZEITSTEMPEL')) ?></span></td>
-    <td><?= sg_t('MQTT.T_ONLINE') ?></td></tr>
-<?php } ?>
+<?php if ($sg_leer) { ?><tr><td colspan="4"><?= sg_t('MQTT.KEINE_BEFEHLE') ?></td></tr><?php } ?>
 </table>
 </div>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span></div>
 <h2><?= sg_e(sg_t('LOX.H_RICHTUNGEN')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.RICHTUNGEN_TEXT') ?></div>
 
@@ -1068,17 +1157,16 @@ $sg_reiter = array(
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S1_T')) ?></b><br>
 <?= sg_t('LOX.S1') ?>
-<div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/&lt;Thema aus der Befehlstabelle&gt;</div>
+<div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/&lt;<?= sg_e(sg_t('LOX.THEMA_PLATZHALTER')) ?>&gt;</div>
 <?= sg_t('LOX.S1_IMPULS') ?>
 <table class="sm-tbl">
 <tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('MQTT.T_WERT')) ?></th><th><?= sg_e(sg_t('MQTT.T_BEFEHL')) ?></th></tr>
-<?php $sg_leer2 = true; foreach ($sg_cfg['befehle'] as $sg_b2) {
-    if (empty($sg_b2['aktiv']) || $sg_b2['wort'] === '' || $sg_b2['thema'] === '') { continue; }
+<?php $sg_leer2 = true; foreach (sg_mqtt_themen($sg_cfg) as $sg_th2) {
+    if ($sg_th2['art'] !== 'fest' && $sg_th2['art'] !== 'zahl') { continue; }
     $sg_leer2 = false; ?>
-<tr><td><span class="sm-mono"><?= sg_e($sg_cfg['mqtt_topic']) ?>/<?= sg_e($sg_b2['thema']) ?></span></td>
-    <td><span class="sm-mono"><?= sg_e($sg_b2['wert_art'] === 'zahl'
-        ? (int) $sg_b2['min'] . '..' . (int) $sg_b2['max'] : $sg_b2['wert']) ?></span></td>
-    <td><span class="sm-mono"><?= sg_e($sg_b2['wort']) ?></span></td></tr>
+<tr><td><span class="sm-mono"><?= sg_e($sg_th2['thema']) ?></span></td>
+    <td><span class="sm-mono"><?= sg_e($sg_th2['wert']) ?></span></td>
+    <td><span class="sm-mono"><?= sg_e($sg_th2['quelle']) ?></span></td></tr>
 <?php } ?>
 <?php if ($sg_leer2) { ?><tr><td colspan="3"><?= sg_t('MQTT.KEINE_BEFEHLE') ?></td></tr><?php } ?>
 </table>
@@ -1110,8 +1198,14 @@ $sg_reiter = array(
 <?= sg_t('LOX.S2_BILD') ?>
 <div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Bewegung&amp;bild=<?= sg_e(sg_datadir()) ?>/schnappschuss.jpg</div>
 <br><?= sg_t('LOX.S2_SPERRE') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('sperren')) ?>
-<?= sg_e(sg_endpunkt('entsperren')) ?></div>
+<?php /* ZWEI Bloecke (U1). Bis 0.9.25 standen beide Adressen in einem Block,
+         getrennt nur durch den Zeilenumbruch nach "?>" - und den verschluckt
+         PHP. Heraus kam EINE Zeile "...aktion=sperrenhttp://...aktion=entsperren";
+         wer sie abschrieb und aufrief, ENTSPERRTE den Bot (gemessen). */ ?>
+<div><b><?= sg_e(sg_t('LOX.L_SPERREN')) ?></b></div>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('sperren')) ?></div>
+<div><b><?= sg_e(sg_t('LOX.L_ENTSPERREN')) ?></b></div>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('entsperren')) ?></div>
 </div>
 
 <?php if (!empty($sg_cfg['zustand_ein'])) { ?>
@@ -1130,19 +1224,18 @@ $sg_reiter = array(
 
 <h2><?= sg_e(sg_t('LOX.H_VORLAGE')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.VORLAGE_TEXT') ?></div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
   <input data-role="none" type="hidden" name="vorlage" value="1">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
 </form>
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
   <input data-role="none" type="hidden" name="vorlage_out" value="1">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
 </form>
 </div>
 
@@ -1150,13 +1243,13 @@ $sg_reiter = array(
 <?= sg_t('LOX.S4') ?>
 <table class="sm-tbl">
 <tr><th>#</th><th><?= sg_e(sg_t('LOX.T_BAUSTEIN')) ?></th><th><?= sg_e(sg_t('LOX.T_NAME')) ?></th><th><?= sg_e(sg_t('LOX.T_PARAMETER')) ?></th><th><?= sg_e(sg_t('LOX.T_VERBINDEN')) ?></th></tr>
-<tr><td>1</td><td><?= sg_t('BAUSTEIN.B1_TYP') ?></td><td><span class="sm-mono">Signal Befehl</span></td><td><?= sg_t('BAUSTEIN.B1_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B1_VERB') ?></td></tr>
-<tr><td>2</td><td><?= sg_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono">Alarmanlage</span></td><td><?= sg_t('BAUSTEIN.B2_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B2_VERB') ?></td></tr>
-<tr><td>3</td><td><?= sg_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono">Signal Meldung</span></td><td><?= sg_t('BAUSTEIN.B3_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B3_VERB') ?></td></tr>
-<tr><td>4</td><td><?= sg_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono">Zustand melden</span></td><td><?= sg_t('BAUSTEIN.B4_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B4_VERB') ?></td></tr>
-<tr><td>5</td><td><?= sg_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono">Bot antwortet nicht</span></td><td><?= sg_t('BAUSTEIN.B5_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B5_VERB') ?></td></tr>
-<tr><td>6</td><td><?= sg_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono">Signal Bot sperren</span></td><td><?= sg_t('BAUSTEIN.B6_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B6_VERB') ?></td></tr>
-<tr><td>7</td><td><?= sg_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono">Meldung unquittiert</span></td><td><?= sg_t('BAUSTEIN.B7_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B7_VERB') ?></td></tr>
+<tr><td>1</td><td><?= sg_t('BAUSTEIN.B1_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B1_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B1_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B1_VERB') ?></td></tr>
+<tr><td>2</td><td><?= sg_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B2_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B2_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B2_VERB') ?></td></tr>
+<tr><td>3</td><td><?= sg_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B3_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B3_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B3_VERB') ?></td></tr>
+<tr><td>4</td><td><?= sg_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B4_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B4_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B4_VERB') ?></td></tr>
+<tr><td>5</td><td><?= sg_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B5_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B5_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B5_VERB') ?></td></tr>
+<tr><td>6</td><td><?= sg_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B6_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B6_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B6_VERB') ?></td></tr>
+<tr><td>7</td><td><?= sg_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B7_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B7_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B7_VERB') ?></td></tr>
 </table>
 <?= sg_t('LOX.S4_ERLAEUTERUNG') ?>
 </div>
@@ -1170,10 +1263,15 @@ $sg_reiter = array(
 
 <!-- ================= Reiter: Test ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span>
+</div>
 <h2><?= sg_e(sg_t('TEST.H_SELBSTTEST')) ?></h2>
 <p class="sm-hilfe"><?= sg_t('TEST.SELBSTTEST_TEXT') ?></p>
 <?php
-$sg_pr = sg_pruefungen();
+$sg_pr = sg_pruefungen($sg_tab === 'tab-test');
 $sg_schlecht = 0;
 foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 ?>
@@ -1190,25 +1288,20 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 
 <h3><?= sg_e(sg_t('TEST.H_TROCKEN')) ?></h3>
 <p class="sm-hilfe"><?= sg_t('TEST.TROCKEN_TEXT') ?></p>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span></div>
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-test">
   <input data-role="none" type="hidden" name="testaktion" value="trocken">
   <div class="sm-feld">
     <label for="trockentext"><?= sg_e(sg_t('TEST.L_TROCKEN')) ?></label>
-    <input data-role="none" type="text" id="trockentext" name="trockentext" value="hilfe">
+    <input data-role="none" type="text" id="trockentext" name="trockentext" value="<?= sg_e($sg_trockentext) ?>">
   </div>
   <div class="sm-knopfreihe">
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_t('TEST.K_TROCKEN')) ?></button>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('TEST.K_TROCKEN')) ?></button>
   </div>
 </form>
 
 <h3><?= sg_e(sg_t('TEST.H_KNOEPFE')) ?></h3>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span>
-</div>
 <div class="sm-knopfreihe">
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;aktion=status" target="_blank"><?= sg_e(sg_t('TEST.K_STATUS')) ?></a>
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;selftest=1" target="_blank"><?= sg_e(sg_t('TEST.K_SELFTEST')) ?></a>
@@ -1221,15 +1314,19 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
   <input data-role="none" type="hidden" name="testaktion" value="<?= sg_dienst_autostart() === 'enabled' ? 'disable' : 'enable' ?>">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sg_e(sg_dienst_autostart() === 'enabled' ? sg_t('TEST.K_AUTOSTART_AUS') : sg_t('TEST.K_AUTOSTART_EIN')) ?></button></form>
 </div>
+<?php /* Bis 0.9.25 ein Link auf rpc_url + /api/v1/check: im Browser heisst
+         127.0.0.1 der PC des Anwenders, der Knopf scheiterte dort immer
+         (Regeln/04), und eine untergeschobene Sicherung konnte hier einen
+         javascript:-Link einsetzen. Jetzt fragt der Server (U19). */ ?>
 <div class="sm-knopfreihe">
-<a data-role="none" class="sm-btn sm-b-technik" href="<?= sg_e($sg_cfg['rpc_url']) ?>/api/v1/check" target="_blank"><?= sg_e(sg_t('TEST.K_CHECK')) ?></a>
+<form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="testaktion" value="check">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('TEST.K_CHECK')) ?></button></form>
 </div>
 
 <h3><?= sg_e(sg_t('TEST.H_SCHALTEN')) ?></h3>
 <div class="sm-warnung"><?= sg_t('TEST.SCHALTEN_TEXT') ?></div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span>
-</div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <?php echo sg_fmt(); ?>
@@ -1258,6 +1355,7 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 
 <!-- ================= Reiter: Logdateien ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <h2><?= sg_e(sg_t('LOG.H_EREIGNIS')) ?></h2>
 <div class="sm-hilfe"><?= sg_t('LOG.EREIGNIS_TEXT') ?></div>
 <?php $sg_ev = array_reverse(sg_ereignisse()); ?>
@@ -1273,7 +1371,6 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
     <td><?= sg_e($sg_x['detail']) ?></td></tr>
 <?php } ?>
 </table>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>
@@ -1295,7 +1392,6 @@ $sg_zeilen = is_file($sg_lf) ? array_slice(file($sg_lf, FILE_IGNORE_NEW_LINES) ?
 <?php } else { ?>
 <div class="sm-pre" style="max-height:480px;"><?= sg_e(implode("\n", $sg_zeilen)) ?></div>
 <?php } ?>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
 <form action="index.php" method="post">
   <?php echo sg_fmt(); ?>

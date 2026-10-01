@@ -8,6 +8,39 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.25
+
+Durchgang mit vier Prüfern (Befunde: `Pruefung-Durchgang-2026-09-29/SignalBot_BEFUNDE_UND_VERBESSERUNGEN.md`, Entscheidungen 1, 8, 16, 19, 26, 27 und 28).
+Gemessen mit Attrappen für signal-cli, Broker und Gateway unter PHP 7.4 und 8.5 sowie im Installer-Prüfstand; nicht am Gerät, nicht mit echtem Signal.
+
+* **Sperr-Adresse bitte neu abschreiben:** Die bisher angezeigte Adresse zum Sperren
+  entsperrte in Wahrheit. Sperren und Entsperren stehen jetzt in getrennten Blöcken.
+* **Berechtigungen fallen nicht mehr offen aus:** Ein Tippfehler in „Wer darf“ machte
+  bisher alle Erlaubten zuständig; eine ungültige zweite Freigabe wurde geleert und
+  der Befehl blieb scharf. Jetzt wird nichts gespeichert und das Feld markiert.
+* **Feste Befehle senden einen Impuls** (`1`, nach 1 s `0`); Zahl-Befehle senden den
+  Wert. Die Antwort heißt „an Loxone übergeben“ statt „erledigt“. Loxone-Eingänge auf
+  Flanke prüfen; wer mit zwei festen Befehlen einen Pegel gebaut hat, nimmt einen
+  Zahl-Befehl.
+* **Status** mit `OK`, `BOT` und `ALTER`; `OK=0` ohne Bot oder ohne Lebenszeichen über
+  180 s. Der Takt läuft nach der Uhr, auch bei Wachhaltezeilen. Ausfallerkennung in
+  Loxone auf `I1-I2` umbauen, Vorlage neu importieren.
+* **Endpunkt:** Ein nicht eingerichtetes Plugin antwortet 503 und legt nichts an.
+  `bild=` nimmt nur noch Bilder aus dem Datenordner.
+* **Speichern:** PRG, bei einer Beanstandung wird nichts gespeichert, die Eingaben
+  kommen markiert zurück, nichts wird still verbogen; F5 nach „Token neu erzeugen“
+  würfelt kein zweites Token. „Einstellungen sichern“ warnt; Zurückspielen prüft
+  jeden Wert, Token als Liste oder leer werden abgewiesen.
+* **Neuinstallation:** Altes Token, PIN und Weissliste einer früheren Installation
+  werden nach `.alt` gelegt statt eingespielt (`.nativ` bleibt). **Update:**
+  Ereignisprotokoll und Warteschlange bleiben erhalten, ein angehaltenes signal-cli
+  bleibt angehalten.
+* **MQTT:** Abodatei, echte Messung im Reiter Test, Spalte „retained“ in der
+  Themenliste, `online` ist reserviert.
+* Reiter Test mit 25 Zeilen, englische Oberfläche ohne feste deutsche Texte, PHP 8.5
+  ohne Verfallsmeldung. Nach dem Update den Reiter Test ansehen: alte Einträge, die
+  jetzt beanstandet werden, dort berichtigen.
+
 ## Neu in 0.9.24
 
 Sammelnachzug vom 30.09.2026, sonst keine Änderung: `curl_close()` wird nur
@@ -289,7 +322,7 @@ php /opt/loxberry/bin/plugins/<ordner>/sg_bot.php; echo "Rueckgabewert: $?"
 
 | Richtung | Weg | Beispiel |
 |---|---|---|
-| Chat &rarr; Loxone | MQTT-Impuls auf ein Thema | `licht aus` &rarr; `signalbot/befehl/licht_aus` = 1 |
+| Chat &rarr; Loxone | MQTT-Impuls auf ein Thema (fester Wert, nach 1 s `0`; ein Zahl-Befehl bleibt stehen) | `licht aus` &rarr; `signalbot/befehl/licht_aus` = 1, nach 1 s 0 |
 | Loxone &rarr; Chat | Token-Endpunkt, den ein virtueller Ausgang aufruft | Alarm ausgeloest &rarr; Nachricht an alle Erlaubten |
 
 ## Die drei Sicherungsschichten
@@ -339,18 +372,27 @@ laeuft daneben.
 2. Erlaubte Absender eintragen, eine Rufnummer je Zeile, international.
 3. PIN vergeben, wenn kritische Befehle geplant sind.
 4. *Befehle* &rarr; Tabelle fuellen: Wort, MQTT-Thema, Stufe.
-5. *MQTT* &rarr; das angezeigte Abo ins MQTT-Gateway eintragen
-   (System &rarr; MQTT Gateway &rarr; Subscriptions). **Ohne diesen Eintrag
-   kommt am Miniserver nichts an** — das ist die haeufigste Fehlerursache.
+5. *MQTT* &rarr; das Abo traegt das Plugin selbst ein
+   (`config/plugins/<ordner>/mqtt_subscriptions.cfg`, auch nach einer
+   Aenderung des Praefixes); das MQTT-Gateway liest die Datei. Der Reiter
+   *Test* schickt bei geoeffnetem Reiter eine Probe ueber den UDP-Eingang und
+   liest sie beim Broker zurueck.
 6. *Einbindung in Loxone* &rarr; virtuelle Eingaenge auf die Themen legen, die
    Melde-Adresse kopieren, wahlweise die XML-Vorlage herunterladen.
 7. *Test* &rarr; Selbstpruefung ansehen, einen Befehl trocken durchspielen.
 
 ## Eingebaute Woerter
 
-`hilfe` listet alle aktiven Befehle, `status` die gemeldeten Zustaende,
-`ja` / `nein` beantworten eine Rueckfrage. Diese Woerter sind nicht
-ueberschreibbar; die Selbstpruefung meldet es, wenn ein Befehl sie belegt.
+`hilfe` (auch `help`, `?`) listet alle aktiven Befehle, `status` / `zustand`
+die gemeldeten Zustaende, `ja` / `nein` / `yes` / `no` / `ok` / `abbrechen` /
+`stop` beantworten eine Rueckfrage, `quittiert` / `quittieren` / `ack`
+quittieren eine dringende Meldung. Diese Woerter sind nicht als Befehl
+belegbar; das Speichern weist sie ab, die Selbstpruefung meldet sie.
+
+Ein fester Befehl sendet einen echten Impuls (Wert, nach einer Sekunde `0`),
+ein Zahl-Befehl die Zahl ohne Rueckstellung. Der Bot antwortet „an Loxone
+uebergeben“: das Paket ist beim UDP-Eingang des MQTT-Gateways abgegeben; ob es
+den Miniserver erreicht, sieht er nicht.
 
 ## Datenschutz
 
@@ -367,11 +409,17 @@ webfrontend/htmlauth/index.php     Bedienoberflaeche, sechs Reiter
 webfrontend/htmlauth/sg_lib.php    Konfiguration, Befehlslogik, RPC, Vorlage
 webfrontend/htmlauth/sg_test.php   Selbstpruefung und Test-Aktionen
 webfrontend/html/index.php         Token-Endpunkt fuer den Miniserver
-preupgrade.sh                      Marke "Aktualisierung laeuft" anlegen
-postinstall.sh                     alten Bot beenden, neuen starten
+preinstall.sh                      Neuinstallation: alte Zweitschrift und
+                                   alten Bestand nach .alt legen
+preupgrade.sh                      Marke "Aktualisierung laeuft" anlegen,
+                                   Bestand (Ereignisse, Warteschlange) und
+                                   fehlende Zweitschrift anlegen
+postinstall.sh                     alten Bot beenden, Bestand zurueck-
+                                   spielen, neuen Bot starten
 postroot.sh                        Java, signal-cli, systemd-Dienst, sudoers,
                                    Marke wieder entfernen
-uninstall/uninstall                Dienst, sudo-Regel, Zweitschrift, Marke
+uninstall/uninstall                Dienst, sudo-Regel, Zweitschrift, .alt,
+                                   Bestand, Marke
 ```
 
 ## Was in 0.9.2 nachgemessen und geaendert wurde

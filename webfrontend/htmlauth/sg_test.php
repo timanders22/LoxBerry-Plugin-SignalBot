@@ -11,7 +11,12 @@ function sg_pruefzeile($stand, $frage, $antwort)
     return array((int) $stand, $frage, $antwort);
 }
 
-function sg_pruefungen()
+/**
+ * Die Selbstpruefung. $mit_netz = true nur, wenn der Reiter Test serverseitig
+ * der offene ist (Regeln/04): dann laufen die beiden Zeilen, die etwas
+ * kosten - der Aufruf des eigenen Endpunkts und die MQTT-Probe.
+ */
+function sg_pruefungen($mit_netz = false)
 {
     $cfg = sg_config();
     $z = array();
@@ -80,9 +85,15 @@ function sg_pruefungen()
         $lebt ? sprintf(sg_t('TEST.A_RPC_OK'), sg_e($cfg['rpc_url']))
               : sprintf(sg_t('TEST.A_RPC_TOT'), sg_e($cfg['rpc_url'])));
 
-    /* ---- Konto ---- */
+    /* ---- Konto ----
+       Ohne Antwort von signal-cli ist nicht feststellbar, ob das Konto
+       verknuepft ist: grau statt Haken (U9). Bis 0.9.25 stand hier ein Haken
+       "Konto ... ist verknuepft", obwohl nichts gemessen war. */
     $konten = $lebt ? sg_konten() : array();
-    if ((string) $cfg['konto'] === '') {
+    if (!$lebt && (string) $cfg['konto'] !== '') {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_KONTO'),
+            sprintf(sg_t('TEST.A_KONTO_UNGEMESSEN'), sg_maske($cfg['konto'])));
+    } elseif ((string) $cfg['konto'] === '') {
         $z[] = sg_pruefzeile(0, sg_t('TEST.F_KONTO'),
             $konten ? sprintf(sg_t('TEST.A_KONTO_NICHT_GEWAEHLT'), sg_e(implode(', ', array_map('sg_maske', $konten))))
                     : sg_t('TEST.A_KONTO_KEINS'));
@@ -95,19 +106,21 @@ function sg_pruefungen()
     }
 
     /* ---- Der Bot selbst ---- */
-    $sperre = sg_tmpdir() . '/bot.lock';
-    $botlaeuft = false;
-    if (is_file($sperre)) {
-        $fh = @fopen($sperre, 'c');
-        if ($fh) {
-            // Laesst sich die Sperre nehmen, laeuft niemand.
-            $botlaeuft = !flock($fh, LOCK_EX | LOCK_NB);
-            if (!$botlaeuft) { flock($fh, LOCK_UN); }
-            fclose($fh);
-        }
-    }
+    $botlaeuft = sg_bot_laeuft();
     $z[] = sg_pruefzeile($botlaeuft ? 1 : 0, sg_t('TEST.F_BOT'),
         $botlaeuft ? sg_t('TEST.A_BOT_LAEUFT') : sg_t('TEST.A_BOT_TOT'));
+    /* Arbeitet er noch? (Pflichtzeile, Entscheidung 4) - ein Prozess kann
+       dastehen und nichts tun. Ueber einen Bot, der nicht laeuft, wird kein
+       Herzschlag beurteilt. */
+    $alter = sg_herz_alter();
+    if (!$botlaeuft) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_HERZ'), sg_t('TEST.A_HERZ_KEIN_BOT'));
+    } elseif ($alter >= 0 && $alter <= SG_HERZ_GRENZE) {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_HERZ'), sprintf(sg_t('TEST.A_HERZ_OK'), $alter, SG_HERZ_GRENZE));
+    } else {
+        $z[] = sg_pruefzeile(0, sg_t('TEST.F_HERZ'), $alter < 0 ? sg_t('TEST.A_HERZ_NIE')
+            : sprintf(sg_t('TEST.A_HERZ_ALT'), $alter, SG_HERZ_GRENZE));
+    }
 
     /* ---- Absicherung: die drei Schichten ---- */
     $n = count($cfg['erlaubt']);
@@ -124,7 +137,10 @@ function sg_pruefungen()
     $z[] = sg_pruefzeile($aktiv > 0 ? 1 : -1, sg_t('TEST.F_BEFEHLE'),
         $aktiv > 0 ? sprintf(sg_t('TEST.A_BEFEHLE_OK'), $aktiv) : sg_t('TEST.A_BEFEHLE_KEINE'));
 
-    if ($mitpin > 0 && (string) $cfg['pin'] === '') {
+    /* sg_pin_gesetzt() kennt beide Formen (U8). Bis 0.9.25 wurde nur der
+       Klartext gefragt, und seit 0.9.12 steht die PIN als Hash da: auf jeder
+       Anlage mit PIN stand hier ein Kreuz. */
+    if ($mitpin > 0 && !sg_pin_gesetzt($cfg)) {
         // Der gefaehrlichste Zustand ueberhaupt: ein Befehl ist als
         // PIN-pflichtig gekennzeichnet, aber es gibt keine PIN.
         $z[] = sg_pruefzeile(0, sg_t('TEST.F_PIN'), sprintf(sg_t('TEST.A_PIN_FEHLT'), $mitpin));
@@ -143,18 +159,20 @@ function sg_pruefungen()
         if (isset($woerter[$b['wort']])) { $doppelt[] = $b['wort']; }
         $woerter[$b['wort']] = 1;
     }
-    // Auch gegen die eingebauten Woerter pruefen.
-    foreach (array('hilfe', 'help', '?', 'status', 'zustand', 'ja', 'nein') as $reserviert) {
-        if (isset($woerter[$reserviert])) { $doppelt[] = $reserviert; }
+    // Auch gegen die eingebauten Woerter pruefen - aus DERSELBEN Liste wie das
+    // Formular (U10; bis 0.9.25 fehlten hier yes, no und ok).
+    foreach (array_keys($woerter) as $w) {
+        if (sg_wort_reserviert($w)) { $doppelt[] = $w; }
     }
     $z[] = sg_pruefzeile($doppelt ? 0 : 1, sg_t('TEST.F_DOPPELT'),
         $doppelt ? sprintf(sg_t('TEST.A_DOPPELT'), sg_e(implode(', ', array_unique($doppelt))))
                  : sg_t('TEST.A_DOPPELT_KEINE'));
 
-    /* ---- MQTT ---- */
+    /* ---- MQTT ----
+       Ausgeschaltet ist eine Entscheidung, kein Fehler: grau (U11, Regeln/04). */
     $m = sg_mqtt_zustand();
     if (empty($cfg['mqtt_ein'])) {
-        $z[] = sg_pruefzeile(0, sg_t('TEST.F_MQTT'), sg_t('TEST.A_MQTT_AUS'));
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_MQTT'), sg_t('TEST.A_MQTT_AUS'));
     } elseif (!$m['gefunden']) {
         $z[] = sg_pruefzeile(0, sg_t('TEST.F_MQTT'), sg_t('TEST.A_MQTT_KEIN_ABSCHNITT'));
     } elseif (!$m['udpport']) {
@@ -164,6 +182,17 @@ function sg_pruefungen()
     } else {
         $z[] = sg_pruefzeile(1, sg_t('TEST.F_MQTT'),
             sprintf(sg_t('TEST.A_MQTT_OK'), (int) $m['udpport'], sg_e($cfg['mqtt_topic'])));
+    }
+    /* Kommt eine Probe wirklich beim Broker an? (M7) Bis 0.9.25 wurde die
+       Zeile oben gruen, sobald die general.json passte - gesendet oder
+       empfangen wurde nichts. Gemessen wird nur bei offenem Reiter Test. */
+    if (!empty($cfg['mqtt_ein']) && $m['udpport']) {
+        if (!$mit_netz) {
+            $z[] = sg_pruefzeile(-1, sg_t('TEST.F_MQTT_PROBE'), sg_t('TEST.A_MQTT_PROBE_SPAETER'));
+        } else {
+            list($st, $tx) = sg_mqtt_probe($cfg);
+            $z[] = sg_pruefzeile($st, sg_t('TEST.F_MQTT_PROBE'), $tx);
+        }
     }
 
     /* ---- Token ---- */
@@ -244,9 +273,154 @@ function sg_pruefungen()
         $z[] = sg_pruefzeile($passt ? 1 : 0, sg_t('TEST.F_REITER'),
             sprintf(sg_t($passt ? 'TEST.A_REITER_OK' : 'TEST.A_REITER_FEHL'),
                 count($leiste), count($flaechen), count($liste)));
+
+        /* Setzt der Server sm-active? (Pflichtzeile) Gezaehlt wird, wie oft
+           Leiste und Bereiche den Vergleich mit $sg_tab tragen. */
+        $n_leiste = preg_match_all('/class="sm-tab<\?= \$sg_tab === \'tab-[a-z0-9]+\' \? \' sm-active\'/', $eigen);
+        $n_seite = preg_match_all('/class="sm-seite<\?= \$sg_tab === \'tab-[a-z0-9]+\' \? \' sm-active\'/', $eigen);
+        $gut = count($leiste) > 0 && $n_leiste === count($leiste) && $n_seite === count($leiste);
+        $z[] = sg_pruefzeile($gut ? 1 : 0, sg_t('TEST.F_AKTIV'),
+            sprintf(sg_t($gut ? 'TEST.A_AKTIV_OK' : 'TEST.A_AKTIV_FEHL'), $n_leiste, $n_seite, count($leiste)));
+
+        /* Tragen alle Formulare das Merkmal? (Pflichtzeile) Gezaehlt in der
+           eigenen Datei: jedes POST-Formular und jedes sg_fmt(). */
+        // (?:form) statt des Wortes am Stueck: sonst zaehlt hausstandard_pruefen
+        // dieses Suchmuster selbst als Formular.
+        $n_form = preg_match_all('/<(?:form) [^>]*method="post"/', $eigen);
+        $n_fmt = preg_match_all('/<\?php echo sg_fmt\(\); \?>/', $eigen);
+        $gut = $n_form > 0 && $n_form === $n_fmt;
+        $z[] = sg_pruefzeile($gut ? 1 : 0, sg_t('TEST.F_MERKMAL'),
+            sprintf(sg_t($gut ? 'TEST.A_MERKMAL_OK' : 'TEST.A_MERKMAL_FEHL'), $n_fmt, $n_form));
+    }
+
+    /* ---- Ist die Konfiguration heil? (Pflichtzeile) ---- */
+    $lage = sg_config_lage();
+    $geheilt = sg_config_geheilt();
+    if ($lage === 'ok' && $geheilt > 0 && time() - $geheilt < 86400) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_CONFIG'),
+            sprintf(sg_t('TEST.A_CONFIG_ZWEITSCHRIFT'), sg_e(date('d.m.Y H:i', $geheilt))));
+    } elseif ($lage === 'ok') {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_CONFIG'), sg_t('TEST.A_CONFIG_OK'));
+    } else {
+        $z[] = sg_pruefzeile(0, sg_t('TEST.F_CONFIG'), sg_t('TEST.A_CONFIG_' . strtoupper($lage)));
+    }
+
+    /* ---- Stimmt die Themenliste mit dem Sendecode ueberein? (Pflichtzeile)
+       Die Themenliste im Reiter MQTT kommt aus sg_mqtt_themen(); gesendet wird
+       ueber sg_mqtt_thema_voll(). Verglichen werden die Themen jedes
+       eingeschalteten Befehls. */
+    $liste_t = array();
+    foreach (sg_mqtt_themen($cfg) as $th) {
+        if ($th['art'] === 'fest' || $th['art'] === 'zahl') { $liste_t[] = $th['thema']; }
+    }
+    $sende_t = array();
+    foreach ($cfg['befehle'] as $b) {
+        if (!empty($b['aktiv']) && $b['wort'] !== '' && $b['thema'] !== '') { $sende_t[] = sg_mqtt_thema_voll($cfg, $b['thema']); }
+    }
+    if (!$sende_t) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_THEMEN'), sg_t('TEST.A_THEMEN_LEER'));
+    } else {
+        $gut = $liste_t === $sende_t;
+        $z[] = sg_pruefzeile($gut ? 1 : 0, sg_t('TEST.F_THEMEN'),
+            sprintf(sg_t($gut ? 'TEST.A_THEMEN_OK' : 'TEST.A_THEMEN_FEHL'), count($liste_t), count($sende_t)));
+    }
+
+    /* ---- Antwortet der eigene Endpunkt? (Pflichtzeile, drei Ausgaenge) ----
+       Ein echter Aufruf ueber 127.0.0.1 - nur dieser findet getrennte Baeume
+       (html/ und htmlauth/) und einen Endpunkt, der mit 500 antwortet. Er
+       schaltet nichts (selftest). Nur bei offenem Reiter Test. */
+    if (!$mit_netz) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_SPAETER'));
+    } else {
+        $p = sg_paths();
+        $url = 'http://127.0.0.1/plugins/' . rawurlencode($p['plugin']) . '/index.php?selftest=1&token='
+             . rawurlencode((string) $cfg['aktionstoken']);
+        $ctx = stream_context_create(array('http' => array('timeout' => 3, 'ignore_errors' => true)));
+        list($t, $code) = ini_get('allow_url_fopen') ? sg_http_abruf($url, $ctx) : array(false, 0);
+        if ($t === false || $code === 0) {
+            $z[] = sg_pruefzeile(-1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_KEINE'));
+        } elseif ($code === 200 && strpos((string) $t, 'SELFTEST;OK=1') === 0) {
+            $z[] = sg_pruefzeile(1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_OK'));
+        } else {
+            $z[] = sg_pruefzeile(0, sg_t('TEST.F_ENDPUNKT'),
+                sprintf(sg_t('TEST.A_ENDPUNKT_FEHL'), $code, sg_e(sg_kuerzen(trim((string) $t), 60))));
+        }
     }
 
     return $z;
+}
+
+/** Der Broker des LoxBerry aus der general.json (nur gelesen, nie ausgegeben). */
+function sg_broker()
+{
+    $p = sg_paths();
+    $leer = array('host' => '', 'port' => 0, 'user' => '', 'pass' => '');
+    if ($p['home'] === '') { return $leer; }
+    $gen = @json_decode((string) @file_get_contents($p['home'] . '/config/system/general.json'), true);
+    if (!is_array($gen)) { return $leer; }
+    $m = isset($gen['Mqtt']) && is_array($gen['Mqtt']) ? $gen['Mqtt']
+       : (isset($gen['mqtt']) && is_array($gen['mqtt']) ? $gen['mqtt'] : array());
+    $hol = function ($a, $b) use ($m) {
+        if (isset($m[$a]) && is_scalar($m[$a])) { return (string) $m[$a]; }
+        return (isset($m[$b]) && is_scalar($m[$b])) ? (string) $m[$b] : '';
+    };
+    $host = $hol('Brokerhost', 'brokerhost');
+    $port = (int) $hol('Brokerport', 'brokerport');
+    return array('host' => $host !== '' ? $host : 'localhost', 'port' => $port > 0 ? $port : 1883,
+                 'user' => $hol('Brokeruser', 'brokeruser'), 'pass' => $hol('Brokerpass', 'brokerpass'));
+}
+
+/**
+ * Die MQTT-Probe (M7): mosquitto_sub hoert auf <praefix>/selbsttest, dann geht
+ * ueber den UDP-Eingang "publish <praefix>/selbsttest <Zufallswort>" hinaus
+ * (fluechtig). Haken nur, wenn genau dieses Wort beim Broker ankommt.
+ * Was die Probe NICHT zeigt, sagt der Text: ob ein einzelner Befehl ankommt
+ * (der UDP-Eingang verwirft unter Last ohne Rueckmeldung) und ob das Abo des
+ * Gateways V1 zum Miniserver traegt.
+ * Rueckgabe: array(Stand 1/0/-1, Text).
+ */
+function sg_mqtt_probe($cfg)
+{
+    $m = sg_mqtt_zustand();
+    /* Im Suchpfad gesucht, ohne Schale: eine Umleitung nach /dev/null waere
+       auf einem Pruefrechner ohne /dev/null selbst eine Datei. */
+    $sub = '';
+    foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $sg_d) {
+        if ($sg_d !== '' && is_file($sg_d . '/mosquitto_sub') && is_executable($sg_d . '/mosquitto_sub')) {
+            $sub = $sg_d . '/mosquitto_sub';
+            break;
+        }
+    }
+    if ($sub === '' || !function_exists('proc_open')) {
+        return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE'));
+    }
+    $b = sg_broker();
+    if ($b['host'] === '') { return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE')); }
+    $thema = sg_mqtt_thema_voll($cfg, 'selbsttest');
+    $wort = sg_token(16);
+    $argv = array($sub, '-h', $b['host'], '-p', (string) $b['port'], '-t', $thema, '-C', '1', '-W', '4');
+    if ($b['user'] !== '') { $argv[] = '-u'; $argv[] = $b['user']; }
+    if ($b['pass'] !== '') { $argv[] = '-P'; $argv[] = $b['pass']; }
+    $ph = @proc_open(implode(' ', array_map('escapeshellarg', $argv)),
+                     array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $rohre);
+    if (!is_resource($ph)) { return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE')); }
+    usleep(700000);
+    $gesendet = sg_udp_senden($m['udpport'], 'publish ' . $thema . ' ' . $wort);
+    $aus = (string) stream_get_contents($rohre[1]);
+    $fehler = (string) stream_get_contents($rohre[2]);
+    fclose($rohre[1]);
+    fclose($rohre[2]);
+    $rc = proc_close($ph);
+    if (strpos($aus, $wort) !== false) {
+        return array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK'), sg_e($thema)));
+    }
+    if (!$gesendet) {
+        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_UDP'), (int) $m['udpport']));
+    }
+    if ($rc === 27 || trim($fehler) === '') {
+        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_NICHT'), sg_e($thema), (int) $m['udpport']));
+    }
+    return array(-1, sprintf(sg_t('TEST.A_MQTT_PROBE_BROKER'), sg_e(sg_kuerzen(trim($fehler), 80))));
 }
 
 /**
@@ -331,11 +505,22 @@ function sg_test_aktion($was, $zusatz = '')
             // die Unit ueberspringt ihn aber wegen ihrer Startbedingung. Das
             // hier zu sagen, statt "ausgefuehrt" zu melden, ist die Wirkung.
             if (($was === 'start' || $was === 'restart') && sg_nativ_fehlt()) {
-                return array(0, sprintf(sg_t('TEST.M_DIENST_NATIV'), $was, sg_e(sg_nativ_ordner())));
+                return array(0, sprintf(sg_t('TEST.M_DIENST_NATIV'), sg_e(sg_nativ_ordner())));
             }
             list($ok, $text) = sg_dienst($was);
-            return array($ok, $ok ? sprintf(sg_t('TEST.M_DIENST_OK'), $was)
-                                  : sprintf(sg_t('TEST.M_DIENST_FEHL'), $was, sg_e($text)));
+            /* Je Vorgang ein eigener Satz (U13): bis 0.9.25 stand
+               "Dienst enable fehlgeschlagen" - ein englisches Verb aus %s
+               im deutschen Satz (Regeln/04). */
+            $sg_k = strtoupper($was);
+            return array($ok, $ok ? sg_t('TEST.M_DIENST_OK_' . $sg_k)
+                                  : sprintf(sg_t('TEST.M_DIENST_FEHL_' . $sg_k), sg_e($text)));
+
+        case 'check':
+            /* Lebenszeichen von signal-cli - vom SERVER gefragt (U19). */
+            list($lebt, $code) = sg_daemon_pruefen();
+            return array($lebt ? 1 : 0, $lebt ? sprintf(sg_t('TEST.M_CHECK_OK'), sg_e($cfg['rpc_url']), $code)
+                : ($code > 0 ? sprintf(sg_t('TEST.M_CHECK_CODE'), sg_e($cfg['rpc_url']), $code)
+                             : sprintf(sg_t('TEST.M_CHECK_KEINE'), sg_e($cfg['rpc_url']))));
 
         case 'probe':
             // Eine Nachricht an den ersten erlaubten Empfaenger.
@@ -359,9 +544,10 @@ function sg_test_aktion($was, $zusatz = '')
             return sg_nativ_holen();
 
         case 'token':
-            $neu = sg_config();
-            $neu['aktionstoken'] = sg_token();
-            if (sg_config_write($neu)) {
+            /* Unter der Konfigurationssperre (C9). F5 wiederholt das nicht
+               mehr: der Handler leitet um (U2). */
+            list($sg_ok, ) = sg_config_aendern(function ($c) { $c['aktionstoken'] = sg_token(); return $c; });
+            if ($sg_ok) {
                 sg_log('Zugriffstoken neu erzeugt');
                 return array(1, sg_t('TEST.M_TOKEN_OK'));
             }

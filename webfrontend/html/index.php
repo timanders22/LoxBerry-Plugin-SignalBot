@@ -87,11 +87,31 @@ function sg_ende($code, $text)
     exit;
 }
 
-$cfg = sg_config();
+/** Ein Parameter als Zeichenkette - eine Liste (name[]=x) zaehlt als fehlend. */
+function sg_par($k)
+{
+    return (isset($_GET[$k]) && is_string($_GET[$k])) ? $_GET[$k] : '';
+}
+
+$sg_selftest = isset($_GET['selftest']) && sg_par('selftest') !== '0';
+
+/* ---------------- Nichts anlegen (C4) ----------------
+ *
+ * Der unangemeldete Endpunkt legt nichts an und wuerfelt nichts. Bis 0.9.25
+ * rief er sg_config() VOR der Token-Pruefung: auf einem LoxBerry ohne
+ * Konfiguration (Neuinstallation, Upgrade-Luecke) legte schon ein Abruf mit
+ * FALSCHEM Token Konfiguration und Zweitschrift an, und ein kaputtes Token
+ * wurde neu gewuerfelt und geschrieben (gemessen). Jetzt: ohne lesbare
+ * Konfiguration mit gueltigem Token 503, und gelesen wird ohne Schreiben. */
+if (sg_config_lage() !== 'ok') {
+    if ($sg_selftest) { sg_ende(503, 'SELFTEST;OK=0;ERR=NICHT_EINGERICHTET'); }
+    sg_ende(503, 'SIGNAL;OK=0;GRUND=NICHT_EINGERICHTET');
+}
+$cfg = sg_config(false);
 
 /* ---------------- Token ---------------- */
 $soll = (string) $cfg['aktionstoken'];
-$ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
+$ist  = sg_par('token');
 
 /* Ein Token muss sich pruefen lassen, ohne dass etwas passiert.
  *
@@ -104,8 +124,6 @@ $ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
  *     richtiges Token:  SELFTEST;OK=1;TOKEN=OK
  *     falsches Token:   HTTP 403, SELFTEST;OK=0;ERR=TOKEN
  */
-$sg_selftest = isset($_GET['selftest']) && (string) $_GET['selftest'] !== '0';
-
 if ($soll === '' || !hash_equals($soll, $ist)) {
     if ($sg_selftest) { sg_ende(403, 'SELFTEST;OK=0;ERR=TOKEN'); }
     sg_ende(403, 'SIGNAL;OK=0;GRUND=TOKEN');
@@ -115,17 +133,26 @@ if ($sg_selftest) {
 }
 
 $erlaubte_aktionen = array('senden', 'zustand', 'status', 'sperren', 'entsperren');
-$aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
+$aktion = isset($_GET['aktion']) ? sg_par('aktion') : 'status';
 if (!in_array($aktion, $erlaubte_aktionen, true)) {
     sg_ende(400, "SIGNAL;OK=0;GRUND=UNBEKANNTE_AKTION\n"
                  . 'Erlaubt: ' . implode(', ', $erlaubte_aktionen));
 }
 
-/* ---------------- status ---------------- */
+/* ---------------- status ----------------
+ *
+ * OK heisst seit dem Durchgang 01.10.2026: signal-cli antwortet UND der Bot
+ * hat hoechstens vor SG_HERZ_GRENZE (180) Sekunden ein Lebenszeichen
+ * abgelegt (Entscheidung 4: dreimal der 60-s-Takt). BOT sagt, ob ein Bot die
+ * Sperre haelt, ALTER das Alter des Lebenszeichens (-1 = keines). Bis 0.9.25
+ * stand OK=1, sobald signal-cli auf /check antwortete - auch ohne Bot, also
+ * ohne dass ein einziger Befehl ankam (gemessen). */
 if ($aktion === 'status') {
     $z = sg_zustaende();
-    printf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d;GESPERRT=%d;OFFEN=%d;LETZTER=%d;ABGEWIESEN=%d;PINFEHL=%d\n",
-        sg_daemon_lebt() ? 1 : 0,
+    $sg_alter = sg_herz_alter();
+    $sg_frisch = $sg_alter >= 0 && $sg_alter <= SG_HERZ_GRENZE;
+    printf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d;GESPERRT=%d;OFFEN=%d;LETZTER=%d;ABGEWIESEN=%d;PINFEHL=%d;BOT=%d;ALTER=%d\n",
+        (sg_daemon_lebt() && $sg_frisch) ? 1 : 0,
         sg_dienst_laeuft() ? 1 : 0,
         (string) $cfg['konto'] !== '' ? 1 : 0,
         count($cfg['erlaubt']),
@@ -135,7 +162,9 @@ if ($aktion === 'status') {
         sg_offene_meldungen(),
         sg_letzter_befehl(),
         sg_zaehle_ereignisse('abgewiesen'),
-        sg_zaehle_ereignisse('PIN falsch'));
+        sg_zaehle_ereignisse('PIN falsch'),
+        sg_bot_laeuft() ? 1 : 0,
+        $sg_alter);
     exit;
 }
 
@@ -146,11 +175,20 @@ if ($aktion === 'status') {
  * oder ein Baustein im Miniserver. */
 if ($aktion === 'sperren' || $aktion === 'entsperren') {
     $neu = $aktion === 'sperren' ? 1 : 0;
-    if ((int) $cfg['gesperrt'] !== $neu) {
-        $cfg['gesperrt'] = $neu;
-        if (!sg_config_write($cfg)) {
-            sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
-        }
+    /* Unter der Konfigurationssperre, mit frischem Lesen (C9): bis 0.9.25
+     * konnte ein gleichzeitiges Speichern in der Oberflaeche die Sperre still
+     * zuruecknehmen. */
+    $sg_geaendert = false;
+    list($sg_ok, ) = sg_config_aendern(function ($c) use ($neu, &$sg_geaendert) {
+        if ((int) $c['gesperrt'] === $neu) { return null; }
+        $c['gesperrt'] = $neu;
+        $sg_geaendert = true;
+        return $c;
+    });
+    if (!$sg_ok) {
+        sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
+    }
+    if ($sg_geaendert) {
         sg_log($neu ? 'Bot ueber den Endpunkt GESPERRT.' : 'Bot ueber den Endpunkt entsperrt.');
         sg_ereignis_merken('Loxone', $neu ? 'gesperrt' : 'entsperrt', '');
     }
@@ -163,25 +201,31 @@ if ($aktion === 'zustand') {
     if (empty($cfg['zustand_ein'])) {
         sg_ende(403, 'SIGNAL;OK=0;GRUND=ZUSTAENDE_AUS');
     }
-    $name = isset($_GET['name']) ? (string) $_GET['name'] : '';
-    $wert = isset($_GET['wert']) ? (string) $_GET['wert'] : '';
-    // Name hart auf harmlose Zeichen begrenzen - er landet im Dateinamen
-    // nicht, aber im Chat, und ein Zeilenumbruch dort waere unschoen.
-    $name = preg_replace('/[^A-Za-z0-9_\-]/', '', $name);
+    $name = trim(sg_par('name'));
+    $wert = sg_par('wert');
     $wert = trim(preg_replace('/[\x00-\x1F\x7F]/', '', $wert));
     if ($name === '' || $wert === '') {
         sg_ende(400, 'SIGNAL;OK=0;GRUND=NAME_ODER_WERT_FEHLT');
     }
-    if (sg_laenge($wert) > 120) { $wert = sg_kuerzen($wert, 120); }
+    /* Der Name wird geprueft, nicht gesaeubert (C11, Nr. 19): bis 0.9.25 wurde
+     * aus "alarm anlage" still "alarmanlage" - ein Zustand, den "status alarm
+     * anlage" nie fand. */
+    if (!preg_match('/^[A-Za-z0-9_\-]{1,40}$/', $name)) {
+        sg_ende(400, 'SIGNAL;OK=0;GRUND=NAME_UNGUELTIG');
+    }
+    /* Ein zu langer Wert wird gekuerzt gespeichert, aber das wird GEMELDET
+     * (GEKUERZT=1) - bis 0.9.25 antwortete der Endpunkt OK=1 ohne Hinweis. */
+    $sg_gekuerzt = 0;
+    if (sg_laenge($wert) > 120) { $wert = sg_kuerzen($wert, 120); $sg_gekuerzt = 1; }
     if (!sg_zustand_setzen($name, $wert)) {
         sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
     }
-    printf("SIGNAL;OK=1;AKTION=zustand;NAME=%s\n", $name);
+    printf("SIGNAL;OK=1;AKTION=zustand;NAME=%s%s\n", $name, $sg_gekuerzt ? ';GEKUERZT=1' : '');
     exit;
 }
 
 /* ---------------- senden ---------------- */
-$text = isset($_GET['text']) ? (string) $_GET['text'] : '';
+$text = sg_par('text');
 // Steuerzeichen raus, Zeilenumbruch als \n zugelassen: Loxone kann keinen
 // echten Umbruch in eine URL schreiben.
 $text = str_replace('\n', "\n", $text);
@@ -190,7 +234,9 @@ $text = trim($text);
 if ($text === '') {
     sg_ende(400, 'SIGNAL;OK=0;GRUND=TEXT_FEHLT');
 }
-if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); }
+/* Gekuerzt wird weiter (eine Alarmmeldung soll hinausgehen), aber gemeldet (C11). */
+$sg_gekuerzt = 0;
+if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); $sg_gekuerzt = 1; }
 
 /* Ein gesetztes, aber unbrauchbares &an= wird ABGEWIESEN.
  *
@@ -202,7 +248,7 @@ if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); }
  *
  * Ein LEERES &an= bleibt der ausdrueckliche Rundruf - dieser Fall steht so
  * in der Anleitung und in bestehenden Projektdateien. */
-$sg_an_roh = isset($_GET['an']) ? trim((string) $_GET['an']) : '';
+$sg_an_roh = isset($_GET['an']) ? (is_string($_GET['an']) ? trim($_GET['an']) : 'ungueltig') : '';
 $an = preg_replace('/[^0-9+]/', '', $sg_an_roh);
 if ($sg_an_roh !== '' && !preg_match('/^\+[0-9]{6,20}$/', $an)) {
     sg_log('Senden abgewiesen: "' . sg_maske($sg_an_roh) . '" ist keine gueltige Rufnummer');
@@ -226,22 +272,23 @@ if (!$ziele) {
 
 /* Dringend? Dann geht die Meldung durch die Nachtruhe hindurch und wird
  * wiederholt, bis jemand "quittiert" schreibt. */
-$dringend = isset($_GET['dringend']) && (string) $_GET['dringend'] !== '0' ? 1 : 0;
+$dringend = isset($_GET['dringend']) && sg_par('dringend') !== '0' ? 1 : 0;
 
-/* Ein Anhang - etwa der Kamerabild-Schnappschuss zum Alarm. Nur Pfade
- * unterhalb der Datenordner des Plugins und der ueblichen Ablagen sind
- * zugelassen; ein Endpunkt im unangemeldeten Bereich darf nicht zum
- * Dateibetrachter fuer das ganze Geraet werden. */
+/* Ein Anhang - etwa der Kamerabild-Schnappschuss zum Alarm.
+ *
+ * Seit dem Durchgang 01.10.2026 (C5) NUR ein Bild im eigenen Datenordner
+ * (data/plugins/<ordner>/, auch in Unterordnern), verglichen MIT Trenner,
+ * und nur mit Bildendung. Bis 0.9.25 hiess "darunter" ein Praefixvergleich
+ * ohne Trenner: data/plugins/<ordner>.nativ/... ging als Anhang hinaus,
+ * ebenso das Merkwort des Formularwaechters und jede Datei unter /tmp und
+ * /var/tmp (gemessen). */
 $anhang = '';
-if (isset($_GET['bild']) && (string) $_GET['bild'] !== '') {
-    $roh = (string) $_GET['bild'];
-    $echt = realpath($roh);
-    $erlaubte_orte = array(realpath(sg_datadir()), realpath('/tmp'), realpath('/var/tmp'));
-    $drin = false;
-    foreach ($erlaubte_orte as $ort) {
-        if ($ort && $echt && strpos($echt, $ort) === 0) { $drin = true; break; }
-    }
-    if (!$echt || !$drin || !is_file($echt)) {
+if (isset($_GET['bild']) && sg_par('bild') !== '') {
+    $echt = realpath(sg_par('bild'));
+    $ort = realpath(sg_datadir());
+    $drin = $ort && $echt && strpos($echt, rtrim($ort, '/\\') . DIRECTORY_SEPARATOR) === 0;
+    $bild = $echt && preg_match('/\.(jpe?g|png|gif|webp)$/i', $echt);
+    if (!$drin || !$bild || !is_file($echt)) {
         sg_ende(400, 'SIGNAL;OK=0;GRUND=ANHANG_UNZULAESSIG');
     }
     $anhang = $echt;
@@ -264,4 +311,4 @@ sg_log('Meldung aus Loxone an ' . $ok . ' von ' . count($ziele) . ' Empfaenger'
 if ($ok === 0) {
     sg_ende(502, 'SIGNAL;OK=0;GRUND=SENDEN_FEHLGESCHLAGEN');
 }
-printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d\n", $ok, $dringend);
+printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s\n", $ok, $dringend, $sg_gekuerzt ? ';GEKUERZT=1' : '');
