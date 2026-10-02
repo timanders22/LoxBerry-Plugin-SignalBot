@@ -1615,6 +1615,312 @@ function sg_udp_senden($port, $msg)
 }
 
 /* ==================================================================
+ * Befehle direkt an den Broker, mit Bestaetigung (SignalBot-q1)
+ *
+ * Bis 0.9.26 ging jeder Befehl an den UDP-Eingang des MQTT-Gateways. Ein
+ * UDP-Paket hat keine Quittung: der Eingang verwirft unter Last Pakete, ohne
+ * dass der Absender etwas merkt (Regeln/07, am Geraet 17-70 %). Der Bot
+ * antwortete deshalb nur "an Loxone uebergeben" (Entscheidung 28).
+ *
+ * Jetzt spricht der Bot fuer einen Befehl selbst MQTT 3.1.1 mit dem Broker
+ * des LoxBerry: Anmeldung mit Brokeruser/Brokerpass aus der general.json
+ * (Regeln/07, Abschnitt 2), PUBLISH mit QoS 1 und retain 0 (Befehle sind
+ * Impulse, Entscheidung 3), und erst das PUBACK des Brokers gilt als
+ * Bestaetigung. Abonniert hat das Thema das MQTT-Gateway (Abodatei
+ * <praefix>/#, Gateway V2 von selbst) - es reicht den Befehl genauso an den
+ * Miniserver weiter wie einen, der ueber seinen UDP-Eingang kam.
+ *
+ * Rueckfall auf den UDP-Eingang NUR, wenn nachweislich nichts beim Broker
+ * angekommen sein kann: keine Verbindung, Anmeldung abgewiesen (CONNACK
+ * ungleich 0) oder keine Antwort auf CONNECT, PUBLISH nicht vollstaendig
+ * geschrieben. Jeder Rueckfall steht im Protokoll. Fehlt dagegen nur das
+ * PUBACK, kann der Befehl beim Broker sein; ein zweites Senden koennte ihn
+ * doppelt ausloesen. Dann wird nichts nachgeschickt, und der Bot sagt, dass
+ * er es nicht weiss.
+ *
+ * Das Kennwort steht nur im CONNECT-Paket - nie in einem Protokoll, einer
+ * Ausgabe oder auf einer Kommandozeile.
+ * ================================================================== */
+
+/** Sekunden je Antwort des Brokers (CONNACK, PUBACK) und fuer den Verbindungsaufbau. */
+define('SG_BROKER_FRIST', 3);
+
+/** Der Broker des LoxBerry aus config/system/general.json (nur gelesen). */
+function sg_broker_zugang()
+{
+    $leer = array('host' => '', 'port' => 0, 'user' => '', 'pass' => '', 'ziel' => '');
+    $p = sg_paths();
+    if ($p['home'] === '') { return $leer; }
+    $gen = @json_decode((string) @file_get_contents($p['home'] . '/config/system/general.json'), true);
+    if (!is_array($gen)) { return $leer; }
+    $m = isset($gen['Mqtt']) && is_array($gen['Mqtt']) ? $gen['Mqtt']
+       : (isset($gen['mqtt']) && is_array($gen['mqtt']) ? $gen['mqtt'] : null);
+    if ($m === null) { return $leer; }
+    $hol = function ($a, $b) use ($m) {
+        if (isset($m[$a]) && is_scalar($m[$a])) { return trim((string) $m[$a]); }
+        return (isset($m[$b]) && is_scalar($m[$b])) ? trim((string) $m[$b]) : '';
+    };
+    $host = $hol('Brokerhost', 'brokerhost');
+    if ($host === '' || $host === 'localhost') { $host = '127.0.0.1'; }
+    if (!preg_match('/^[A-Za-z0-9.\-]{1,253}$/', $host)) { return $leer; }
+    $port = $hol('Brokerport', 'brokerport');
+    $port = preg_match('/^[0-9]{1,5}$/', $port) ? (int) $port : 1883;
+    if ($port < 1 || $port > 65535) { $port = 1883; }
+    return array('host' => $host, 'port' => $port, 'user' => $hol('Brokeruser', 'brokeruser'),
+                 'pass' => $hol('Brokerpass', 'brokerpass'), 'ziel' => $host . ':' . $port);
+}
+
+/** Ein MQTT-Paket lesen: array(Kopfbyte, Rumpf) oder null (Frist abgelaufen, Verbindung zu). */
+function sg_broker_paket($s)
+{
+    $lies = function ($n) use ($s) {
+        $d = '';
+        while (strlen($d) < $n) {
+            $t = @fread($s, $n - strlen($d));
+            if ($t === false || $t === '') {
+                $meta = stream_get_meta_data($s);
+                if (!empty($meta['timed_out']) || !empty($meta['eof']) || feof($s)) { return null; }
+                continue;
+            }
+            $d .= $t;
+        }
+        return $d;
+    };
+    $k = $lies(1);
+    if ($k === null) { return null; }
+    $n = 0; $mult = 1;
+    for ($i = 0; $i < 4; $i++) {
+        $b = $lies(1);
+        if ($b === null) { return null; }
+        $n += (ord($b) & 127) * $mult;
+        $mult *= 128;
+        if (!(ord($b) & 128)) { break; }
+    }
+    $r = ($n > 0) ? $lies($n) : '';
+    return ($r === null) ? null : array(ord($k), $r);
+}
+
+/** Restlaenge nach MQTT 3.1.1, Abschnitt 2.2.3. */
+function sg_broker_laenge($n)
+{
+    $o = '';
+    do {
+        $b = $n % 128;
+        $n = intdiv($n, 128);
+        if ($n > 0) { $b |= 128; }
+        $o .= chr($b);
+    } while ($n > 0);
+    return $o;
+}
+
+/** Ein Paket VOLLSTAENDIG schreiben - eine teilweise geschriebene Folge ist kein Erfolg. */
+function sg_broker_schreiben($s, $paket)
+{
+    $n = @fwrite($s, $paket);
+    return $n !== false && $n === strlen($paket);
+}
+
+/**
+ * Verbinden und anmelden. Rueckgabe: array('s' => Verbindung oder null,
+ * 'grund' => Klartext fuers Protokoll, warum nicht, 'code' => Kennung fuer
+ * die Oberflaeche (kein_broker, verbindung, connect, antwort, connack),
+ * 'detail' => Fehlertext bzw. CONNACK-Code, 'anmeldung' => 1, wenn ein
+ * Benutzer mitging, 'ziel' => host:port).
+ */
+function sg_broker_verbinden()
+{
+    $z = sg_broker_zugang();
+    $aus = array('s' => null, 'grund' => '', 'code' => '', 'detail' => '',
+                 'anmeldung' => $z['user'] !== '' ? 1 : 0, 'ziel' => $z['ziel']);
+    if ($z['host'] === '') {
+        $aus['grund'] = 'in der general.json steht kein MQTT-Abschnitt mit Broker';
+        $aus['code'] = 'kein_broker';
+        return $aus;
+    }
+    /* Ohne stream_socket_client (disable_functions) gaebe es unter PHP 8 einen
+       fatalen Fehler statt eines Rueckfalls. */
+    if (!function_exists('stream_socket_client')) {
+        $aus['detail'] = 'stream_socket_client fehlt';
+        $aus['grund'] = 'keine Verbindung (' . $aus['detail'] . ')';
+        $aus['code'] = 'verbindung';
+        return $aus;
+    }
+    $errno = 0; $errstr = '';
+    $s = @stream_socket_client('tcp://' . $z['host'] . ':' . $z['port'], $errno, $errstr, SG_BROKER_FRIST);
+    if (!$s) {
+        $aus['detail'] = sg_kuerzen(sg_mqtt_wert_saeubern($errstr !== '' ? $errstr : 'errno ' . $errno), 120);
+        $aus['grund'] = 'keine Verbindung (' . $aus['detail'] . ')';
+        $aus['code'] = 'verbindung';
+        return $aus;
+    }
+    stream_set_timeout($s, SG_BROKER_FRIST);
+    $zk = function ($t) { return pack('n', strlen($t)) . $t; };
+    $flags = 0x02;                                  // saubere Sitzung
+    $nutz = $zk('sgbot' . getmypid() . 'q' . mt_rand(100, 999));
+    if ($z['user'] !== '') {
+        $flags |= 0x80;
+        // Ein Kennwort ohne Benutzer laesst MQTT 3.1.1 nicht zu.
+        if ($z['pass'] !== '') { $flags |= 0x40; }
+        $nutz .= $zk($z['user']);
+        if ($z['pass'] !== '') { $nutz .= $zk($z['pass']); }
+    }
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 30);
+    if (!sg_broker_schreiben($s, chr(0x10) . sg_broker_laenge(strlen($kopf . $nutz)) . $kopf . $nutz)) {
+        fclose($s);
+        $aus['grund'] = 'CONNECT liess sich nicht senden';
+        $aus['code'] = 'connect';
+        return $aus;
+    }
+    $ack = sg_broker_paket($s);
+    if ($ack === null || ($ack[0] >> 4) !== 2 || strlen($ack[1]) < 2) {
+        fclose($s);
+        $aus['grund'] = 'der Broker hat auf CONNECT nicht in ' . SG_BROKER_FRIST . ' s geantwortet';
+        $aus['code'] = 'antwort';
+        return $aus;
+    }
+    $cn = ord($ack[1][1]);
+    if ($cn !== 0) {
+        fclose($s);
+        $aus['code'] = 'connack';
+        $aus['detail'] = (string) $cn;
+        /* Rueckgabecodes nach MQTT 3.1.1, Abschnitt 3.2.2.3. */
+        $ct = array(1 => 'Protokollfassung abgelehnt', 2 => 'Client-Kennung abgelehnt',
+                    3 => 'Broker nicht verfuegbar', 4 => 'Benutzername oder Kennwort falsch',
+                    5 => 'nicht autorisiert');
+        $aus['grund'] = 'CONNACK ' . $cn . ' (' . (isset($ct[$cn]) ? $ct[$cn] : 'unbekannter Code') . ')'
+                      . ($z['user'] === '' ? ', ohne Anmeldung' : ', mit Anmeldung');
+        return $aus;
+    }
+    $aus['s'] = $s;
+    return $aus;
+}
+
+/**
+ * Eine Nachricht mit QoS 1 und retain 0 senden und auf das PUBACK mit derselben
+ * Paketkennung warten. Rueckgabe:
+ *   'bestaetigt'     PUBACK erhalten
+ *   'unbestaetigt'   PUBLISH ganz geschrieben, PUBACK blieb aus - kann angekommen sein
+ *   'nicht_gesendet' PUBLISH nicht vollstaendig geschrieben - beim Broker ist nichts
+ */
+function sg_broker_publish($s, $thema, $wert, $kennung)
+{
+    $kennung = max(1, min(65535, (int) $kennung));
+    $rumpf = pack('n', strlen($thema)) . $thema . pack('n', $kennung) . $wert;
+    // 0x32: PUBLISH, QoS 1, DUP 0, RETAIN 0.
+    if (!sg_broker_schreiben($s, chr(0x32) . sg_broker_laenge(strlen($rumpf)) . $rumpf)) {
+        return 'nicht_gesendet';
+    }
+    $ende = microtime(true) + SG_BROKER_FRIST;
+    while (microtime(true) < $ende) {
+        $pk = sg_broker_paket($s);
+        if ($pk === null) { break; }
+        if (($pk[0] >> 4) === 4 && strlen($pk[1]) >= 2) {
+            $k = unpack('n', substr($pk[1], 0, 2));
+            if ((int) $k[1] === $kennung) { return 'bestaetigt'; }
+        }
+    }
+    return 'unbestaetigt';
+}
+
+/** Der Grund aus sg_broker_verbinden() in der Sprache der Oberflaeche (Reiter Test). */
+function sg_broker_grund_anzeige($v)
+{
+    switch ((string) $v['code']) {
+        case 'kein_broker': return sg_t('TEST.B_KEIN_BROKER');
+        case 'verbindung':  return sprintf(sg_t('TEST.B_VERBINDUNG'), (string) $v['detail']);
+        case 'connect':     return sg_t('TEST.B_CONNECT');
+        case 'antwort':     return sprintf(sg_t('TEST.B_ANTWORT'), SG_BROKER_FRIST);
+        case 'connack':     return sprintf(sg_t('TEST.B_CONNACK'), (int) $v['detail'],
+                                           sg_t(!empty($v['anmeldung']) ? 'TEST.B_MIT' : 'TEST.B_OHNE'));
+    }
+    return '-';
+}
+
+function sg_broker_trennen($s)
+{
+    if (is_resource($s)) {
+        @fwrite($s, chr(0xE0) . chr(0));
+        @fclose($s);
+    }
+}
+
+/**
+ * Verbinden, EINE Nachricht senden, trennen (Probe im Reiter Test).
+ * Rueckgabe: array('erg' => 'bestaetigt'|'unbestaetigt'|'nicht_gesendet'|'zu',
+ * 'grund' => Klartext bei 'zu', 'ziel' => host:port).
+ */
+function sg_broker_einmal($thema, $wert)
+{
+    $v = sg_broker_verbinden();
+    if ($v['s'] === null) {
+        return array('erg' => 'zu', 'grund' => $v['grund'], 'ziel' => $v['ziel']);
+    }
+    $erg = sg_broker_publish($v['s'], $thema, $wert, 1);
+    sg_broker_trennen($v['s']);
+    return array('erg' => $erg, 'grund' => '', 'ziel' => $v['ziel']);
+}
+
+/**
+ * Einen Befehl hinausschicken - der Sendeweg aller Befehle (SignalBot-q1).
+ *
+ * $impuls: fester Befehl, nach 1 s geht 0 hinterher (Entscheidung 28); der
+ * Wert 0 selbst hat keine Rueckstellung. Beides auf DERSELBEN Verbindung,
+ * beides mit QoS 1. Bleibt nur die Bestaetigung der Rueckstellung aus, geht
+ * die 0 zusaetzlich ueber den UDP-Eingang - eine doppelte 0 schadet nicht.
+ *
+ * Rueckgabe: array('ok' => 1, wenn bestaetigt oder an den UDP-Eingang
+ * uebergeben, 'weg' => 'broker'|'udp'|'', 'unklar' => 1, wenn der Broker das
+ * PUBLISH bekommen, aber nicht bestaetigt hat).
+ */
+function sg_mqtt_befehl($thema, $wert, $impuls)
+{
+    $aus = array('ok' => 0, 'weg' => '', 'unklar' => 0);
+    $cfg = sg_config();
+    if (empty($cfg['mqtt_ein'])) { return $aus; }
+    $voll = sg_mqtt_thema_voll($cfg, $thema);
+    $w = sg_mqtt_wert_saeubern($wert);
+    /* Ein leerer Wert geht nicht hinaus (M5), auf keinem Weg. */
+    if ($w === '') {
+        sg_log('MQTT: leerer Wert fuer ' . $voll . ' - nicht gesendet.');
+        return $aus;
+    }
+    $v = sg_broker_verbinden();
+    $erg = 'zu';
+    if ($v['s'] !== null) {
+        $erg = sg_broker_publish($v['s'], $voll, $w, 1);
+        if ($erg === 'nicht_gesendet') {
+            $v['grund'] = 'PUBLISH liess sich nicht vollstaendig senden';
+        }
+    }
+    if ($erg === 'zu' || $erg === 'nicht_gesendet') {
+        if ($v['s'] !== null) { sg_broker_trennen($v['s']); }
+        sg_log('MQTT: Broker ' . ($v['ziel'] !== '' ? $v['ziel'] : '(unbekannt)') . ' nicht nutzbar - '
+             . $v['grund'] . '. Rueckfall: ' . $voll . ' geht ueber den UDP-Eingang des Gateways (unbestaetigt).');
+        $ok = $impuls ? sg_mqtt_impuls($thema, $wert) : sg_mqtt_pulsen($thema, $wert);
+        return array('ok' => $ok ? 1 : 0, 'weg' => $ok ? 'udp' : '', 'unklar' => 0);
+    }
+    if ($erg === 'unbestaetigt') {
+        sg_broker_trennen($v['s']);
+        sg_log('MQTT: der Broker ' . $v['ziel'] . ' hat ' . $voll . '=' . $w . ' nicht in ' . SG_BROKER_FRIST
+             . ' s bestaetigt (kein PUBACK). Nicht erneut gesendet - der Befehl koennte sonst doppelt ankommen.');
+        return array('ok' => 0, 'weg' => 'broker', 'unklar' => 1);
+    }
+    if ($impuls && $w !== '0') {
+        usleep(1000000);
+        $r0 = sg_broker_publish($v['s'], $voll, '0', 2);
+        if ($r0 !== 'bestaetigt') {
+            sg_log('MQTT: Rueckstellung von ' . $voll . ' auf 0 vom Broker nicht bestaetigt (' . $r0
+                 . ') - die 0 geht zusaetzlich ueber den UDP-Eingang des Gateways.');
+            if (!sg_mqtt_pulsen($thema, '0')) {
+                sg_log('MQTT: Rueckstellung von ' . $thema . ' auf 0 nicht gesendet - der naechste gleiche Befehl kann in Loxone ausbleiben.');
+            }
+        }
+    }
+    sg_broker_trennen($v['s']);
+    return array('ok' => 1, 'weg' => 'broker', 'unklar' => 0);
+}
+
+/* ==================================================================
  * Ereignisprotokoll, Kill-Schalter, Nachtruhe, Ausgangswarteschlange
  * ================================================================== */
 
@@ -2090,28 +2396,40 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
                      'grund' => 'zweitfreigabe');
     }
 
-    $ok = $impuls ? sg_mqtt_impuls($b['thema'], $nutz) : sg_mqtt_pulsen($b['thema'], $nutz);
-    /* WAS "ok" HEISST (M2, Entscheidung 28): das Paket ist an den UDP-Eingang
-     * des MQTT-Gateways UEBERGEBEN. Ob es den Miniserver erreicht, sieht der
-     * Bot nicht - der Eingang verwirft unter Last Pakete, ohne dass der
-     * Absender etwas merkt (Regeln/07). Bis 0.9.25 antwortete der Bot
-     * "erledigt", auch wenn auf dem Port niemand hoerte. Jetzt: "an Loxone
-     * uebergeben", das Ereignis heisst "uebergeben". letzter.json ist der
-     * Zeitpunkt der letzten Uebergabe. */
+    $sg_erg = sg_mqtt_befehl($b['thema'], $nutz, $impuls);
+    $ok = $sg_erg['ok'];
+    $sg_broker = ($sg_erg['weg'] === 'broker');
+    /* WAS "ok" HEISST (M2, Entscheidung 28; SignalBot-q1):
+     *   weg broker - der Broker hat den Befehl bestaetigt (PUBACK, QoS 1).
+     *                Weiter zum Miniserver reicht ihn das MQTT-Gateway, das
+     *                das Thema abonniert hat; das sieht der Bot nicht.
+     *   weg udp    - Rueckfall: das Paket ist an den UDP-Eingang des Gateways
+     *                UEBERGEBEN, unbestaetigt (Regeln/07). Antwort wie bis
+     *                0.9.26: "an Loxone uebergeben".
+     *   unklar     - der Broker hat das PUBLISH bekommen, aber nicht
+     *                bestaetigt. Nicht nachgeschickt; die Antwort sagt es.
+     * letzter.json ist der Zeitpunkt der letzten Uebergabe. */
     if ($ok) {
         sg_write_atomic(sg_datadir() . '/letzter.json',
             json_encode(array('ts' => time(), 'wort' => $wortzeile)), 0644);
     }
+    $sg_wie = $ok ? ($sg_broker ? 'vom Broker bestaetigt, QoS 1' : 'an das Gateway uebergeben, unbestaetigt')
+                  : (!empty($sg_erg['unklar']) ? 'an den Broker gesendet, NICHT bestaetigt' : 'FEHLGESCHLAGEN');
     sg_log('Befehl "' . $wortzeile . '" von ' . sg_maske($von) . ' -> '
          . $b['thema'] . '=' . $nutz . ($impuls && $nutz !== '0' ? ', dann 0' : '')
-         . ' (' . ($ok ? 'an das Gateway uebergeben, unbestaetigt' : 'FEHLGESCHLAGEN') . ')');
-    sg_ereignis_merken(sg_maske($von), $ok ? 'uebergeben' : 'fehlgeschlagen',
+         . ' (' . $sg_wie . ')');
+    sg_ereignis_merken(sg_maske($von),
+                $ok ? ($sg_broker ? 'bestaetigt' : 'uebergeben') : (!empty($sg_erg['unklar']) ? 'unbestaetigt' : 'fehlgeschlagen'),
                 $wortzeile . ' -> ' . $b['thema'] . '=' . $nutz);
+    if (!$ok && !empty($sg_erg['unklar'])) {
+        return array('antwort' => sprintf(sg_t('BOT.UNBESTAETIGT'), $wortzeile), 'grund' => 'unbestaetigt');
+    }
     if (!$ok) {
         return array('antwort' => sg_t('BOT.MQTT_FEHLER'), 'grund' => 'mqtt_fehler');
     }
-    $antwort = $b['antwort'] !== '' ? $b['antwort'] : sprintf(sg_t('BOT.UEBERGEBEN'), $wortzeile);
-    return array('antwort' => $antwort, 'grund' => 'uebergeben');
+    $antwort = $b['antwort'] !== '' ? $b['antwort']
+             : sprintf(sg_t($sg_broker ? 'BOT.BESTAETIGT' : 'BOT.UEBERGEBEN'), $wortzeile);
+    return array('antwort' => $antwort, 'grund' => $sg_broker ? 'bestaetigt' : 'uebergeben');
 }
 
 /** Die Hilfe, die der Bot auf "hilfe" schickt. */

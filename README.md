@@ -8,6 +8,18 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.26
+
+Befehle mit Bestätigung durch den Broker (Verbesserungsliste SignalBot-q1, Entscheidung 28).
+Gemessen mit eigenem Broker und Gateway-Attrappe unter PHP 7.4, 8.3 und 8.5; nicht am Gerät, nicht mit echtem Signal.
+
+* **Befehle gehen direkt an den MQTT-Broker, mit Bestätigung:** Der Bot meldet sich mit den Zugangsdaten aus den MQTT-Einstellungen des LoxBerry beim Broker an. Jeden Befehl sendet er mit QoS 1, nicht retained. Erst wenn der Broker den Empfang bestätigt, antwortet er „an Loxone übergeben, vom MQTT-Broker bestätigt“. Zum Miniserver reicht ihn wie bisher das MQTT-Gateway weiter.
+* **Rückfall:** Ist der Broker nicht erreichbar oder weist er die Anmeldung ab, geht der Befehl wie bisher über den UDP-Eingang des Gateways. Die Antwort lautet dann „an Loxone übergeben“, ohne Bestätigung; das Protokoll nennt den Grund.
+* **Keine Doppelauslösung:** Bestätigt der Broker einen Befehl nicht, schickt der Bot nichts nach. Er antwortet „… nicht bestätigt. Bitte erst in Loxone nachsehen, dann den Befehl wiederholen.“
+* **Reiter Test:** Die neue Zeile „Auf welchem Weg gehen Befehle hinaus?“ zeigt den Sendeweg. Die MQTT-Probe nimmt denselben Weg wie die Befehle und zeigt, ob der Broker bestätigt hat.
+
+**In Loxone:** Es ist nichts zu ändern. Themen, Werte und Impulse bleiben gleich. Das Lebenszeichen `online` geht weiter über den UDP-Eingang.
+
 ## Neu in 0.9.25
 
 Durchgang mit vier Prüfern (Befunde: `Pruefung-Durchgang-2026-09-29/SignalBot_BEFUNDE_UND_VERBESSERUNGEN.md`, Entscheidungen 1, 8, 16, 19, 26, 27 und 28).
@@ -375,8 +387,8 @@ laeuft daneben.
 5. *MQTT* &rarr; das Abo traegt das Plugin selbst ein
    (`config/plugins/<ordner>/mqtt_subscriptions.cfg`, auch nach einer
    Aenderung des Praefixes); das MQTT-Gateway liest die Datei. Der Reiter
-   *Test* schickt bei geoeffnetem Reiter eine Probe ueber den UDP-Eingang und
-   liest sie beim Broker zurueck.
+   *Test* zeigt bei geoeffnetem Reiter, auf welchem Weg Befehle hinausgehen,
+   schickt eine Probe denselben Weg und liest sie beim Broker zurueck.
 6. *Einbindung in Loxone* &rarr; virtuelle Eingaenge auf die Themen legen, die
    Melde-Adresse kopieren, wahlweise die XML-Vorlage herunterladen.
 7. *Test* &rarr; Selbstpruefung ansehen, einen Befehl trocken durchspielen.
@@ -390,9 +402,16 @@ quittieren eine dringende Meldung. Diese Woerter sind nicht als Befehl
 belegbar; das Speichern weist sie ab, die Selbstpruefung meldet sie.
 
 Ein fester Befehl sendet einen echten Impuls (Wert, nach einer Sekunde `0`),
-ein Zahl-Befehl die Zahl ohne Rueckstellung. Der Bot antwortet „an Loxone
-uebergeben“: das Paket ist beim UDP-Eingang des MQTT-Gateways abgegeben; ob es
-den Miniserver erreicht, sieht er nicht.
+ein Zahl-Befehl die Zahl ohne Rueckstellung. Befehle gehen direkt an den
+MQTT-Broker des LoxBerry (Anmeldung aus `config/system/general.json`, QoS 1,
+nicht retained); bestaetigt er den Empfang (PUBACK), antwortet der Bot „an
+Loxone uebergeben, vom MQTT-Broker bestaetigt“. Weiter zum Miniserver reicht
+den Befehl das MQTT-Gateway, das das Thema abonniert hat - das sieht der Bot
+nicht. Ist der Broker nicht erreichbar oder weist er die Anmeldung ab, geht der
+Befehl ueber den UDP-Eingang des Gateways (Antwort „an Loxone uebergeben“,
+unbestaetigt, mit einer Zeile im Protokoll). Bleibt nur die Bestaetigung aus,
+wird nichts nachgeschickt - der Befehl koennte sonst doppelt ankommen -, und der
+Bot antwortet „nicht bestaetigt“.
 
 ## Datenschutz
 

@@ -183,6 +183,29 @@ function sg_pruefungen($mit_netz = false)
         $z[] = sg_pruefzeile(1, sg_t('TEST.F_MQTT'),
             sprintf(sg_t('TEST.A_MQTT_OK'), (int) $m['udpport'], sg_e($cfg['mqtt_topic'])));
     }
+    /* Auf welchem Weg gehen Befehle hinaus? (SignalBot-q1) Gemessen wird die
+       Anmeldung beim Broker mit derselben Funktion, die jeder Befehl benutzt
+       (sg_broker_verbinden), nur bei offenem Reiter Test. Kreuz heisst: Befehle
+       gehen ueber den UDP-Eingang des Gateways, unbestaetigt (Entscheidung 28). */
+    if (!empty($cfg['mqtt_ein']) && $m['gefunden']) {
+        if (!$mit_netz) {
+            $z[] = sg_pruefzeile(-1, sg_t('TEST.F_MQTT_WEG'), sg_t('TEST.A_MQTT_PROBE_SPAETER'));
+        } else {
+            $sg_v = sg_broker_verbinden();
+            if ($sg_v['s'] !== null) {
+                sg_broker_trennen($sg_v['s']);
+                $z[] = sg_pruefzeile(1, sg_t('TEST.F_MQTT_WEG'),
+                    sprintf(sg_t('TEST.A_MQTT_WEG_BROKER'), sg_e($sg_v['ziel'])));
+            } elseif ($m['udpport']) {
+                $z[] = sg_pruefzeile(0, sg_t('TEST.F_MQTT_WEG'),
+                    sprintf(sg_t('TEST.A_MQTT_WEG_UDP'), sg_e($sg_v['ziel'] !== '' ? $sg_v['ziel'] : '-'),
+                            sg_e(sg_broker_grund_anzeige($sg_v)), (int) $m['udpport']));
+            } else {
+                $z[] = sg_pruefzeile(0, sg_t('TEST.F_MQTT_WEG'),
+                    sprintf(sg_t('TEST.A_MQTT_WEG_KEINER'), sg_e(sg_broker_grund_anzeige($sg_v))));
+            }
+        }
+    }
     /* Kommt eine Probe wirklich beim Broker an? (M7) Bis 0.9.25 wurde die
        Zeile oben gruen, sobald die general.json passte - gesendet oder
        empfangen wurde nichts. Gemessen wird nur bei offenem Reiter Test. */
@@ -405,12 +428,30 @@ function sg_mqtt_probe($cfg)
                      array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $rohre);
     if (!is_resource($ph)) { return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE')); }
     usleep(700000);
-    $gesendet = sg_udp_senden($m['udpport'], 'publish ' . $thema . ' ' . $wort);
+    /* SignalBot-q1: die Probe geht den Weg der Befehle - zuerst direkt an den
+       Broker (QoS 1), nur wenn der nicht nutzbar ist ueber den UDP-Eingang. */
+    $sg_b = sg_broker_einmal($thema, $wort);
+    $sg_weg = 'broker';
+    $gesendet = 1;
+    if ($sg_b['erg'] === 'zu' || $sg_b['erg'] === 'nicht_gesendet') {
+        $sg_weg = 'udp';
+        $gesendet = sg_udp_senden($m['udpport'], 'publish ' . $thema . ' ' . $wort);
+    }
     $aus = (string) stream_get_contents($rohre[1]);
     $fehler = (string) stream_get_contents($rohre[2]);
     fclose($rohre[1]);
     fclose($rohre[2]);
     $rc = proc_close($ph);
+    if ($sg_weg === 'broker') {
+        if (strpos($aus, $wort) !== false && $sg_b['erg'] === 'bestaetigt') {
+            return array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK_BROKER'), sg_e($thema)));
+        }
+        if ($sg_b['erg'] !== 'bestaetigt') {
+            return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_KEIN_PUBACK'), sg_e($thema),
+                                    strpos($aus, $wort) !== false ? sg_t('TEST.A_MQTT_PROBE_KAM') : sg_t('TEST.A_MQTT_PROBE_KAM_NICHT')));
+        }
+        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_BROKER_NICHT'), sg_e($thema)));
+    }
     if (strpos($aus, $wort) !== false) {
         return array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK'), sg_e($thema)));
     }
