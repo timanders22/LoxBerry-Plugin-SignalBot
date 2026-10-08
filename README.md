@@ -8,6 +8,16 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.27
+
+Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
+
+* **Statusübersicht über den Reitern** als Tabelle: signal-cli läuft/gestoppt, Konto (maskiert),
+  Zahl der erlaubten Absender, Bot frei/gesperrt. Dieselben Werte standen bisher als Kacheln oben im
+  Reiter Einstellungen; dort sind sie entfallen.
+* **Zusammenfassung** des Plugins in einem grünen Kasten oben im Reiter Einstellungen.
+* Nur Oberfläche; gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
+
 ## Neu in 0.9.26
 
 Befehle mit Bestätigung durch den Broker (Verbesserungsliste SignalBot-q1, Entscheidung 28).

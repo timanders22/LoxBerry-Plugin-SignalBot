@@ -738,6 +738,24 @@ if (class_exists('LBWeb', false)) {
 <?php foreach ($sg_fehler as $sg_f) { ?><li><?= $sg_f ?></li><?php } ?></ul></div>
 <?php } ?>
 
+<?php /* Kopf (Entscheidung Nr. 43, seit 0.9.27): Statusuebersicht ueber den
+   Reitern, immer sichtbar. Bis 0.9.26 standen dieselben vier Werte als Kacheln
+   im Reiter Einstellungen; die Zuweisungszeile kam mit. Die Seite kennt keine
+   PID - der Dienst wird ueber systemctl gefragt. */ ?>
+<?php $sg_lebt = sg_daemon_lebt(); $sg_konten = $sg_lebt ? sg_konten() : array(); ?>
+<?php $sg_kopf_dienst = sg_dienst_laeuft(); ?>
+<table class="sm-tbl" style="max-width:620px">
+<tr><th><?= sg_e(sg_t('KACHEL.EIGENSCHAFT')) ?></th><th><?= sg_e(sg_t('KACHEL.WERT')) ?></th></tr>
+<tr><td><?= sg_e(sg_t('KACHEL.DIENST')) ?></td>
+    <td class="<?= $sg_kopf_dienst ? 'sm-an' : 'sm-aus' ?>"><?= sg_e($sg_kopf_dienst ? sg_t('ALLG.LAEUFT') : sg_t('ALLG.GESTOPPT')) ?></td></tr>
+<tr><td><?= sg_e(sg_t('KACHEL.KONTO')) ?></td>
+    <td class="<?= (string) $sg_cfg['konto'] !== '' ? 'sm-an' : 'sm-aus' ?>"><?= sg_e((string) $sg_cfg['konto'] !== '' ? sg_maske($sg_cfg['konto']) : sg_t('ALLG.KEINS')) ?></td></tr>
+<tr><td><?= sg_e(sg_t('KACHEL.ERLAUBTE')) ?></td>
+    <td class="<?= count($sg_cfg['erlaubt']) ? 'sm-an' : 'sm-aus' ?>"><?= count($sg_cfg['erlaubt']) ?></td></tr>
+<tr><td><?= sg_e(sg_t('KACHEL.SPERRE')) ?></td>
+    <td class="<?= empty($sg_cfg['gesperrt']) ? 'sm-an' : 'sm-aus' ?>"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('ALLG.FREI') : sg_t('ALLG.GESPERRT')) ?></td></tr>
+</table>
+
 <!-- Reiterleiste: echte Links, JavaScript faengt den Klick ab. Der Link
      traegt die Adresse - jeder Reiter ist verlinkbar, die Zurueck-Taste tut
      das Erwartete, und faellt das Skript aus, bleibt die Seite bedienbar. -->
@@ -789,17 +807,7 @@ $sg_reiter = array(
 
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
-<?php $sg_lebt = sg_daemon_lebt(); $sg_konten = $sg_lebt ? sg_konten() : array(); ?>
-<div class="sm-kacheln">
-  <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.DIENST')) ?>
-    <b class="<?= sg_dienst_laeuft() ? 'sm-an' : 'sm-aus' ?>"><?= sg_e(sg_dienst_laeuft() ? sg_t('ALLG.LAEUFT') : sg_t('ALLG.GESTOPPT')) ?></b></div>
-  <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.KONTO')) ?>
-    <b class="<?= (string) $sg_cfg['konto'] !== '' ? 'sm-an' : 'sm-aus' ?>" style="font-size:1.0em;"><?= sg_e((string) $sg_cfg['konto'] !== '' ? sg_maske($sg_cfg['konto']) : sg_t('ALLG.KEINS')) ?></b></div>
-  <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.ERLAUBTE')) ?>
-    <b class="<?= count($sg_cfg['erlaubt']) ? 'sm-an' : 'sm-aus' ?>"><?= count($sg_cfg['erlaubt']) ?></b></div>
-  <div class="sm-kachel"><?= sg_e(sg_t('KACHEL.SPERRE')) ?>
-    <b class="<?= empty($sg_cfg['gesperrt']) ? 'sm-an' : 'sm-aus' ?>"><?= sg_e(empty($sg_cfg['gesperrt']) ? sg_t('ALLG.FREI') : sg_t('ALLG.GESPERRT')) ?></b></div>
-</div>
+<div class="sm-hinweis"><?= sg_t('EINST.WAS_IST_DAS') ?></div>
 
 <div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span> <span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span></div>
 <h2><?= sg_e(sg_t('EINST.H_SPERRE')) ?></h2>
