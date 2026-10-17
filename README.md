@@ -8,6 +8,30 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.29
+
+Die Gruppen-Kennung wirkt (Entwurf Welle 18, Entscheidung E13, Weg A).
+Gemessen mit einer signal-cli-Attrappe unter PHP 7.4, 8.4 und 8.5, Oberfläche deutsch und englisch; nicht am Gerät, nicht mit echtem Signal.
+
+* **Bisher wirkte die Einstellung „Gruppen-Kennung für Meldungen“ nie:** Der Endpunkt schickte
+  jede Meldung einzeln an alle erlaubten Absender, auch wenn eine Gruppe eingetragen war.
+* **Jetzt geht ein Rundruf aus Loxone (ohne `&an=`) einmal in die Gruppe**, auch mit Bild, auch nach
+  der Nachtruhe. Die Antwort an Loxone trägt dann `EMPFAENGER=1;GRUPPE=1`. Eine Meldung mit `&an=`
+  bleibt eine Einzelmeldung an diese Nummer. Ist keine Gruppe eingetragen, ändert sich nichts.
+* **Dringende Gruppenmeldungen:** Sie werden in der Gruppe wiederholt, bis ein erlaubter Absender
+  `quittiert` schreibt, privat oder in der Gruppe. Diese erste Quittung gilt für alle. Danach meldet der Bot in der Gruppe
+  „Quittiert von +491…01 – keine Wiederholung mehr.“ (Nummer maskiert). Fremde Nummern können
+  nicht quittieren.
+* **In Gruppen hört der Bot nur noch auf `quittiert`, `quittieren` und `ack`.** Alles andere aus einer
+  Gruppe übergeht er still, ohne Antwort und ohne Eintrag im Ereignisprotokoll. Bisher bekam jeder Satz im
+  Gruppenchat privat „Das kenne ich nicht“, und jedes Mitglied ohne Freigabe wurde als „abgewiesen“
+  protokolliert. Befehle und `hilfe` gehen im privaten Chat wie bisher.
+* Eine wartende Meldung behält die Gruppe, für die sie eingereiht wurde, auch wenn die Einstellung
+  inzwischen geändert wurde. Protokoll und Ereignisse nennen „Gruppe“, nicht die Kennung.
+* **Wer bisher eine Gruppe eingetragen hatte:** Ab diesem Update gehen Meldungen ohne `&an=` in die
+  Gruppe statt einzeln. Das Konto des Bots muss Mitglied der Gruppe sein. Wer weiter einzeln
+  benachrichtigt werden will, leert das Feld.
+
 ## Neu in 0.9.28
 
 Einbindung in Loxone in Vollausstattung: zwei Seiten aus dem gemeinsamen Musterprojekt mit Bildern und

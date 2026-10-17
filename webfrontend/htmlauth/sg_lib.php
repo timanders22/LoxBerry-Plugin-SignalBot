@@ -1044,12 +1044,62 @@ function sg_konten()
     return $out;
 }
 
-/** Eine Nachricht senden. */
+/* ---- Ziel "Gruppe" (0.9.29, E13) ----
+ *
+ * Ein Ziel ist eine Rufnummer oder "gruppe:<Kennung>". Die Kennung steht im
+ * Ziel selbst - auch in der Warteschlange -, damit eine spaeter geaenderte
+ * Einstellung eine wartende Meldung nicht in eine andere Gruppe umleitet.
+ * Eine Kennung von signal-cli enthaelt nie einen Doppelpunkt, eine Rufnummer
+ * auch nicht: die Vorsilbe ist eindeutig. */
+define('SG_GRUPPE_VOR', 'gruppe:');
+
+/** Ist dieses Ziel eine Gruppe? */
+function sg_ist_gruppe($ziel)
+{
+    return strpos((string) $ziel, SG_GRUPPE_VOR) === 0;
+}
+
+/** Ist der Text eines der Quittungswoerter? */
+function sg_quittungswort($text)
+{
+    $klein = sg_klein(trim(preg_replace('/\s+/', ' ', (string) $text)));
+    return in_array($klein, array('quittiert', 'quittieren', 'ack'), true);
+}
+
+/**
+ * Soll der Bot eine eingegangene Nachricht auswerten? $daten ist
+ * dataMessage aus dem Ereignisstrom von signal-cli.
+ *
+ * Aus einer GRUPPE (groupInfo gesetzt) nur die Quittungswoerter (0.9.29,
+ * Entscheidung des Hausherrn zu E13). Bis 0.9.28 wertete der Bot jede
+ * Gruppenzeile aus wie eine private Nachricht: jeder Satz im Familienchat
+ * bekam privat "Das kenne ich nicht", jedes Mitglied ohne Weissliste
+ * "nicht freigegeben" und einen Eintrag "abgewiesen". Alles andere aus
+ * Gruppen wird still uebergangen - ohne Antwort, ohne Protokoll. Befehle
+ * gehen weiter im privaten Chat.
+ */
+function sg_nachricht_beachten($daten)
+{
+    if (!is_array($daten) || !isset($daten['message'])) { return false; }
+    if (isset($daten['groupInfo']) && $daten['groupInfo'] !== null) {
+        return sg_quittungswort($daten['message']);
+    }
+    return true;
+}
+
+/** Fuer Protokoll und Ereignisse: "Gruppe" statt der Kennung, sonst die maskierte Nummer. */
+function sg_ziel_name($ziel)
+{
+    return sg_ist_gruppe($ziel) ? 'Gruppe' : sg_maske($ziel);
+}
+
 /**
  * Eine Nachricht senden - an eine Rufnummer, an die Gruppe, mit Anhang.
  *
- * $an = '' zusammen mit einer eingetragenen Gruppen-Kennung schickt in die
- * Gruppe. $anhang ist ein Dateipfad auf dem LoxBerry (etwa ein Kamerabild,
+ * $an ist eine Rufnummer oder "gruppe:<Kennung>" (sg_ist_gruppe). Bis 0.9.28
+ * kam die Gruppe nur bei $an = '' zum Zug, und das rief niemand: die
+ * Einstellung wirkte nie (E13). '' schickt weiter in die eingestellte Gruppe.
+ * $anhang ist ein Dateipfad auf dem LoxBerry (etwa ein Kamerabild,
  * das Loxone gerade abgelegt hat); er wird nur mitgegeben, wenn die Datei
  * wirklich da und lesbar ist - sonst ginge die ganze Meldung verloren, und
  * das waere im Alarmfall der schlechteste Tausch.
@@ -1058,7 +1108,9 @@ function sg_senden($an, $text, $anhang = '')
 {
     $cfg = sg_config();
     $params = array('message' => (string) $text);
-    if ((string) $an !== '') {
+    if (sg_ist_gruppe($an)) {
+        $params['groupId'] = (string) substr((string) $an, strlen(SG_GRUPPE_VOR));
+    } elseif ((string) $an !== '') {
         $params['recipient'] = array((string) $an);
     } elseif ((string) $cfg['gruppe'] !== '') {
         $params['groupId'] = (string) $cfg['gruppe'];
@@ -1076,7 +1128,7 @@ function sg_senden($an, $text, $anhang = '')
     if ((string) $cfg['konto'] !== '') { $params['account'] = (string) $cfg['konto']; }
     $a = sg_rpc('send', $params, 25);
     if (!$a['ok']) {
-        sg_log('Senden an ' . sg_maske($an) . ' fehlgeschlagen: ' . $a['fehler']);
+        sg_log('Senden an ' . sg_ziel_name($an) . ' fehlgeschlagen: ' . $a['fehler']);
     }
     return $a['ok'] ? 1 : 0;
 }
@@ -2011,15 +2063,31 @@ function sg_warteschlange_ein($an, $text, $dringend = 0, $ab = 0)
     return $ok;
 }
 
-/** Offene dringende Meldungen eines Empfaengers quittieren. */
-function sg_quittieren($an)
+/**
+ * Offene dringende Meldungen eines Empfaengers quittieren.
+ *
+ * Seit 0.9.29 (E13, Weg A) auch die dringenden GRUPPENmeldungen: eine
+ * Gruppe steht fuer einen gemeinsamen Alarm, die erste Quittung eines
+ * erlaubten Absenders beendet die Wiederholung fuer alle. Wer quittieren
+ * darf, entscheidet vorher die Weissliste in sg_verarbeite(). $gruppen
+ * bekommt die Ziele der quittierten Gruppenmeldungen (je Gruppe einmal) -
+ * dorthin geht die Zeile "Quittiert von ...".
+ */
+function sg_quittieren($an, &$gruppen = null)
 {
+    $gruppen = array();
     $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
     if ($sperre !== false) { flock($sperre, LOCK_EX); }
     $liste = sg_warteschlange();
     $n = 0;
     foreach ($liste as $k => $e) {
-        if ($e['an'] === $an && !empty($e['dringend'])) { unset($liste[$k]); $n++; }
+        if (empty($e['dringend'])) { continue; }
+        if (sg_ist_gruppe($e['an'])) {
+            if (!in_array($e['an'], $gruppen, true)) { $gruppen[] = $e['an']; }
+            unset($liste[$k]); $n++;
+        } elseif ($e['an'] === $an) {
+            unset($liste[$k]); $n++;
+        }
     }
     if ($n) { sg_warteschlange_schreiben($liste); }
     if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
@@ -2051,8 +2119,8 @@ function sg_warteschlange_arbeiten()
         }
         // Dringend: wiederholen, bis quittiert wird oder der Zaehler leer ist.
         if ((int) $e['versuche'] >= (int) $cfg['quittung_max'] + 1) {
-            sg_log('Dringende Meldung an ' . sg_maske($e['an']) . ' bleibt unquittiert - aufgegeben.');
-            sg_ereignis_merken(sg_maske($e['an']), 'unquittiert', sg_kuerzen($e['text'], 60));
+            sg_log('Dringende Meldung an ' . sg_ziel_name($e['an']) . ' bleibt unquittiert - aufgegeben.');
+            sg_ereignis_merken(sg_ziel_name($e['an']), 'unquittiert', sg_kuerzen($e['text'], 60));
             unset($liste[$k]);
             continue;
         }
@@ -2255,10 +2323,17 @@ function sg_verarbeite($von, $text, $trocken = false)
     if (in_array($klein, array('hilfe', 'help', '?'), true)) {
         return array('antwort' => sg_hilfetext($von), 'grund' => 'hilfe');
     }
-    if (in_array($klein, array('quittiert', 'quittieren', 'ack'), true)) {
+    if (sg_quittungswort($klein)) {
         if ($trocken) { return array('antwort' => sg_t('BOT.NICHTS_ZU_QUITTIEREN'), 'grund' => 'quittiert'); }
-        $n = sg_quittieren($von);
+        $sg_gruppen = array();
+        $n = sg_quittieren($von, $sg_gruppen);
         sg_ereignis_merken(sg_maske($von), 'quittiert', (string) $n);
+        /* Die anderen in der Gruppe sollen sehen, dass sich jemand kuemmert -
+         * sonst eilen zwei los (E13). Sofort, auch in der Nachtruhe: es ist
+         * die Antwort auf einen Alarm, der selbst durch die Nachtruhe ging. */
+        foreach ($sg_gruppen as $sg_g) {
+            sg_senden($sg_g, sprintf(sg_t('BOT.GRUPPE_QUITTIERT'), sg_maske($von)));
+        }
         return array('antwort' => $n > 0 ? sprintf(sg_t('BOT.QUITTIERT'), $n) : sg_t('BOT.NICHTS_ZU_QUITTIEREN'),
                      'grund' => 'quittiert');
     }

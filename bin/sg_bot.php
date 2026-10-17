@@ -136,6 +136,8 @@ function sg_strom_zeile($json)
     // eigenen Nachrichten aus dem Abgleich werden uebergangen - sonst
     // antwortet der Bot auf sich selbst.
     if (!isset($env['dataMessage']['message'])) { return; }
+    // Aus Gruppen nur die Quittungswoerter, alles andere still (0.9.29).
+    if (!sg_nachricht_beachten($env['dataMessage'])) { return; }
     $text = (string) $env['dataMessage']['message'];
     if (trim($text) === '') { return; }
     $von = isset($env['sourceNumber']) ? (string) $env['sourceNumber']

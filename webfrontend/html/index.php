@@ -263,9 +263,16 @@ if ($an !== '') {
         sg_ende(403, 'SIGNAL;OK=0;GRUND=EMPFAENGER_NICHT_ERLAUBT');
     }
     $ziele = array($an);
+} elseif ((string) $cfg['gruppe'] !== '') {
+    /* Der Rundruf geht EINMAL in die eingestellte Gruppe (0.9.29, E13).
+     * Bis 0.9.28 ging er trotz Gruppen-Kennung einzeln an jede erlaubte
+     * Nummer - die Einstellung wirkte nie. Ein ausdrueckliches &an= bleibt
+     * eine Einzelmeldung (Zweig oben). */
+    $ziele = array(SG_GRUPPE_VOR . $cfg['gruppe']);
 } else {
     $ziele = $cfg['erlaubt'];
 }
+$sg_gruppe = ($ziele && sg_ist_gruppe($ziele[0])) ? 1 : 0;
 if (!$ziele) {
     sg_ende(400, 'SIGNAL;OK=0;GRUND=KEIN_EMPFAENGER');
 }
@@ -306,9 +313,10 @@ foreach ($ziele as $ziel) {
         if ($art !== 'fehler') { $ok++; }
     }
 }
-sg_log('Meldung aus Loxone an ' . $ok . ' von ' . count($ziele) . ' Empfaenger'
+sg_log('Meldung aus Loxone ' . ($sg_gruppe ? 'in die Gruppe' : 'an ' . $ok . ' von ' . count($ziele) . ' Empfaenger')
      . ($dringend ? ' (dringend)' : '') . ($anhang !== '' ? ' (mit Anhang)' : ''));
 if ($ok === 0) {
     sg_ende(502, 'SIGNAL;OK=0;GRUND=SENDEN_FEHLGESCHLAGEN');
 }
-printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s\n", $ok, $dringend, $sg_gekuerzt ? ';GEKUERZT=1' : '');
+printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s%s\n", $ok, $dringend,
+       $sg_gruppe ? ';GRUPPE=1' : '', $sg_gekuerzt ? ';GEKUERZT=1' : '');
