@@ -2758,8 +2758,10 @@ function sg_xml_virtual_in_http($kopf, $cmds)
 /**
  * Die Vorlage fuer Loxone Config: die Statuszeile als virtueller HTTP-Eingang.
  * Kommentare hoechstens 40 Zeichen (U15; bis 0.9.25 fuenf von zwoelf
- * laenger, der Kopf 163), die Erklaerung steht im HintText. Titel und Texte
- * aus der Sprachdatei (U16).
+ * laenger, der Kopf 163), die Erklaerung steht im HintText. Kommentare und
+ * Texte aus der Sprachdatei (U16); der Behaeltertitel steht seit 0.9.28 fest
+ * deutsch im Code (Sprachregel 13.10.2026, Welle Bild 18 E6) - er lautete in
+ * beiden Sprachdateien schon "Signal Bot".
  */
 function sg_vorlage()
 {
@@ -2776,7 +2778,7 @@ function sg_vorlage()
         );
     }
     return array('VI_signalbot.xml', sg_xml_virtual_in_http(array(
-        'title'   => sg_klartext('VORLAGE.ITITEL'),
+        'title'   => 'Signal Bot',
         'address' => sg_endpunkt('status'),
         'polling' => '60',
         'comment' => sg_klartext('VORLAGE.IKOPF'),
@@ -2822,6 +2824,15 @@ function sg_xml_virtual_out($kopf, $cmds)
 
 function sg_vorlage_out()
 {
+    /* Welle Bild 18 (0.9.28, Entwurf Welle 18 sb, E5 und E6; Sprachregel 13.10.2026, Regeln/07):
+     *   - Behaelter- und Befehlstitel stehen fest deutsch im Code; Kommentare, HintTexte und die
+     *     Meldungstexte bleiben aus der Sprachdatei. Bis 0.9.27 kamen auch die Titel daher, und eine
+     *     englische Oberflaeche legte "Signal Bot commands" / "Signal - send message" an - Baustein-Liste,
+     *     Bild und Musterprojekt passten dann nicht mehr. Der Behaelter heisst jetzt "Signal Bot Meldungen"
+     *     (bis 0.9.27 "Signal Bot Befehle" - "Befehle" sind in diesem Plugin die Chat-Befehle). Config
+     *     benennt Importiertes nicht um; bestehende Projekte behalten ihre Namen.
+     *   - Neu ist die sechste Zeile "Signal - Tuerklingel" mit festem Klingeltext (VORLAGE.TEXT6). T1 bis T5
+     *     und ihre Adressen sind unveraendert, bestehende Ausgaenge arbeiten weiter. */
     $p = sg_paths();
     $cfg = sg_config();
     $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
@@ -2830,24 +2841,27 @@ function sg_vorlage_out()
     $pfad = '/plugins/' . $p['plugin'] . '/index.php?token=' . $cfg['aktionstoken'] . '&aktion=';
     $text = function ($k) { return rawurlencode(sg_klartext($k)); };
     $cmds = array(
-        array('title' => sg_klartext('VORLAGE.T1'), 'comment' => sg_klartext('VORLAGE.Q1'),
+        array('title' => 'Signal - Meldung senden', 'comment' => sg_klartext('VORLAGE.Q1'),
               'hint' => sg_klartext('VORLAGE.H1'),
               'on' => $pfad . 'senden&text=' . $text('VORLAGE.TEXT1'), 'analog' => 0),
-        array('title' => sg_klartext('VORLAGE.T2'), 'comment' => sg_klartext('VORLAGE.Q2'),
+        array('title' => 'Signal - Meldung mit Wert', 'comment' => sg_klartext('VORLAGE.Q2'),
               'hint' => sg_klartext('VORLAGE.H2'),
               'on' => $pfad . 'senden&text=' . $text('VORLAGE.TEXT2') . '%20<v.0>', 'analog' => 1),
-        array('title' => sg_klartext('VORLAGE.T3'), 'comment' => sg_klartext('VORLAGE.Q3'),
+        array('title' => 'Signal - dringende Meldung', 'comment' => sg_klartext('VORLAGE.Q3'),
               'hint' => sg_klartext('VORLAGE.H3'),
               'on' => $pfad . 'senden&dringend=1&text=' . $text('VORLAGE.TEXT3'), 'analog' => 0),
-        array('title' => sg_klartext('VORLAGE.T4'), 'comment' => sg_klartext('VORLAGE.Q4'),
+        array('title' => 'Signal - Zustand melden', 'comment' => sg_klartext('VORLAGE.Q4'),
               'hint' => sg_klartext('VORLAGE.H4'),
               'on' => $pfad . 'zustand&name=alarm&wert=<v.0>', 'analog' => 1),
-        array('title' => sg_klartext('VORLAGE.T5'), 'comment' => sg_klartext('VORLAGE.Q5'),
+        array('title' => 'Signal - Bot sperren', 'comment' => sg_klartext('VORLAGE.Q5'),
               'hint' => sg_klartext('VORLAGE.H5'),
               'on' => $pfad . 'sperren', 'off' => $pfad . 'entsperren', 'analog' => 0),
+        array('title' => "Signal - T\u{fc}rklingel", 'comment' => sg_klartext('VORLAGE.Q6'),
+              'hint' => sg_klartext('VORLAGE.H6'),
+              'on' => $pfad . 'senden&text=' . $text('VORLAGE.TEXT6'), 'analog' => 0),
     );
     return array('VQ_signalbot.xml', sg_xml_virtual_out(array(
-        'title'   => sg_klartext('VORLAGE.QTITEL'),
+        'title'   => 'Signal Bot Meldungen',
         'address' => 'http://' . $host,
         'comment' => sg_klartext('VORLAGE.QKOPF'),
         'hint'    => sg_klartext('VORLAGE.HINT_QKOPF'),

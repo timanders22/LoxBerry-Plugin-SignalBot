@@ -725,6 +725,16 @@ if (class_exists('LBWeb', false)) {
 .sm-wrap .sm-beanstandet { border: 2px solid #c62828 !important; background: #fff5f5 !important; }
 .sm-wrap input[type=checkbox].sm-beanstandet { outline: 2px solid #c62828; outline-offset: 2px; }
 
+/* Welle Bild 18 (0.9.28): zwei Seiten aus dem Musterprojekt in Schritt 8 - Bild, Ueberschrift, Schritte und
+   Hinweise je Seite (wie VolkswagenID 0.9.32). */
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
+.sm-wrap h4.sm-h4 { color: #4f7d17; font-size: 0.98em; font-weight: 700; margin: 22px 0 4px;
+    padding-top: 10px; border-top: 1px solid #e0e0e0; }
+.sm-schritte { margin: 6px 0 0 18px; padding: 0; }
+.sm-schritte li { margin: 3px 0; }
+
 </style>
 
 <div class="sm-wrap">
@@ -1216,13 +1226,17 @@ if ($sg_sich_mangel) { ?>
 <div class="sm-pre"><?= sg_e(sg_endpunkt('entsperren')) ?></div>
 </div>
 
-<?php if (!empty($sg_cfg['zustand_ein'])) { ?>
+<?php /* Welle Bild 18 (0.9.28): Schritt 6 steht immer da, damit die Schritte 1-9 durchgezaehlt bleiben;
+         ohne den Haken sagt er, wo man ihn setzt (bis 0.9.27 fehlte der Schritt dann ganz). */ ?>
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S3_T')) ?></b><br>
+<?php if (!empty($sg_cfg['zustand_ein'])) { ?>
 <?= sg_t('LOX.S3') ?>
 <div class="sm-pre"><?= sg_e(sg_endpunkt('zustand')) ?>&amp;name=alarm&amp;wert=scharf</div>
 <?= sg_t('LOX.S3_HINWEIS') ?>
-</div>
+<?php } else { ?>
+<?= sg_e(sprintf(sg_t('LOX.S3_AUS'), sg_t('REITER.EINSTELLUNGEN'))) ?>
 <?php } ?>
+</div>
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.SAUS_T')) ?></b><br>
 <?= sg_t('LOX.SAUS') ?>
@@ -1247,19 +1261,144 @@ if ($sg_sich_mangel) { ?>
 </form>
 </div>
 
+<?php
+/**
+ * Die Baustein-Listen fuer Schritt 8 (Welle Bild 18, 0.9.28; Hausherr 11.10.2026: Vollausstattung, ein
+ * absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 18 sb, Entscheidungen 1-12).
+ * Zwei Seiten aus dem LoxBerry-Plugins Musterprojekt, dort in Loxone Config gebaut und verbunden
+ * (Musterprojekt/baustein_listen.txt, Abschnitte "SignalBot" 23 und "SignalBot Befehle und Meldungen" 26
+ * Zeilen, wortgleich). Je Tabellenzeile EIN Sprachschluessel BAUSTEIN.Z<seite>_<nn> = "Typ | Name |
+ * Parameter | Eingaenge" ohne Auszeichnung; jede Zelle und jeder Satz wird maskiert ausgegeben. Die
+ * Namen der Gateway-Eingaenge (Seite 2, Nr. 1-4) gelten fuer das Werks-Praefix "signalbot" und die vier
+ * Beispielbefehle des Kastens; die eigenen Themen zeigt Schritt 3.
+ *
+ * Bis 0.9.27 stand hier eine Tabelle mit 7 Zeilen (BAUSTEIN.B1-B7): drei Bausteine in einer Zeile (B5),
+ * Ausfall ueber den MQTT-Zeitstempel "online" mit Formel und Zeitbaustein, Kill-Schalter an einem Taster
+ * (B6, sperrte und gab nach einer Sekunde wieder frei), Typnamen "Statusbaustein"/"Vergleicher".
+ *
+ * Rueckgabe: je Seite 'kopf' (Name der Musterseite), 'bild', 'schritte' und 'hinweise' (Saetze), 'zeilen'
+ * (je ein Text mit vier Zellen) - alles reiner Text.
+ */
+function sg_bausteinseiten()
+{
+    return array(
+        array('kopf' => 'SignalBot', 'bild' => 'einbindung_loxone.png',
+              'schritte' => array(
+                  sprintf(sg_t('BAUSTEIN.S1_SCHRITT1'), sg_t('REITER.EINSTELLUNGEN'), sg_t('EINST.K_LINK_START'), sg_t('EINST.K_LINK_FERTIG'), sg_t('EINST.L_ERLAUBT'), sg_t('REITER.TEST'), sg_t('TEST.K_PROBE')),
+                  sprintf(sg_t('BAUSTEIN.S1_SCHRITT2'), sg_t('REITER.LOXONE'), sg_t('LOX.K_VORLAGE')),
+                  sg_t('BAUSTEIN.S1_SCHRITT3'),
+                  sg_t('BAUSTEIN.S1_SCHRITT4'),
+                  sg_t('BAUSTEIN.S1_SCHRITT5'),
+                  sg_t('BAUSTEIN.S1_SCHRITT6')),
+              'zeilen' => array(
+                  sg_t('BAUSTEIN.Z1_01'),
+                  sg_t('BAUSTEIN.Z1_02'),
+                  sg_t('BAUSTEIN.Z1_03'),
+                  sg_t('BAUSTEIN.Z1_04'),
+                  sg_t('BAUSTEIN.Z1_05'),
+                  sg_t('BAUSTEIN.Z1_06'),
+                  sg_t('BAUSTEIN.Z1_07'),
+                  sg_t('BAUSTEIN.Z1_08'),
+                  sg_t('BAUSTEIN.Z1_09'),
+                  sg_t('BAUSTEIN.Z1_10'),
+                  sg_t('BAUSTEIN.Z1_11'),
+                  sg_t('BAUSTEIN.Z1_12'),
+                  sg_t('BAUSTEIN.Z1_13'),
+                  sg_t('BAUSTEIN.Z1_14'),
+                  sg_t('BAUSTEIN.Z1_15'),
+                  sg_t('BAUSTEIN.Z1_16'),
+                  sg_t('BAUSTEIN.Z1_17'),
+                  sg_t('BAUSTEIN.Z1_18'),
+                  sg_t('BAUSTEIN.Z1_19'),
+                  sg_t('BAUSTEIN.Z1_20'),
+                  sg_t('BAUSTEIN.Z1_21'),
+                  sg_t('BAUSTEIN.Z1_22'),
+                  sg_t('BAUSTEIN.Z1_23')),
+              'hinweise' => array(
+                  sg_t('BAUSTEIN.S1_H1'),
+                  sg_t('BAUSTEIN.S1_H2'),
+                  sg_t('BAUSTEIN.S1_H3'),
+                  sg_t('BAUSTEIN.S1_H4'),
+                  sprintf(sg_t('BAUSTEIN.S1_H5'), sg_t('EINST.L_AUDIT'), sg_t('REITER.EINSTELLUNGEN')))),
+        array('kopf' => 'SignalBot Befehle und Meldungen', 'bild' => 'einbindung_loxone_befehle_meldungen.png',
+              'schritte' => array(
+                  sprintf(sg_t('BAUSTEIN.S2_SCHRITT1'), sg_t('REITER.BEFEHLE')),
+                  sg_t('BAUSTEIN.S2_SCHRITT2'),
+                  sprintf(sg_t('BAUSTEIN.S2_SCHRITT3'), sg_t('REITER.LOXONE'), sg_t('LOX.K_VORLAGE_OUT')),
+                  sg_t('BAUSTEIN.S2_SCHRITT4'),
+                  sg_t('BAUSTEIN.S2_SCHRITT5'),
+                  sg_t('BAUSTEIN.S2_SCHRITT6'),
+                  sg_t('BAUSTEIN.S2_SCHRITT7')),
+              'zeilen' => array(
+                  sg_t('BAUSTEIN.Z2_01'),
+                  sg_t('BAUSTEIN.Z2_02'),
+                  sg_t('BAUSTEIN.Z2_03'),
+                  sg_t('BAUSTEIN.Z2_04'),
+                  sg_t('BAUSTEIN.Z2_05'),
+                  sg_t('BAUSTEIN.Z2_06'),
+                  sg_t('BAUSTEIN.Z2_07'),
+                  sg_t('BAUSTEIN.Z2_08'),
+                  sg_t('BAUSTEIN.Z2_09'),
+                  sg_t('BAUSTEIN.Z2_10'),
+                  sg_t('BAUSTEIN.Z2_11'),
+                  sg_t('BAUSTEIN.Z2_12'),
+                  sg_t('BAUSTEIN.Z2_13'),
+                  sg_t('BAUSTEIN.Z2_14'),
+                  sg_t('BAUSTEIN.Z2_15'),
+                  sg_t('BAUSTEIN.Z2_16'),
+                  sg_t('BAUSTEIN.Z2_17'),
+                  sg_t('BAUSTEIN.Z2_18'),
+                  sg_t('BAUSTEIN.Z2_19'),
+                  sg_t('BAUSTEIN.Z2_20'),
+                  sg_t('BAUSTEIN.Z2_21'),
+                  sg_t('BAUSTEIN.Z2_22'),
+                  sg_t('BAUSTEIN.Z2_23'),
+                  sg_t('BAUSTEIN.Z2_24'),
+                  sg_t('BAUSTEIN.Z2_25'),
+                  sg_t('BAUSTEIN.Z2_26')),
+              'hinweise' => array(
+                  sg_t('BAUSTEIN.S2_H1'),
+                  sg_t('BAUSTEIN.S2_H2'),
+                  sg_t('BAUSTEIN.S2_H3'),
+                  sg_t('BAUSTEIN.S2_H4'),
+                  sg_t('BAUSTEIN.S2_H5'),
+                  sg_t('BAUSTEIN.S2_H6'),
+                  sprintf(sg_t('BAUSTEIN.S2_H7'), sg_t('REITER.EINSTELLUNGEN')),
+                  sg_t('BAUSTEIN.S2_H8'))),
+    );
+}
+?>
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S4_T')) ?></b><br>
 <?= sg_t('LOX.S4') ?>
+<?php foreach (sg_bausteinseiten() as $sg_bs) { ?>
+<h4 class="sm-h4"><?= sg_e($sg_bs['kopf']) ?></h4>
+<div class="sm-hinweis"><b><?= sg_e(sg_t('BAUSTEIN.SCHRITTE_TITEL')) ?></b>
+<ol class="sm-schritte">
+<?php foreach ($sg_bs['schritte'] as $sg_bx) { ?>
+<li><?= sg_e($sg_bx) ?></li>
+<?php } ?>
+</ol></div>
 <table class="sm-tbl">
-<tr><th>#</th><th><?= sg_e(sg_t('LOX.T_BAUSTEIN')) ?></th><th><?= sg_e(sg_t('LOX.T_NAME')) ?></th><th><?= sg_e(sg_t('LOX.T_PARAMETER')) ?></th><th><?= sg_e(sg_t('LOX.T_VERBINDEN')) ?></th></tr>
-<tr><td>1</td><td><?= sg_t('BAUSTEIN.B1_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B1_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B1_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B1_VERB') ?></td></tr>
-<tr><td>2</td><td><?= sg_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B2_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B2_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B2_VERB') ?></td></tr>
-<tr><td>3</td><td><?= sg_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B3_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B3_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B3_VERB') ?></td></tr>
-<tr><td>4</td><td><?= sg_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B4_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B4_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B4_VERB') ?></td></tr>
-<tr><td>5</td><td><?= sg_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B5_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B5_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B5_VERB') ?></td></tr>
-<tr><td>6</td><td><?= sg_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B6_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B6_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B6_VERB') ?></td></tr>
-<tr><td>7</td><td><?= sg_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono"><?= sg_e(sg_t('BAUSTEIN.B7_NAME')) ?></span></td><td><?= sg_t('BAUSTEIN.B7_PARAM') ?></td><td><?= sg_t('BAUSTEIN.B7_VERB') ?></td></tr>
+<tr><th>#</th><th><?= sg_e(sg_t('LOX.T_BAUSTEIN')) ?></th><th><?= sg_e(sg_t('LOX.T_NAME')) ?></th>
+    <th><?= sg_e(sg_t('LOX.T_PARAMETER')) ?></th><th><?= sg_e(sg_t('LOX.T_VERBINDEN')) ?></th></tr>
+<?php foreach ($sg_bs['zeilen'] as $sg_bzi => $sg_bz) {
+    $sg_bc = array_pad(explode(' | ', $sg_bz, 4), 4, ''); ?>
+<tr><td><?= (int) $sg_bzi + 1 ?></td><td><?= sg_e($sg_bc[0]) ?></td><td><?= sg_e($sg_bc[1]) ?></td>
+    <td><?= sg_e($sg_bc[2]) ?></td><td><?= sg_e($sg_bc[3]) ?></td></tr>
+<?php } ?>
 </table>
-<?= sg_t('LOX.S4_ERLAEUTERUNG') ?>
+<div class="sm-warnung"><b><?= sg_e(sg_t('BAUSTEIN.HINWEISE_TITEL')) ?></b>
+<ul class="sm-schritte">
+<?php foreach ($sg_bs['hinweise'] as $sg_bx) { ?>
+<li><?= sg_e($sg_bx) ?></li>
+<?php } ?>
+</ul></div>
+<figure class="sm-bild">
+<img src="<?= sg_e($sg_bs['bild']) ?>" alt="<?= sg_e(sg_t('LOX.BILD_ALT')) ?>" loading="lazy">
+<figcaption><?= sg_e(sprintf(sg_t('LOX.BILD_UNTERSCHRIFT'), $sg_bs['kopf'])) ?></figcaption>
+</figure>
+<div class="sm-hilfe"><?= sg_t('LOX.MUSTERPROJEKT') ?></div>
+<?php } ?>
 </div>
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.SGEGEN_T')) ?></b><br>

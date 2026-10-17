@@ -8,6 +8,37 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.28
+
+Einbindung in Loxone in Vollausstattung: zwei Seiten aus dem gemeinsamen Musterprojekt mit Bildern und
+Schritt-für-Schritt-Anleitung; Ausgangsvorlage mit Klingelmeldung und festen deutschen Titeln.
+
+* **Reiter „Einbindung in Loxone“, Schritt 8:** Statt der bisherigen Liste mit 7 Zeilen stehen dort die zwei
+  Seiten des [LoxBerry-Plugins Musterprojekts](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt), je mit
+  Kasten „So übernehmen Sie diese Seite“, Tabelle, Hinweisen und Bild: „SignalBot“ (23 Zeilen: alle Felder der
+  Statuszeile, Ausfall über `SIGNAL_OK` und das Lebenszeichen `SIGNAL_ALTER` mit einer Analogwertvalidierung,
+  Störmeldung nach 10 Minuten, Sicherheitswarnung bei falschen PINs oder vielen abgewiesenen Nachrichten) und
+  „SignalBot Befehle und Meldungen“ (26 Zeilen: vier Beispielbefehle aus dem Chat in allen Stufen, Testmeldung,
+  Klingel bei Abwesenheit, dringender Alarm, Zustand „alarm“, Rückmeldung des Heizungs-Sollwerts, Kill-Schalter
+  als Schalter, unquittierte Alarmmeldung zusätzlich als App-Meldung).
+* **Wer die alte Liste gebaut hat:** Sie fasste drei Bausteine in einer Zeile zusammen (Formel + Vergleicher +
+  Benachrichtigung) und erkannte den Ausfall am MQTT-Zeitstempel `online`, der über den UDP-Eingang des Gateways
+  geht und verloren gehen kann. Der Kill-Schalter hing an einem Taster – der sperrte und gab eine Sekunde später
+  wieder frei. Die neuen Seiten vermeiden das.
+* **Ausgangsvorlage:** neue sechste Zeile „Signal - Türklingel“ mit festem Klingeltext („Es hat an der Haustür
+  geklingelt – niemand zu Hause“, bei englischer Oberfläche englisch). Der Behälter heißt bei neuem Import „Signal
+  Bot Meldungen“ (bisher „Signal Bot Befehle“ – „Befehle“ sind in diesem Plugin die Chat-Befehle). Die fünf
+  bisherigen Zeilen und ihre Adressen bleiben gleich; wer die Klingelmeldung nutzen will, liest die Vorlage neu
+  ein.
+* **Vorlagentitel fest deutsch:** Behälter und Befehle heißen auch bei englischer Oberfläche „Signal Bot“, „Signal
+  Bot Meldungen“, „Signal - Meldung senden“ …, wie Liste, Bild und Musterprojekt; Kommentare und Meldungstexte
+  bleiben übersetzt. Eingangsvorlage und Statuszeile sind unverändert.
+* **Texte berichtigt:** Die Schritte im Reiter sind durchgezählt (1 bis 9; Schritt 6 steht auch bei
+  ausgeschalteten Zuständen da und sagt, wo man sie einschaltet). Schritt 7 nennt die Ausfallerkennung des
+  Musterprojekts über HTTP, die Erklärung der Vorlagen nennt beide Knöpfe.
+* Kein Verhalten des Bots oder des Endpunkts geändert. Gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät
+  angesehen.
+
 ## Neu in 0.9.27
 
 Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
@@ -400,8 +431,17 @@ laeuft daneben.
    *Test* zeigt bei geoeffnetem Reiter, auf welchem Weg Befehle hinausgehen,
    schickt eine Probe denselben Weg und liest sie beim Broker zurueck.
 6. *Einbindung in Loxone* &rarr; virtuelle Eingaenge auf die Themen legen, die
-   Melde-Adresse kopieren, wahlweise die XML-Vorlage herunterladen.
+   beiden XML-Vorlagen erzeugen und die Seiten aus Schritt 8 nachbauen (siehe
+   unten, *Einbindung in Loxone*).
 7. *Test* &rarr; Selbstpruefung ansehen, einen Befehl trocken durchspielen.
+
+## Einbindung in Loxone
+
+Der Reiter *Einbindung in Loxone* führt in neun Schritten durch beide Richtungen, mit den zwei Vorlagen zum
+Einlesen (virtuelle Eingänge „Signal Bot“, virtuelle Ausgänge „Signal Bot Meldungen“) und in Schritt 8 den
+**Baustein-Listen** der zwei Seiten zum Nachbauen. Fertig verbunden stehen die Bausteine auf den Seiten
+„SignalBot“ und „SignalBot Befehle und Meldungen“ im [LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt) –
+die ganze Projektdatei mit allen Plugin-Seiten und Vorlagen.
 
 ## Eingebaute Woerter
 
