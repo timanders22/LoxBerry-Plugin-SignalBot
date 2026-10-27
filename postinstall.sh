@@ -174,6 +174,60 @@ if [ -n "$BESTAND" ] && [ -f "$MARKE" ] && [ -d "$BESTAND" ]; then
     echo "<OK> Ereignisprotokoll und Warteschlange aus dem Update zurueckgespielt (${SG_N:-0} Dateien)."
 fi
 
+# ---- Den Haus-Leser beenden (Vorschlag 3, seit 0.9.30) ----
+#
+# Er endet bei liegender Marke selbst (Blick in die Konfiguration je 60 s); ein
+# Lauf aus der alten Fassung wird hier argumentweise gesucht und beendet: argv[0]
+# ein php, argv[1] GENAU der eigene Pfad, kein argv[2] (wie sg_ist_dienst).
+HAUS="$ARGV5/bin/plugins/$ARGV3/sg_haus.php"
+SG_HN=0
+for sg_d in /proc/[0-9]*; do
+    mapfile -d '' -t sg_av 2>/dev/null < "$sg_d/cmdline" || continue
+    if [ "${#sg_av[@]}" -eq 2 ] && [ "${sg_av[1]}" = "$HAUS" ] && [[ "${sg_av[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+        kill "${sg_d#/proc/}" 2>/dev/null && SG_HN=$((SG_HN + 1))
+    fi
+done
+[ "$SG_HN" -gt 0 ] && echo "<OK> Haus-Leser der alten Fassung beendet ($SG_HN)."
+
+# ---- endpunkt_ein fuer den Bestand (seit 0.9.30, E-E8, N8) ----
+#
+# Ab 0.9.30 ist der HTTP-Endpunkt fuer Loxone bei einer NEUinstallation aus (Werte
+# ueber das MQTT-Gateway V2, Meldungen ueber die Befehlsbruecke - ohne Token). Eine
+# bestehende Anlage behaelt ihn: bei einer Aktualisierung (Marke liegt) bekommen
+# Konfiguration und Zweitschrift endpunkt_ein=1, wenn sie eingerichtet sind und den
+# Schluessel nicht tragen. Die Linie hat kein postupgrade.sh; scheitert es hier,
+# traegt die Lese-Regel in sg_config() (Datei mit Schluesseln, ohne endpunkt_ein ->
+# 1). Nebendatei mit umask 077, cmp-Gegenprobe, mv -f; die Rechte setzt der Block
+# am Ende (0600). Ausgegeben wird nur das Ergebnis, nie ein Wert.
+if [ -f "$MARKE" ] && command -v php >/dev/null 2>&1; then
+    for SG_EP in "$ARGV5/config/plugins/$ARGV3/signalbot.json" "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json"; do
+        [ -f "$SG_EP" ] || continue
+        SG_ERG=$( (umask 077; /usr/bin/php -r '
+            $f = $argv[1];
+            $d = json_decode((string) @file_get_contents($f), true);
+            if (!is_array($d) || array_key_exists("endpunkt_ein", $d)) { echo "nichts"; exit; }
+            $andere = false;
+            foreach (array_keys($d) as $k) { if ($k !== "aktionstoken" && !(is_string($k) && $k !== "" && $k[0] === "_")) { $andere = true; } }
+            if (!$andere) { echo "nichts"; exit; }
+            $d["endpunkt_ein"] = 1;
+            $js = json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($js === false || @file_put_contents($f . ".neu", $js) !== strlen($js)) { @unlink($f . ".neu"); echo "fehler"; exit; }
+            echo "neu";
+        ' "$SG_EP" 2>/dev/null) )
+        if [ "$SG_ERG" = "neu" ]; then
+            if /usr/bin/php -r 'exit(json_decode((string) file_get_contents($argv[1]), true)["endpunkt_ein"] === 1 ? 0 : 1);' "$SG_EP.neu" 2>/dev/null \
+               && mv -f "$SG_EP.neu" "$SG_EP"; then
+                echo "<INFO> Konfiguration ergaenzt: endpunkt_ein=1 (bestehende Anlage - der HTTP-Endpunkt fuer Loxone bleibt erreichbar; abschalten im Reiter Einbindung) - $(basename "$SG_EP")."
+            else
+                rm -f "$SG_EP.neu"
+                echo "<WARNING> endpunkt_ein liess sich in $(basename "$SG_EP") nicht ergaenzen - es gilt die Lese-Regel (Endpunkt bleibt an)."
+            fi
+        elif [ "$SG_ERG" != "nichts" ]; then
+            echo "<WARNING> endpunkt_ein liess sich in $(basename "$SG_EP") nicht ergaenzen - es gilt die Lese-Regel (Endpunkt bleibt an)."
+        fi
+    done
+fi
+
 # ---- Den Dienst EINMAL von Hand aufrufen ----
 #
 # Hausregel seit dem 16.08.2026: jeden Cron-Dienst nach der Installation
@@ -203,6 +257,22 @@ fi
 # (I2; bis 0.9.25 stand das chmod nur oben, vor beiden - gemessen 644).
 [ -f "$ARGV5/config/plugins/$ARGV3/signalbot.json" ] && chmod 0600 "$ARGV5/config/plugins/$ARGV3/signalbot.json"
 [ -f "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json" ] && chmod 0600 "$ARGV5/config/plugins/$ARGV3.backup.signalbot.json"
+
+# ---- Befehlsbruecke (seit 0.9.30, Entwurf 3.3) ----
+#
+# Startet nur, wenn "Befehle ueber MQTT annehmen" und MQTT an sind - ab Werk aus, bei
+# einer Neuinstallation also nie. Bei einer Aktualisierung liegt die Marke noch, und
+# befehlsbruecke.sh startet nicht; der Waechter im Minutentakt holt den Start binnen
+# 60 s nach dem Ende der Installation nach.
+BBSH="$ARGV5/bin/plugins/$ARGV3/befehlsbruecke.sh"
+if [ -f "$BBSH" ]; then
+    BB_AUS=$(timeout 40 bash "$BBSH" start 2>&1 | head -n 1)
+    case "$BB_AUS" in
+        *gestartet*|*laeuft*) echo "<OK> Befehlsbruecke: $BB_AUS" ;;
+        "Haken aus - kein Start.") echo "<INFO> Befehlsbruecke: aus (Reiter MQTT, Haken 'Befehle ueber MQTT annehmen')." ;;
+        *) echo "<INFO> Befehlsbruecke: $BB_AUS - der Minutentakt startet sie nach, sobald der Haken an ist." ;;
+    esac
+fi
 
 # Schlusstext (I6): nach einer Aktualisierung keine Schritte der
 # Erstinstallation; der Satz "Die Oberflaeche legt beim ersten Aufruf ein

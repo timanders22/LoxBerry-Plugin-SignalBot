@@ -8,6 +8,38 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.30
+
+Gruppe 32 (Entscheidungen 1–4 des Hausherrn, Entwurf `entwurf_gruppe32_sg.txt`). Gemessen mit Attrappen (Broker,
+signal-cli-Ereignisstrom, LoxBerry-Baum) unter PHP 7.4, 8.4 und 8.5; nicht am Gerät, nicht mit echtem Signal.
+
+* **Status über das MQTT-Gateway V2 (Hausform).** Der Bot sendet jede Minute `signalbot/status/zaehler` (0–999, läuft
+  um) und `signalbot/status/ok` (1 = Nachrichten kommen an), dazu `rpc`, `daemon` (−1 = kein eigener Dienst), `konto`,
+  `erlaubte`, `befehle`, `gesperrt`, `abgewiesen`, `pinfehl`, `offen`, `zustaende` bei Änderung und alle 30 Minuten,
+  `letzter_min` jede Minute – alles flüchtig. Das Gateway V2 abonniert nur angehakte Themen: die Hakenliste steht im
+  Reiter MQTT, die Namen der Virtuellen Eingänge im Reiter Einbindung. `online` geht noch eine Fassung lang weiter
+  (veraltet).
+* **Meldungen aus Loxone über die Befehlsbrücke 1.0.1:** `publish signalbot/befehl/senden <Text>`, `senden/<Nummer>`,
+  `dringend`, `zustand/<name>`, `sperren`, `entsperren` (nur mit zweitem Haken), `plugin/<ordner>` – ohne Token. Die
+  Brücke reiht ein, der Bot stellt zu (≤ 10 s). Ab Werk aus (Reiter MQTT).
+* **HTTP-Endpunkt:** bei einer Neuinstallation aus (`ENDPUNKT_AUS`), bestehende Anlagen behalten ihn (Reiter
+  Einbindung, „Bestehende Anlagen“). Antworten byte-gleich zu 0.9.29.
+* **Lebenszeichen nur bei nutzbarem Ereignisstrom:** Antwortet signal-cli mit 200 und schließt sofort (kein Konto),
+  gilt das als Fehlschlag mit Rückzug und Protokollzeile; `OK=1` heißt „Nachrichten kommen an“.
+* **„Notiz an mich“ als Befehlsweg (Weg A, nach dem Gerätetest):** Läuft der Bot als verknüpftes Gerät unter der
+  eigenen Nummer, gelten Nachrichten im Chat „Notiz an mich“ als Befehle des Kontoinhabers – nur wenn die eigene
+  Nummer unter den erlaubten Absendern steht (Haken ab Werk an). Eigene Antworten und Meldungen des Bots sowie
+  Nachrichten an Dritte und Gruppen werden nie ausgewertet. Der Reiter Einstellungen erklärt beide Wege (A
+  verknüpft, B eigene Nummer für den Bot – registrieren statt verknüpfen) und zeigt den aktiven.
+* **Gäste mit „gültig bis“**, **Haus-Werte im Chat** (`status strom` …, ab Werk aus), **Meldungen anderer Plugins**
+  (Freigabeliste, ab Werk leer), **bin/healthcheck** für den LoxBerry-Healthcheck.
+* Korrekturen: MQTT-Probe ohne Kennwort auf der Befehlszeile (eigener Client), Klartext-PIN aus einer Sicherung wird
+  gehasht (die Sicherung enthält nie Klartext), Leeren der Protokolle nur mit Häkchen, neue PIN und „PIN löschen“
+  zugleich wird beanstandet, Reiter Test misst beim Öffnen, Webserver-Port, Sperre `'ce'`.
+* **Was sich für bestehende Anlagen ändert:** Befehlsthemen, die der Bot jetzt selbst belegt (`status/…`, `befehl/…`,
+  `gesperrt` …), werden nicht mehr gesendet und im Reiter Befehle beanstandet – bitte umbenennen. Eine Sicherung von
+  0.9.29 lässt sich einspielen; die neuen Einstellungen behalten ihren Wert.
+
 ## Neu in 0.9.29
 
 Die Gruppen-Kennung wirkt (Entwurf Welle 18, Entscheidung E13, Weg A).

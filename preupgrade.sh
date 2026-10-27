@@ -58,6 +58,17 @@ case "$ARGV3" in
     ''|*/*|*..*) echo "<WARNING> Unzulaessiger Ordnername '$ARGV3' - kein Bestand angelegt."; exit 0 ;;
 esac
 
+# ---- Befehlsbruecke anhalten (seit 0.9.30; Bauart Ferien/ACTi preupgrade) ----
+#
+# NACH der Marke: der Waechter im Minutentakt startet sie bis zum Ende der
+# Installation (postroot.sh raeumt die Marke als Letztes ab) nicht neu; danach holt
+# er den Start binnen 60 s nach. Bis 0.9.29 gab es keine Bruecke (dann fehlt die
+# Datei). Der Haus-Leser (Vorschlag 3) endet selbst, sobald die Marke liegt.
+BBSH="$ARGV5/bin/plugins/$ARGV3/befehlsbruecke.sh"
+if [ -f "$BBSH" ]; then
+    echo "<INFO> Befehlsbruecke: $(timeout 40 bash "$BBSH" stop 2>&1 | head -n 1)"
+fi
+
 # ---- Bestand: Ereignisprotokoll und Warteschlange ueber das Update (I3) ----
 #
 # purge_installation loescht data/plugins/<ordner>/ bei jedem Update. Darin

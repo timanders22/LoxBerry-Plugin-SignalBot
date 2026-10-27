@@ -21,6 +21,10 @@
 # laufende Bot findet nicht mehr hin. Aus der Schale ist das nicht zu
 # schliessen - ein laufender Prozess laesst seine Deskriptoren nicht tauschen.
 # Betroffen ist nur dieser Nebenkanal, nicht das Protokoll.
+# Nie als root (G11, Haertung seit 0.9.30): der Bot und der Haus-Leser legten ihre
+# Dateien in /tmp/<ordner> sonst als root an, und der Lauf als loxberry kaeme nicht
+# mehr an sie heran. LoxBerry ruft diese Datei als loxberry.
+[ "$(id -u 2>/dev/null)" = 0 ] && exit 0
 LOG=REPLACELBPLOGDIR/signalbot_start.log
 # Nicht unbegrenzt wachsen lassen; hier steht nur, was schiefgeht.
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
@@ -76,3 +80,19 @@ if [ -f "$MARKE" ]; then
 fi
 
 /usr/bin/php REPLACELBPBINDIR/sg_bot.php >> "$LOG" 2>&1 &
+
+# ---- Befehlsbruecke 1.0.1 (seit 0.9.30): ein Waechterlauf je Minute ----
+#
+# Die Linie hat keinen PHP-Minutentakt; die Bibliotheksform der Bruecke fuer solche
+# Linien ist "befehlsbruecke.php --waechter" (startet den Dienst nach, wenn der Haken
+# 'Befehle ueber MQTT annehmen' an ist, und haelt ihn an, wenn nicht; nie waehrend der
+# Marke). NICHT aus dem Bot - der Dienst waere sonst Kind des Dauerlaeufers. Seine
+# Zeilen stehen ueber die Tabelle in signalbot.log; hier nur, was beim Start scheitert.
+/usr/bin/php REPLACELBPBINDIR/befehlsbruecke.php --waechter >/dev/null 2>> "$LOG"
+
+# ---- Haus-Leser (Vorschlag 3, seit 0.9.30) ----
+#
+# Begleitprozess fuer "status strom" & Co. Ohne den Haken 'Werte anderer Plugins im
+# Chat abfragen' endet er sofort und still; laeuft er schon, endet der Aufruf an seiner
+# Sperre. Eigener Prozess, nicht Kind des Bots.
+/usr/bin/php REPLACELBPBINDIR/sg_haus.php >> "$LOG" 2>&1 &

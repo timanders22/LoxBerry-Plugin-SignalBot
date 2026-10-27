@@ -127,6 +127,25 @@ function sg_pruefungen($mit_netz = false)
     $z[] = sg_pruefzeile($n > 0 ? 1 : 0, sg_t('TEST.F_WEISSLISTE'),
         $n > 0 ? sprintf(sg_t('TEST.A_WEISSLISTE_OK'), $n) : sg_t('TEST.A_WEISSLISTE_LEER'));
 
+    /* Notiz an mich als Befehlsweg (Weg A, Nachtrag 27.10.): orange nur, wenn der Bot verknuepft ist (Weg A) und
+     * der Weg trotzdem nicht wirkt - dann hat der Ein-Nummer-Betrieb keinen Chat-Weg. */
+    $sg_weg = sg_konto_weg($cfg, $lebt);
+    $sg_ns = sg_notiz_stand();
+    if ((string) $cfg['konto'] === '') {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_NOTIZ'), sg_t('TEST.A_NOTIZ_KEIN_KONTO'));
+    } elseif ($sg_weg === 'B') {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_NOTIZ'), sg_t('TEST.A_NOTIZ_WEG_B'));
+    } elseif (empty($cfg['notiz_ein'])) {
+        $z[] = sg_pruefzeile($sg_weg === 'A' ? 0 : -1, sg_t('TEST.F_NOTIZ'), sg_t('TEST.A_NOTIZ_AUS'));
+    } elseif (!sg_erlaubt((string) $cfg['konto'])) {
+        $z[] = sg_pruefzeile($sg_weg === 'A' ? 0 : -1, sg_t('TEST.F_NOTIZ'),
+            sprintf(sg_t('TEST.A_NOTIZ_NICHT_ERLAUBT'), sg_maske($cfg['konto'])));
+    } else {
+        $z[] = sg_pruefzeile(1, sg_t('TEST.F_NOTIZ'), sprintf(sg_t('TEST.A_NOTIZ_OK'), sg_maske($cfg['konto']),
+            $sg_ns['ts'] > 0 ? sprintf(sg_t('TEST.A_NOTIZ_ZULETZT'), intdiv(max(0, time() - $sg_ns['ts']), 60))
+                             : sg_t('TEST.A_NOTIZ_NOCH_KEINE')));
+    }
+
     $mitpin = 0;
     $aktiv = 0;
     foreach ($cfg['befehle'] as $b) {
@@ -216,6 +235,53 @@ function sg_pruefungen($mit_netz = false)
             list($st, $tx) = sg_mqtt_probe($cfg);
             $z[] = sg_pruefzeile($st, sg_t('TEST.F_MQTT_PROBE'), $tx);
         }
+    }
+
+    /* ---- Seit 0.9.30 (Gruppe 32): MQTT-Gateway V2, Befehlsbruecke, Warteschlange, Haus-Leser, Gaeste ---- */
+    if (!empty($cfg['mqtt_ein'])) {
+        list($sg_v2, $sg_v2t) = sg_mqtt_v2_haken_lage($cfg);
+        $z[] = sg_pruefzeile($sg_v2 === 2 ? -1 : $sg_v2, sg_t('TEST.F_V2'), $sg_v2t);
+    }
+    /* Themenliste der Status-Themen gegen den Sendecode (Regeln/07 :295-302): sg_mqtt_status() sendet je Thema
+       aus sg_mqtt_status_themen() den Wert seines Feldes - fehlt ein Feld, ginge das Thema leer hinaus. */
+    $sg_w = sg_status_werte($cfg, false);
+    $sg_w += array('ok' => 0, 'ts' => 0, 'zaehler' => 0, 'rpc' => 0, 'daemon_mqtt' => 0);
+    $sg_fehl = array();
+    foreach (sg_mqtt_status_themen($cfg) as $sg_st) {
+        if (!array_key_exists($sg_st['schl'], $sg_w)) { $sg_fehl[] = $sg_st['thema']; }
+    }
+    $z[] = sg_pruefzeile($sg_fehl ? 0 : 1, sg_t('TEST.F_STATUS_THEMEN'), $sg_fehl
+        ? sprintf(sg_t('TEST.A_STATUS_THEMEN_FEHL'), sg_e(implode(', ', $sg_fehl)))
+        : sprintf(sg_t('TEST.A_STATUS_THEMEN_OK'), count(sg_mqtt_status_themen($cfg))));
+    /* N4: Befehle mit einem Thema, das der Bot selbst belegt. */
+    $sg_res = array();
+    foreach ($cfg['befehle'] as $b) {
+        if (!empty($b['aktiv']) && $b['wort'] !== '' && $b['thema'] !== '' && sg_thema_reserviert($b['thema'])) { $sg_res[] = $b['thema']; }
+    }
+    $z[] = sg_pruefzeile($sg_res ? 0 : 1, sg_t('TEST.F_RESERVIERT'), $sg_res
+        ? sprintf(sg_t('TEST.A_RESERVIERT'), sg_e(implode(', ', $sg_res))) : sg_t('TEST.A_RESERVIERT_KEINE'));
+    list($sg_bl, $sg_bt) = sg_bruecke_lage();
+    $z[] = sg_pruefzeile($sg_bl === null ? -1 : ($sg_bl ? 1 : 0), sg_t('TEST.F_BRUECKE'), $sg_bt);
+    $sg_q = sg_warteschlange();
+    $sg_aelteste = 0;
+    foreach ($sg_q as $sg_qe) { if (isset($sg_qe['ts']) && ($sg_aelteste === 0 || (int) $sg_qe['ts'] < $sg_aelteste)) { $sg_aelteste = (int) $sg_qe['ts']; } }
+    $z[] = sg_pruefzeile($sg_q ? -1 : 1, sg_t('TEST.F_SCHLANGE'), $sg_q
+        ? sprintf(sg_t('TEST.A_SCHLANGE'), count($sg_q), max(0, time() - $sg_aelteste), sg_offene_meldungen())
+        : sg_t('TEST.A_SCHLANGE_LEER'));
+    list($sg_hl, $sg_ht) = sg_haus_lage($cfg);
+    $z[] = sg_pruefzeile($sg_hl === null ? -1 : ($sg_hl === 1 ? 1 : ($sg_hl === -1 ? -1 : 0)), sg_t('TEST.F_HAUS'), $sg_ht);
+    $sg_verdeckt = array();
+    foreach (sg_haus_woerter($cfg) as $sg_hw) { if (sg_zustand_da($sg_hw)) { $sg_verdeckt[] = $sg_hw; } }
+    if ($sg_verdeckt) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_HAUS_VERDECKT'), sprintf(sg_t('TEST.A_HAUS_VERDECKT'), sg_e(implode(', ', $sg_verdeckt))));
+    }
+    $sg_gg = sg_gaeste_gueltig($cfg);
+    $sg_ga = count($cfg['gaeste']) - count($sg_gg);
+    if ($cfg['gaeste']) {
+        $sg_bis = array();
+        foreach ($sg_gg as $sg_g) { $sg_bis[] = sg_gast_zeit($sg_g['bis']); }
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_GAESTE'), sprintf(sg_t('TEST.A_GAESTE'), count($sg_gg),
+            $sg_bis ? sg_e(implode(', ', $sg_bis)) : '-', $sg_ga));
     }
 
     /* ---- Token ---- */
@@ -356,14 +422,16 @@ function sg_pruefungen($mit_netz = false)
         $z[] = sg_pruefzeile(-1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_SPAETER'));
     } else {
         $p = sg_paths();
-        $url = 'http://127.0.0.1/plugins/' . rawurlencode($p['plugin']) . '/index.php?selftest=1&token='
+        /* G10 (0.9.30): der Webserver-Port aus general.json (Webserver.Port, Rueckfall 80). */
+        $url = 'http://127.0.0.1:' . sg_webport() . '/plugins/' . rawurlencode($p['plugin']) . '/index.php?selftest=1&token='
              . rawurlencode((string) $cfg['aktionstoken']);
         $ctx = stream_context_create(array('http' => array('timeout' => 3, 'ignore_errors' => true)));
         list($t, $code) = ini_get('allow_url_fopen') ? sg_http_abruf($url, $ctx) : array(false, 0);
         if ($t === false || $code === 0) {
             $z[] = sg_pruefzeile(-1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_KEINE'));
         } elseif ($code === 200 && strpos((string) $t, 'SELFTEST;OK=1') === 0) {
-            $z[] = sg_pruefzeile(1, sg_t('TEST.F_ENDPUNKT'), sg_t('TEST.A_ENDPUNKT_OK'));
+            /* Seit 0.9.30 (E-E8): bei endpunkt_ein = 0 prueft die Probe nur ?selftest - der Endpunkt ist gewollt aus. */
+            $z[] = sg_pruefzeile(1, sg_t('TEST.F_ENDPUNKT'), sg_t(sg_endpunkt_ein($cfg) ? 'TEST.A_ENDPUNKT_OK' : 'TEST.A_ENDPUNKT_AUS'));
         } else {
             $z[] = sg_pruefzeile(0, sg_t('TEST.F_ENDPUNKT'),
                 sprintf(sg_t('TEST.A_ENDPUNKT_FEHL'), $code, sg_e(sg_kuerzen(trim((string) $t), 60))));
@@ -371,26 +439,6 @@ function sg_pruefungen($mit_netz = false)
     }
 
     return $z;
-}
-
-/** Der Broker des LoxBerry aus der general.json (nur gelesen, nie ausgegeben). */
-function sg_broker()
-{
-    $p = sg_paths();
-    $leer = array('host' => '', 'port' => 0, 'user' => '', 'pass' => '');
-    if ($p['home'] === '') { return $leer; }
-    $gen = @json_decode((string) @file_get_contents($p['home'] . '/config/system/general.json'), true);
-    if (!is_array($gen)) { return $leer; }
-    $m = isset($gen['Mqtt']) && is_array($gen['Mqtt']) ? $gen['Mqtt']
-       : (isset($gen['mqtt']) && is_array($gen['mqtt']) ? $gen['mqtt'] : array());
-    $hol = function ($a, $b) use ($m) {
-        if (isset($m[$a]) && is_scalar($m[$a])) { return (string) $m[$a]; }
-        return (isset($m[$b]) && is_scalar($m[$b])) ? (string) $m[$b] : '';
-    };
-    $host = $hol('Brokerhost', 'brokerhost');
-    $port = (int) $hol('Brokerport', 'brokerport');
-    return array('host' => $host !== '' ? $host : 'localhost', 'port' => $port > 0 ? $port : 1883,
-                 'user' => $hol('Brokeruser', 'brokeruser'), 'pass' => $hol('Brokerpass', 'brokerpass'));
 }
 
 /**
@@ -404,64 +452,48 @@ function sg_broker()
  */
 function sg_mqtt_probe($cfg)
 {
-    $m = sg_mqtt_zustand();
-    /* Im Suchpfad gesucht, ohne Schale: eine Umleitung nach /dev/null waere
-       auf einem Pruefrechner ohne /dev/null selbst eine Datei. */
-    $sub = '';
-    foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $sg_d) {
-        if ($sg_d !== '' && is_file($sg_d . '/mosquitto_sub') && is_executable($sg_d . '/mosquitto_sub')) {
-            $sub = $sg_d . '/mosquitto_sub';
-            break;
-        }
-    }
-    if ($sub === '' || !function_exists('proc_open')) {
-        return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE'));
-    }
-    $b = sg_broker();
-    if ($b['host'] === '') { return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE')); }
+    /* Seit 0.9.30 (G9, Entscheidung 1; Entwurf 3.6, E-E10, N2): ueber den EIGENEN Client der Linie
+     * (sg_broker_verbinden - Kennwort nur im CONNECT-Paket) SUBSCRIBE und PUBLISH auf DERSELBEN Verbindung,
+     * dann EINE Leseschleife bis 4 s, die PUBACK und die eigene Kopie in beliebiger Reihenfolge einsammelt
+     * (mosquitto darf die Kopie vor dem PUBACK schicken - sg_broker_publish() verwuerfe sie, N2). Kein
+     * Kindprozess, kein mosquitto_sub, kein Kennwort auf einer Befehlszeile (bis 0.9.29: "-P <kennwort>" in
+     * /proc/<pid>/cmdline, gemessen 3 Treffer). Der UDP-Rueckfall der Probe entfaellt: ohne Broker gibt es
+     * keinen Abonnenten. Rueckgabe: array(Stand 1/0/-1, Text). */
     $thema = sg_mqtt_thema_voll($cfg, 'selbsttest');
+    $v = sg_broker_verbinden();
+    if ($v['s'] === null) {
+        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_ZU'), sg_e(sg_broker_grund_anzeige($v))));
+    }
+    $s = $v['s'];
+    if (!sg_broker_abonnieren($s, $thema, 7)) {
+        sg_broker_trennen($s);
+        return array(0, sg_t('TEST.A_MQTT_PROBE_ABO'));
+    }
     $wort = sg_token(16);
-    $argv = array($sub, '-h', $b['host'], '-p', (string) $b['port'], '-t', $thema, '-C', '1', '-W', '4');
-    if ($b['user'] !== '') { $argv[] = '-u'; $argv[] = $b['user']; }
-    if ($b['pass'] !== '') { $argv[] = '-P'; $argv[] = $b['pass']; }
-    $ph = @proc_open(implode(' ', array_map('escapeshellarg', $argv)),
-                     array(1 => array('pipe', 'w'), 2 => array('pipe', 'w')), $rohre);
-    if (!is_resource($ph)) { return array(-1, sg_t('TEST.A_MQTT_PROBE_OHNE')); }
-    usleep(700000);
-    /* SignalBot-q1: die Probe geht den Weg der Befehle - zuerst direkt an den
-       Broker (QoS 1), nur wenn der nicht nutzbar ist ueber den UDP-Eingang. */
-    $sg_b = sg_broker_einmal($thema, $wort);
-    $sg_weg = 'broker';
-    $gesendet = 1;
-    if ($sg_b['erg'] === 'zu' || $sg_b['erg'] === 'nicht_gesendet') {
-        $sg_weg = 'udp';
-        $gesendet = sg_udp_senden($m['udpport'], 'publish ' . $thema . ' ' . $wort);
-    }
-    $aus = (string) stream_get_contents($rohre[1]);
-    $fehler = (string) stream_get_contents($rohre[2]);
-    fclose($rohre[1]);
-    fclose($rohre[2]);
-    $rc = proc_close($ph);
-    if ($sg_weg === 'broker') {
-        if (strpos($aus, $wort) !== false && $sg_b['erg'] === 'bestaetigt') {
-            return array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK_BROKER'), sg_e($thema)));
+    $rumpf = pack('n', strlen($thema)) . $thema . pack('n', 8) . $wort;
+    // 0x32: PUBLISH, QoS 1, DUP 0, RETAIN 0.
+    $erg = sg_broker_schreiben($s, chr(0x32) . sg_broker_laenge(strlen($rumpf)) . $rumpf) ? 'unbestaetigt' : 'nicht_gesendet';
+    $kam = false;
+    $ende = microtime(true) + 4;
+    while ($erg !== 'nicht_gesendet' && !($kam && $erg === 'bestaetigt') && microtime(true) < $ende) {
+        $pk = sg_broker_paket($s);
+        if ($pk === null) { break; }
+        $typ = $pk[0] >> 4;
+        if ($typ === 4 && strlen($pk[1]) >= 2) {
+            $k = unpack('n', substr($pk[1], 0, 2));
+            if ((int) $k[1] === 8) { $erg = 'bestaetigt'; }
+        } elseif ($typ === 3) {
+            $pub = sg_broker_publish_lesen($pk);
+            if ($pub !== null && $pub[0] === $thema && $pub[1] === $wort) { $kam = true; }
         }
-        if ($sg_b['erg'] !== 'bestaetigt') {
-            return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_KEIN_PUBACK'), sg_e($thema),
-                                    strpos($aus, $wort) !== false ? sg_t('TEST.A_MQTT_PROBE_KAM') : sg_t('TEST.A_MQTT_PROBE_KAM_NICHT')));
-        }
-        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_BROKER_NICHT'), sg_e($thema)));
     }
-    if (strpos($aus, $wort) !== false) {
-        return array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK'), sg_e($thema)));
+    sg_broker_trennen($s);
+    if ($erg !== 'bestaetigt') {
+        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_KEIN_PUBACK'), sg_e($thema),
+                                $kam ? sg_t('TEST.A_MQTT_PROBE_KAM') : sg_t('TEST.A_MQTT_PROBE_KAM_NICHT')));
     }
-    if (!$gesendet) {
-        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_UDP'), (int) $m['udpport']));
-    }
-    if ($rc === 27 || trim($fehler) === '') {
-        return array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_NICHT'), sg_e($thema), (int) $m['udpport']));
-    }
-    return array(-1, sprintf(sg_t('TEST.A_MQTT_PROBE_BROKER'), sg_e(sg_kuerzen(trim($fehler), 80))));
+    return $kam ? array(1, sprintf(sg_t('TEST.A_MQTT_PROBE_OK_BROKER'), sg_e($thema)))
+                : array(0, sprintf(sg_t('TEST.A_MQTT_PROBE_BROKER_NICHT'), sg_e($thema)));
 }
 
 /**

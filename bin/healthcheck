@@ -1,0 +1,58 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Signal Bot - Anschluss an den LoxBerry-Healthcheck (seit 0.9.30, Gruppe 32; Vorschlag 5, Entwurf 3.5, E-E9;
+ * Bauart Spotpreis aWATTar 1.2.39 bin/healthcheck)
+ *
+ * Seit LoxBerry 2.2 ruft sbin/healthcheck.pl eine ausfuehrbare Datei bin/healthcheck des Plugins auf - einmal mit
+ * 'title', einmal mit 'check' -, und zwar direkt und als Benutzer loxberry (Regeln/02, nie mit bash).
+ *
+ * Antwort: JSON mit desc, status, result, logfile. Status nach der Skala von LoxBerry: 3 = Fehler (rot), 4 = Warnung
+ * (gelb), 5 = in Ordnung (gruen), 6 = Hinweis (blau).
+ *
+ * Billige Groessen aus vorhandenen Dateien (sg_gesundheit()): kein Abruf bei signal-cli, kein Broker, nichts
+ * angelegt. sg_pruefungen() (Reiter Test) wird NICHT gerufen.
+ */
+
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+ini_set('display_errors', '0');
+
+$sg_was = isset($argv[1]) ? strtolower((string) $argv[1]) : 'check';
+
+if ($sg_was === 'title') {
+    echo "Signal Bot\n";
+    exit(0);
+}
+
+/* Die Bibliothek ueber eine Kandidatenliste (G14, Bauart aWATTar/Saugroboter): zuerst der Archivkandidat (bin/ und
+ * webfrontend/ nebeneinander - in der Installation gibt es ihn nie), dann LBHOMEDIR/LBPPLUGINDIR, dann der
+ * Installationspfad (<home>/bin/plugins/<ordner> -> <home>/webfrontend/htmlauth/plugins/<ordner>). */
+$sg_kand = array(dirname(__DIR__) . '/webfrontend/htmlauth/sg_lib.php');
+$sg_lb = getenv('LBHOMEDIR');
+$sg_ordner = getenv('LBPPLUGINDIR') ? basename(rtrim((string) getenv('LBPPLUGINDIR'), '/')) : basename(__DIR__);
+if ($sg_lb) { $sg_kand[] = $sg_lb . '/webfrontend/htmlauth/plugins/' . $sg_ordner . '/sg_lib.php'; }
+$sg_kand[] = dirname(dirname(dirname(__DIR__))) . '/webfrontend/htmlauth/plugins/' . basename(__DIR__) . '/sg_lib.php';
+$sg_lib = '';
+foreach ($sg_kand as $sg_k) {
+    if (is_file($sg_k)) { $sg_lib = $sg_k; break; }
+}
+if ($sg_lib === '') {
+    // Fail closed, und mit Begruendung.
+    echo json_encode(array(
+        'desc'   => 'Signal Bot',
+        'status' => 3,
+        'result' => 'Die Bibliothek sg_lib.php wurde nicht gefunden - das Plugin ist unvollstaendig installiert.',
+    )) . "\n";
+    exit(0);
+}
+require_once $sg_lib;
+
+list($sg_status, $sg_text) = sg_gesundheit();
+
+echo json_encode(array(
+    'desc'    => 'Signal Bot',
+    'status'  => (int) $sg_status,
+    'result'  => (string) $sg_text,
+    'logfile' => sg_paths()['log'],
+), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+exit(0);

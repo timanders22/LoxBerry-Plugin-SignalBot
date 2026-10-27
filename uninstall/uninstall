@@ -32,6 +32,65 @@ rm -f /etc/sudoers.d/loxberry-signalbot
 # Erkennung ueber die Sperrdatei allein gibt es seit 0.9.23 nicht mehr.
 [ -n "$ARGV5" ] || ARGV5="$LBHOMEDIR"
 [ -n "$ARGV3" ] || ARGV3="signalbot"
+
+# ---- Befehlsbruecke und Haus-Leser (seit 0.9.30; Bauart Ferien/ACTi uninstall) - ZUERST, vor dem Bot ----
+#
+# Die Bruecke anhalten (stop beendet Dienst und mosquitto_sub, auch ein verwaistes,
+# und legt als root nichts an - Bruecke 1.0.1, BB1), argumentweise nachzaehlen, die
+# Optionsdateien mit dem Broker-Kennwort ueberschreiben und den Ordner befehle/
+# entfernen. Im Broker bleibt nichts: Quittungen und status/befehle sind nie
+# zurueckbehalten, der Status ueber das MQTT-Gateway V2 ebenso. Den Haus-Leser
+# argumentweise beenden (er schreibt nichts unter haus/).
+case "$ARGV3" in ''|*/*|*..*) SG_OK=0 ;; *) SG_OK=1 ;; esac
+if [ "$SG_OK" = 1 ] && [ -n "$ARGV5" ]; then
+    BBSH="$ARGV5/bin/plugins/$ARGV3/befehlsbruecke.sh"
+    BBPHP="$ARGV5/bin/plugins/$ARGV3/befehlsbruecke.php"
+    BBDIR="$ARGV5/data/plugins/$ARGV3/befehle"
+    HAUS="$ARGV5/bin/plugins/$ARGV3/sg_haus.php"
+    if [ -f "$BBSH" ]; then
+        timeout 40 bash "$BBSH" stop
+    fi
+    BB_REST=0
+    SG_HN=0
+    for d in /proc/[0-9]*; do
+        mapfile -d '' -t a 2>/dev/null < "$d/cmdline" || continue
+        if [ "${#a[@]}" -eq 2 ] && [ "${a[1]}" = "$BBPHP" ] && [[ "${a[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+            kill -9 "${d#/proc/}" 2>/dev/null
+            BB_REST=$((BB_REST + 1))
+        fi
+        if [ "${#a[@]}" -eq 2 ] && [ "${a[1]}" = "$HAUS" ] && [[ "${a[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+            kill "${d#/proc/}" 2>/dev/null
+            SG_HN=$((SG_HN + 1))
+        fi
+    done
+    BB_ABOS=0
+    for d in /proc/[0-9]*; do
+        read -r c 2>/dev/null < "$d/comm" || continue
+        [ "$c" = "mosquitto_sub" ] || continue
+        mapfile -d '' -t e 2>/dev/null < "$d/environ" || continue
+        for x in "${e[@]}"; do
+            if [ "$x" = "XDG_CONFIG_HOME=$BBDIR/mosquitto" ]; then kill -9 "${d#/proc/}" 2>/dev/null; BB_ABOS=$((BB_ABOS + 1)); fi
+        done
+    done
+    [ "$BB_REST" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_REST Dienst(e) erst mit kill -9 beendet."
+    [ "$BB_ABOS" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_ABOS mosquitto_sub erst mit kill -9 beendet."
+    [ "$SG_HN" -gt 0 ] && echo "<OK> Haus-Leser beendet ($SG_HN)."
+    if [ -d "$BBDIR" ]; then
+        for f in "$BBDIR/mosquitto/mosquitto_sub" "$BBDIR/mosquitto/mosquitto_pub"; do
+            if [ -f "$f" ]; then
+                n=$(stat -c %s "$f" 2>/dev/null || echo 64)
+                head -c "$n" /dev/zero > "$f" 2>/dev/null
+            fi
+        done
+        rm -rf "${BBDIR:?}"
+    fi
+    if [ -e "$BBDIR/mosquitto/mosquitto_sub" ] || [ -e "$BBDIR/mosquitto/mosquitto_pub" ]; then
+        echo "<WARNING> Befehlsbruecke: Optionsdateien liegen noch unter $BBDIR/mosquitto - von Hand entfernen."
+    elif [ -f "$BBSH" ]; then
+        echo "<OK> Befehlsbruecke angehalten, ihre Zugangsdaten entfernt."
+    fi
+fi
+
 BOT="$ARGV5/bin/plugins/$ARGV3/sg_bot.php"
 BOT_R=$(readlink -f "$BOT" 2>/dev/null)
 [ -n "$BOT_R" ] || BOT_R="$BOT"

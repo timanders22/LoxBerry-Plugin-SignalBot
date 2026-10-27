@@ -169,8 +169,10 @@ if ($sg_post) {
 }
 
 /* ================= Downloads (vor jeder Ausgabe, ohne Umleitung) ================= */
-if ($sg_post && (isset($_POST['vorlage']) || isset($_POST['vorlage_out']))) {
-    list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage();
+if ($sg_post && (isset($_POST['vorlage']) || isset($_POST['vorlage_out']) || isset($_POST['vorlage_bruecke']))) {
+    /* vorlage_bruecke (seit 0.9.30): die sechs Musterprojekt-Befehle am UDP-Eingang des MQTT-Gateways V2. */
+    list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_bruecke']) ? sg_bruecke_vorlage()
+        : (isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage());
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $sg_vname . '"');
     echo $sg_vinhalt;
@@ -196,6 +198,10 @@ if ($sg_post && isset($_POST['sg_sichern'])) {
 
 /* ================= Protokoll leeren ================= */
 if ($sg_post && isset($_POST['clearlog'])) {
+    /* G7 (0.9.30): ein Haekchen zur Bestaetigung, sonst passiert nichts (Regeln/04, loeschender Knopf). */
+    if (empty($_POST['log_bestaetigt'])) {
+        sg_umleiten('tab-log', array(), array(sg_t('LOG.M_UNBESTAETIGT')));
+    }
     $sg_lf = sg_paths()['log'];
     @mkdir(dirname($sg_lf), 0775, true);
     if (sg_log_setzen($sg_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n")) {
@@ -277,7 +283,18 @@ if ($sg_post && isset($_POST['sperre'])) {
 
 /* ================= Ereignisprotokoll leeren ================= */
 if ($sg_post && isset($_POST['clearaudit'])) {
-    if (sg_write_atomic(sg_datadir() . '/ereignisse.json', json_encode(array()), 0600)) {
+    /* G7 (0.9.30): nur mit Haekchen; danach steht das Leeren selbst als ERSTER Eintrag darin (auch bei
+     * ausgeschaltetem Ereignisprotokoll - sonst waere nicht nachvollziehbar, wer die Spuren entfernt hat). */
+    if (empty($_POST['audit_bestaetigt'])) {
+        sg_umleiten('tab-log', array(), array(sg_t('LOG.M_UNBESTAETIGT')));
+    }
+    $sg_as = @fopen(sg_tmpdir() . '/ereignisse.lock', 'c');
+    if ($sg_as !== false) { flock($sg_as, LOCK_EX); }
+    $sg_aok = sg_write_atomic(sg_datadir() . '/ereignisse.json', json_encode(array(array('ts' => time(),
+        'wer' => 'Oberflaeche', 'was' => 'Ereignisprotokoll geleert', 'detail' => ''))), 0600);
+    if ($sg_as !== false) { flock($sg_as, LOCK_UN); fclose($sg_as); }
+    if ($sg_aok) {
+        sg_log('Ereignisprotokoll ueber die Oberflaeche geleert');
         sg_umleiten('tab-log', array(sg_t('LOG.M_AUDIT_LEER')), array());
     }
     sg_umleiten('tab-log', array(), array(sg_t('LOG.M_AUDIT_NICHT_LEER')));
@@ -298,10 +315,12 @@ if ($sg_post && isset($_POST['testaktion'])) {
 if ($sg_post && isset($_POST['speichern'])) {
     $sg_formfelder = array('rpc_url', 'erlaubt', 'stille', 'bremse', 'pin_versuche', 'pin_sperre',
                            'zustand_ein', 'audit', 'herzschlag', 'gruppe', 'nacht_von', 'nacht_bis',
-                           'quittung_takt', 'quittung_max', 'pin_loeschen');
+                           'quittung_takt', 'quittung_max', 'pin_loeschen', 'plugin_absender', 'haus_status_ein',
+                           'haus_bereiche', 'notiz_ein');
     $sg_eigene = array('rpc_url', 'konto', 'erlaubt', 'pin', 'bremse', 'pin_versuche', 'pin_sperre',
                        'gruppe', 'nacht_von', 'nacht_bis', 'quittung_takt', 'quittung_max',
-                       'stille', 'zustand_ein', 'audit', 'herzschlag');
+                       'stille', 'zustand_ein', 'audit', 'herzschlag', 'plugin_absender', 'haus_status_ein',
+                       'haus_bereiche', 'notiz_ein');
     $sg_falsch = array();   // Formularfeld => Meldung
     $sg_werte = array();    // Schluessel => Wert
 
@@ -342,6 +361,11 @@ if ($sg_post && isset($_POST['speichern'])) {
     if ($sg_pin !== '' && !preg_match('/^[0-9A-Za-z]{4,64}$/', $sg_pin)) {
         $sg_falsch['pin'] = sg_t('EINST.FEHLER_PIN_ZEICHEN');
     }
+    /* G3 (0.9.30): neue PIN UND "Gespeicherte PIN loeschen" zugleich ist ein Widerspruch - beanstanden, nichts
+     * speichern (bis 0.9.29 gewann still das Loeschen). */
+    if ($sg_pin !== '' && !empty($_POST['pin_loeschen'])) {
+        $sg_falsch['pin'] = sg_t('EINST.FEHLER_PIN_BEIDES');
+    }
 
     foreach (array('bremse', 'pin_versuche', 'pin_sperre', 'quittung_takt', 'quittung_max') as $sg_zk) {
         $sg_v = sg_ganz_lesen(sg_post_text($sg_zk));
@@ -356,8 +380,19 @@ if ($sg_post && isset($_POST['speichern'])) {
     $sg_werte['nacht_bis'] = trim(sg_post_text('nacht_bis'));
     /* mqtt_ein und mqtt_topic wohnen im Reiter MQTT und haben dort ein eigenes
      * Formular; sie werden hier nicht angefasst. */
-    foreach (array('stille', 'zustand_ein', 'audit', 'herzschlag') as $sg_hk) {
+    foreach (array('stille', 'zustand_ein', 'audit', 'herzschlag', 'haus_status_ein', 'notiz_ein') as $sg_hk) {
         $sg_werte[$sg_hk] = isset($_POST[$sg_hk]) ? 1 : 0;
+    }
+    /* Seit 0.9.30: freigegebene Absender-Plugins (Vorschlag 1) und Haus-Bereiche (Vorschlag 3) - Haekchenlisten,
+     * geprueft in sg_config_maengel (Ordnernamen bzw. bekannte Woerter). */
+    foreach (array('plugin_absender', 'haus_bereiche') as $sg_lk) {
+        $sg_werte[$sg_lk] = array();
+        if (isset($_POST[$sg_lk]) && is_array($_POST[$sg_lk])) {
+            foreach ($_POST[$sg_lk] as $sg_x) {
+                if (!is_string($sg_x)) { $sg_falsch[$sg_lk] = sg_t($sg_lk === 'plugin_absender' ? 'EINST.FEHLER_PLUGINS' : 'EINST.FEHLER_HAUS_BEREICHE'); continue; }
+                $sg_werte[$sg_lk][] = $sg_x;
+            }
+        }
     }
 
     list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_werte, $sg_pin, $sg_eigene, &$sg_falsch) {
@@ -392,7 +427,9 @@ if ($sg_post && isset($_POST['speichern'])) {
         return $sg_falsch ? null : $neu;
     });
     if ($sg_falsch) {
-        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.NICHT_GESPEICHERT')), array_values($sg_falsch)),
+        /* G3 (0.9.30): die PIN reist nie mit (Regeln/04) - wer eine neue eingegeben hat, erfaehrt es. */
+        $sg_pinhinweis = ($sg_pin !== '' && !isset($sg_falsch['pin'])) ? array(sg_t('EINST.PIN_NICHT_UEBERNOMMEN')) : array();
+        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.NICHT_GESPEICHERT')), array_values($sg_falsch), $sg_pinhinweis),
             array('eingaben' => sg_eingaben_sammeln('settings', $sg_formfelder, array_keys($sg_falsch))));
     }
     if (!$sg_ok) {
@@ -415,14 +452,19 @@ if ($sg_post && isset($_POST['save_mqtt'])) {
         $sg_falsch['mqtt_topic'] = sg_t('EINST.FEHLER_TOPIC');
     }
     $sg_mein = isset($_POST['mqtt_ein']) ? 1 : 0;
-    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_mtopic, $sg_mein, &$sg_falsch) {
+    /* Seit 0.9.30: die Befehlsbruecke (zwei Haken, ab Werk aus; E-E6). */
+    $sg_bein = isset($_POST['befehle_mqtt_ein']) ? 1 : 0;
+    $sg_bent = isset($_POST['befehle_entsperren_ein']) ? 1 : 0;
+    list($sg_ok, $sg_mcfg) = sg_config_aendern(function ($alt) use ($sg_mtopic, $sg_mein, $sg_bein, $sg_bent, &$sg_falsch) {
         if ($sg_falsch) { return null; }
         $neu = $alt;
         $neu['mqtt_ein'] = $sg_mein;
         $neu['mqtt_topic'] = $sg_mtopic;
+        $neu['befehle_mqtt_ein'] = $sg_bein;
+        $neu['befehle_entsperren_ein'] = $sg_bent;
         $ma = sg_config_maengel($alt);
         foreach (sg_config_maengel($neu) as $k => $t) {
-            if (in_array($k, array('mqtt_topic', 'mqtt_ein'), true) || !isset($ma[$k])) {
+            if (in_array($k, array('mqtt_topic', 'mqtt_ein', 'befehle_mqtt_ein', 'befehle_entsperren_ein'), true) || !isset($ma[$k])) {
                 if (!isset($sg_falsch[$k])) { $sg_falsch[$k] = $t; }
             }
         }
@@ -430,14 +472,17 @@ if ($sg_post && isset($_POST['save_mqtt'])) {
     });
     if ($sg_falsch) {
         sg_umleiten('tab-mqtt', array(), array_merge(array(sg_t('EINST.NICHT_GESPEICHERT')), array_values($sg_falsch)),
-            array('eingaben' => sg_eingaben_sammeln('mqtt', array('mqtt_ein', 'mqtt_topic'), array_keys($sg_falsch))));
+            array('eingaben' => sg_eingaben_sammeln('mqtt', array('mqtt_ein', 'mqtt_topic', 'befehle_mqtt_ein', 'befehle_entsperren_ein'),
+                array_keys($sg_falsch))));
     }
     if (!$sg_ok) {
         sg_umleiten('tab-mqtt', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
     }
-    // Das Gateway-Abo auf den neuen Praefix bringen (M9).
+    // Das Gateway-Abo (V1-Rueckfall) auf den neuen Praefix bringen (M9).
     sg_abo_datei($sg_mtopic, true);
-    sg_umleiten('tab-mqtt', array(sg_t('EINST.GESPEICHERT')), array());
+    /* Die Bruecke sofort schalten (seit 0.9.30; Bauart cam_bruecke_schalten). */
+    list($sg_bm, $sg_bf) = sg_bruecke_meldungen(sg_bruecke_schalten($sg_mcfg));
+    sg_umleiten('tab-mqtt', array_merge(array(sg_t('EINST.GESPEICHERT')), $sg_bm), $sg_bf);
 }
 
 /* ================= Befehlstabelle speichern ================= */
@@ -524,6 +569,131 @@ if ($sg_post && isset($_POST['befehle_speichern'])) {
     sg_umleiten('tab-befehle', array(sg_t('BEF.GESPEICHERT')), array());
 }
 
+/* ---------------- HTTP-Endpunkt fuer Loxone (seit 0.9.30, E-E8) ----------------
+ * Reiter Einbindung, Abschnitt "Bestehende Anlagen". Eigenes Formular, eigener Handler. */
+if ($sg_post && isset($_POST['save_endpunkt'])) {
+    $sg_ein = isset($_POST['endpunkt_ein']) ? 1 : 0;
+    list($sg_ok, ) = sg_config_aendern(function ($c) use ($sg_ein) { $c['endpunkt_ein'] = $sg_ein; return $c; });
+    if (!$sg_ok) {
+        sg_umleiten('tab-loxone', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    sg_log('HTTP-Endpunkt fuer Loxone ' . ($sg_ein ? 'eingeschaltet' : 'ausgeschaltet') . ' (Oberflaeche).');
+    sg_ereignis_merken('Oberflaeche', $sg_ein ? 'Endpunkt an' : 'Endpunkt aus', '');
+    sg_umleiten('tab-loxone', array(sg_t($sg_ein ? 'LOX.M_ENDPUNKT_AN' : 'LOX.M_ENDPUNKT_AUS')), array());
+}
+
+/* ---------------- Gaeste mit "gueltig bis" (seit 0.9.30, Vorschlag 4, E-E17) ----------------
+ * Eine Zeile je Gast und eine leere fuer einen neuen. Geprueft, nicht gesaeubert; bei einer Beanstandung wird
+ * NICHTS gespeichert. Die Eingabe "gueltig bis" ist Ortszeit (Europe/Berlin); eine Verschiebung in der
+ * Zeitumstellung wird gemeldet (N12). Entfernen nur mit Haekchen. "+1 Tag" verlaengert ab jetzt bzw. ab "bis". */
+if ($sg_post && isset($_POST['gaeste_speichern'])) {
+    $sg_alt = sg_config();
+    $sg_auswahl = sg_gast_befehlsauswahl($sg_alt);
+    $sg_falsch = array();
+    $sg_hinw = array();
+    $sg_neu_g = array();
+    $sg_ereig = array();
+    $sg_jetzt = time();
+    $sg_plus = (isset($_POST['gast_plus']) && is_string($_POST['gast_plus']) && preg_match('/^[0-9]{1,2}$/', $_POST['gast_plus']))
+        ? (int) $_POST['gast_plus'] : -1;
+    $sg_n = count($sg_alt['gaeste']);
+    $sg_befehle_post = array();
+    for ($sg_i = 0; $sg_i <= $sg_n && $sg_i < SG_GAESTE_MAX; $sg_i++) {
+        $sg_ag = $sg_i < $sg_n ? $sg_alt['gaeste'][$sg_i] : null;
+        $sg_nr = trim(sg_post_zelle('g_nummer', $sg_i));
+        $sg_name = trim(sg_post_zelle('g_name', $sg_i));
+        $sg_bis_ein = trim(sg_post_zelle('g_bis', $sg_i));
+        $sg_bef = array();
+        if (isset($_POST['g_befehle']) && is_array($_POST['g_befehle']) && isset($_POST['g_befehle'][$sg_i]) && is_array($_POST['g_befehle'][$sg_i])) {
+            foreach ($_POST['g_befehle'][$sg_i] as $sg_x) { if (is_string($sg_x)) { $sg_bef[] = $sg_x; } }
+        }
+        $sg_befehle_post[(string) $sg_i] = $sg_bef;
+        $sg_weg = isset($_POST['g_weg']) && is_array($_POST['g_weg']) && isset($_POST['g_weg'][$sg_i]);
+        if ($sg_ag !== null && $sg_weg) {
+            $sg_ereig[] = array('Gast entfernt', sg_gast_wer($sg_ag));
+            continue;
+        }
+        if ($sg_ag === null && $sg_nr === '') { continue; }   // die leere Zeile fuer einen neuen Gast
+        if (!sg_ist_nummer($sg_nr)) {
+            $sg_falsch['g_nummer[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_NUMMER'), $sg_i + 1);
+        } elseif (in_array($sg_nr, $sg_alt['erlaubt'], true)) {
+            $sg_falsch['g_nummer[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_SCHON_ERLAUBT'), $sg_i + 1);
+        }
+        if (preg_match('/[\x00-\x1F\x7F]/', $sg_name) || sg_laenge($sg_name) > 30) {
+            $sg_falsch['g_name[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_NAME'), $sg_i + 1);
+        }
+        if (array_diff($sg_bef, $sg_auswahl)) {
+            $sg_falsch['g_befehle[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_BEFEHL_FREI'), $sg_i + 1);
+        } elseif (!$sg_bef) {
+            $sg_falsch['g_befehle[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_BEFEHL_LEER'), $sg_i + 1);
+        }
+        $sg_bis = null;
+        if ($sg_ag !== null && $sg_plus === $sg_i) {
+            $sg_bis = max((int) $sg_ag['bis'], $sg_jetzt) + 86400;
+            if ($sg_bis > $sg_jetzt + SG_GAST_TAGE * 86400) {
+                $sg_falsch['g_bis[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_BIS_ZU_LANG'), $sg_i + 1, SG_GAST_TAGE);
+            }
+        } elseif ($sg_ag !== null && $sg_bis_ein === sg_gast_eingabe($sg_ag['bis'])) {
+            $sg_bis = (int) $sg_ag['bis'];   // unveraendert - auch ein abgelaufener bleibt, wie er ist
+        } else {
+            list($sg_u, $sg_grund) = sg_gast_bis_lesen($sg_bis_ein, $sg_jetzt);
+            if ($sg_u === null) {
+                // je Grund ein eigener Satz (ausgeschrieben, damit die Platzhalterpruefung jeden Schluessel sieht)
+                if ($sg_grund === 'DATUM') {
+                    $sg_bt = sprintf(sg_t('GAST.FEHLER_BIS_DATUM'), $sg_i + 1);
+                } elseif ($sg_grund === 'VERGANGEN') {
+                    $sg_bt = sprintf(sg_t('GAST.FEHLER_BIS_VERGANGEN'), $sg_i + 1);
+                } elseif ($sg_grund === 'ZU_LANG') {
+                    $sg_bt = sprintf(sg_t('GAST.FEHLER_BIS_ZU_LANG'), $sg_i + 1, SG_GAST_TAGE);
+                } else {
+                    $sg_bt = sprintf(sg_t('GAST.FEHLER_BIS_FORM'), $sg_i + 1);
+                }
+                $sg_falsch['g_bis[' . $sg_i . ']'] = $sg_bt;
+            } else {
+                $sg_bis = $sg_u;
+                if ($sg_grund !== '') {
+                    $sg_hinw[] = sprintf(sg_t('GAST.VERSCHOBEN'), $sg_i + 1, sg_e(sg_gast_zeit($sg_u)));
+                }
+            }
+        }
+        if ($sg_bis === null) { continue; }
+        $sg_g = array('nummer' => $sg_nr, 'name' => $sg_name, 'bis' => (int) $sg_bis,
+                      'befehle' => array_values(array_unique($sg_bef)),
+                      'angelegt' => $sg_ag !== null ? (int) $sg_ag['angelegt'] : $sg_jetzt);
+        foreach ($sg_neu_g as $sg_vg) {
+            if ($sg_vg['nummer'] === $sg_nr) { $sg_falsch['g_nummer[' . $sg_i . ']'] = sprintf(sg_t('GAST.FEHLER_DOPPELT'), $sg_i + 1); }
+        }
+        if ($sg_ag === null) {
+            $sg_ereig[] = array('Gast angelegt', sg_gast_wer($sg_g) . ', bis ' . sg_gast_zeit($sg_g['bis']) . ', Befehle ' . implode(', ', $sg_g['befehle']));
+        } elseif ((int) $sg_ag['bis'] !== (int) $sg_g['bis'] || $sg_ag['befehle'] !== $sg_g['befehle'] || $sg_ag['nummer'] !== $sg_g['nummer']) {
+            $sg_ereig[] = array('Gast verlaengert', sg_gast_wer($sg_g) . ', bis ' . sg_gast_zeit($sg_g['bis']) . ', Befehle ' . implode(', ', $sg_g['befehle']));
+        }
+        $sg_neu_g[] = $sg_g;
+    }
+    if (!$sg_falsch) {
+        list($sg_ok, ) = sg_config_aendern(function ($c) use ($sg_neu_g, &$sg_falsch) {
+            $c['gaeste'] = $sg_neu_g;
+            $m = sg_config_maengel($c);
+            if (isset($m['gaeste'])) { $sg_falsch['g_nummer[0]'] = $m['gaeste']; return null; }
+            return $c;
+        });
+    }
+    if ($sg_falsch) {
+        $sg_eing = sg_eingaben_sammeln('gaeste', array('g_nummer', 'g_name', 'g_bis'), array_keys($sg_falsch));
+        $sg_eing['werte']['g_befehle'] = $sg_befehle_post;
+        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('GAST.NICHT_GESPEICHERT')), array_values($sg_falsch)),
+            array('eingaben' => $sg_eing));
+    }
+    if (!$sg_ok) {
+        sg_umleiten('tab-settings', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    foreach ($sg_ereig as $sg_ev) {
+        sg_log($sg_ev[0] . ': ' . $sg_ev[1] . ' (Oberflaeche).');
+        sg_ereignis_merken('Oberflaeche', $sg_ev[0], $sg_ev[1]);
+    }
+    sg_umleiten('tab-settings', array_merge(array(sg_t('GAST.GESPEICHERT')), $sg_hinw), array());
+}
+
 /* ---------------- Einstellungen zurueckspielen ----------------
  *
  * is_uploaded_file() ZUERST, dann die Groessengrenze, dann JEDER Wert mit
@@ -538,8 +708,8 @@ if ($sg_post && isset($_POST['sg_zurueck'])) {
     if ((int) $_FILES['sg_sicherung']['size'] > 262144) {
         sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_ZU_GROSS')));
     }
-    list($sg_neu, $sg_mangel, $sg_n) = sg_sicherung_lesen(
-        (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name']));
+    list($sg_neu, $sg_mangel, $sg_n, $sg_shinw) = array_pad(sg_sicherung_lesen(
+        (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name'])), 4, array());
     if ($sg_neu === null) {
         /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird nichts. */
         sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.SICH_ABGELEHNT')), $sg_mangel));
@@ -550,7 +720,9 @@ if ($sg_post && isset($_POST['sg_zurueck'])) {
     }
     sg_abo_datei($sg_neu['mqtt_topic'], true);
     sg_log('Einstellungen aus einer Sicherung zurueckgespielt (' . (int) $sg_n . ' Werte).');
-    sg_umleiten('tab-settings', array(sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n)), array());
+    /* Seit 0.9.30: die Bruecke nach den zurueckgespielten Haken schalten. */
+    list($sg_bm, $sg_bf) = sg_bruecke_meldungen(sg_bruecke_schalten($sg_neu));
+    sg_umleiten('tab-settings', array_merge(array(sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n)), $sg_shinw, $sg_bm), $sg_bf);
 }
 
 /* Ein POST, den kein Handler kennt, endet ebenfalls mit einer Umleitung. */
@@ -600,6 +772,17 @@ function sg_fh($formular, $feld, $gespeichert, $idx = null)
     $w = isset($sg_eingaben['werte'][$feld]) ? $sg_eingaben['werte'][$feld] : null;
     if ($idx !== null) { return is_array($w) && isset($w[(string) (int) $idx]); }
     return $w !== null;
+}
+/** Haekchenliste (seit 0.9.30): nach einer Beanstandung so, wie sie abgeschickt wurde, sonst der gespeicherte Stand. */
+function sg_fl($formular, $feld, $wert, $gespeichert, $idx = null)
+{
+    global $sg_eingaben;
+    if (sg_fa($formular)) {
+        $w = isset($sg_eingaben['werte'][$feld]) ? $sg_eingaben['werte'][$feld] : array();
+        if ($idx !== null) { $w = (is_array($w) && isset($w[(string) (int) $idx]) && is_array($w[(string) (int) $idx])) ? $w[(string) (int) $idx] : array(); }
+        return is_array($w) && in_array((string) $wert, $w, true);
+    }
+    return is_array($gespeichert) && in_array((string) $wert, $gespeichert, true);
 }
 /** Markierung eines beanstandeten Felds (Attribute, schon maskiert). */
 function sg_fm($feld, $idx = null)
@@ -896,6 +1079,43 @@ $sg_reiter = array(
   </div>
 </div>
 
+<?php
+/* Zwei Wege (Nachtrag 27.10., Zusatz Hausherr): A = eigene Nummer, Bot als verknuepftes Geraet ("Notiz an mich");
+ * B = eigene Nummer fuer den Bot (registriert). Nur angezeigt und erklaert - das Plugin registriert nicht selbst,
+ * das Captcha loest der Hausherr in seinem Browser. */
+$sg_weg = sg_konto_weg($sg_cfg, $sg_lebt);
+$sg_weg_text = array('A' => sg_t('EINST.WEG_IST_A'), 'B' => sg_t('EINST.WEG_IST_B'),
+                     'keins' => sg_t('EINST.WEG_IST_KEINS'), 'unbekannt' => sg_t('EINST.WEG_IST_UNBEKANNT'));
+$sg_rpc_adr = rtrim((string) $sg_cfg['rpc_url'], '/') . '/api/v1/rpc';
+$sg_cmd_reg = "curl -s " . $sg_rpc_adr . " -H 'Content-Type: application/json' -d '"
+    . '{"jsonrpc":"2.0","id":1,"method":"register","params":{"account":"+49XXXXXXXXXX","captcha":"signalcaptcha://...","voice":false}}' . "'";
+$sg_cmd_ver = "curl -s " . $sg_rpc_adr . " -H 'Content-Type: application/json' -d '"
+    . '{"jsonrpc":"2.0","id":2,"method":"verify","params":{"account":"+49XXXXXXXXXX","verificationCode":"123456"}}' . "'";
+?>
+<h3><?= sg_e(sg_t('EINST.H_WEGE')) ?></h3>
+<div class="sm-hinweis"><?= sg_t('EINST.WEG_A_TEXT') ?><br><br><?= sg_t('EINST.WEG_B_TEXT') ?></div>
+<div class="sm-step"><b><?= sg_e(sg_t('EINST.WEG_AKTIV')) ?></b> <?= $sg_weg_text[$sg_weg] ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="notiz_ein" value="1" <?= sg_fh('settings', 'notiz_ein', !empty($sg_cfg['notiz_ein'])) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_NOTIZ')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_NOTIZ') ?></div>
+  <?php if ($sg_weg === 'A' && !empty($sg_cfg['notiz_ein']) && !sg_erlaubt((string) $sg_cfg['konto'])) { ?><div class="sm-warnung"><?= sg_t('EINST.NOTIZ_NICHT_ERLAUBT') ?></div><?php } ?>
+</div>
+<details style="margin:8px 0 16px;">
+  <summary><b><?= sg_e(sg_t('EINST.WECHSEL_TITEL')) ?></b></summary>
+  <ol class="sm-schritte">
+    <li><?= sg_t('EINST.WECHSEL_1') ?></li>
+    <li><?= sg_t('EINST.WECHSEL_2') ?></li>
+    <li><?= sg_t('EINST.WECHSEL_3') ?><pre class="sm-mono" style="white-space:pre-wrap;word-break:break-all;"><?= sg_e($sg_cmd_reg) ?></pre></li>
+    <li><?= sg_t('EINST.WECHSEL_4') ?><pre class="sm-mono" style="white-space:pre-wrap;word-break:break-all;"><?= sg_e($sg_cmd_ver) ?></pre></li>
+    <li><?= sg_t('EINST.WECHSEL_5') ?></li>
+    <li><?= sg_t('EINST.WECHSEL_6') ?></li>
+  </ol>
+  <div class="sm-hinweis"><?= sg_t('EINST.WECHSEL_BLEIBT') ?></div>
+</details>
+
 <h2><?= sg_e(sg_t('EINST.H_ABSICHERUNG')) ?></h2>
 <div class="sm-warnung"><?= sg_t('EINST.ABSICHERUNG_TEXT') ?></div>
 <div class="sm-feld">
@@ -992,8 +1212,91 @@ $sg_reiter = array(
 <?php /* MQTT stand hier bis zu dieser Fassung. Es wohnt jetzt
          vollstaendig im Reiter MQTT - eine Sache, eine Stelle. */ ?>
 
+<?php /* Seit 0.9.30 (Gruppe 32, Vorschlag 1, E-E12): Meldungen anderer Plugins ueber die Befehlsbruecke
+         (signalbot/befehl/plugin/<ordner>). Angeboten werden die installierten Plugins aus der plugindatabase.json
+         (nur Ordnernamen gelesen); ab Werk ist keines freigegeben. Wirkt nur mit "Befehle ueber MQTT annehmen". */ ?>
+<h2><?= sg_e(sg_t('EINST.H_PLUGINS')) ?></h2>
+<div class="sm-hilfe"><?= sg_t('EINST.H_PLUGINS_TEXT') ?></div>
+<?php $sg_pl_alle = array_values(array_unique(array_merge(sg_plugins_installiert(), $sg_cfg['plugin_absender']))); sort($sg_pl_alle); ?>
+<div class="sm-feld"<?= sg_fm('plugin_absender') ?>>
+<?php if (!$sg_pl_alle) { ?><div class="sm-hilfe"><?= sg_t('EINST.PLUGINS_KEINE') ?></div><?php } ?>
+<?php foreach ($sg_pl_alle as $sg_pl) { ?>
+  <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-right:14px;">
+    <input data-role="none" type="checkbox" name="plugin_absender[]" value="<?= sg_e($sg_pl) ?>" <?= sg_fl('settings', 'plugin_absender', $sg_pl, $sg_cfg['plugin_absender']) ? 'checked' : '' ?>>
+    <span class="sm-mono"><?= sg_e($sg_pl) ?></span>
+  </label>
+<?php } ?>
+</div>
+
+<?php /* Seit 0.9.30 (Vorschlag 3, E-E15/E-E16): Haus-Werte im Chat ("status strom" ...). Liest ueber den Broker des
+         LoxBerry nur die Haus-Themen der angehakten Bereiche (Begleitprozess bin/sg_haus.php); zuhause ab Werk aus. */ ?>
+<h2><?= sg_e(sg_t('EINST.H_HAUS')) ?></h2>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="haus_status_ein" value="1" <?= sg_fh('settings', 'haus_status_ein', !empty($sg_cfg['haus_status_ein'])) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_HAUS')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_HAUS_TEXT') ?></div>
+</div>
+<div class="sm-feld"<?= sg_fm('haus_bereiche') ?>>
+  <label><?= sg_e(sg_t('EINST.L_HAUS_BEREICHE')) ?></label>
+<?php foreach (array_keys(sg_haus_bereiche_alle()) as $sg_hw) { ?>
+  <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-right:14px;">
+    <input data-role="none" type="checkbox" name="haus_bereiche[]" value="<?= sg_e($sg_hw) ?>" <?= sg_fl('settings', 'haus_bereiche', $sg_hw, $sg_cfg['haus_bereiche']) ? 'checked' : '' ?>>
+    <span class="sm-mono">status <?= sg_e($sg_hw) ?></span>
+  </label>
+<?php } ?>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_HAUS_BEREICHE') ?></div>
+</div>
+
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
+</div>
+</form>
+
+<?php /* Seit 0.9.30 (Gruppe 32, Vorschlag 4, E-E17): Gaeste mit "gueltig bis". Eigenes Formular. Ein Gast ist nur
+         Absender, nie Empfaenger; er darf nur die angehakten Woerter und "hilfe". Entfernen nur mit Haekchen (Regeln/04
+         loeschender Knopf); "+1 Tag" veraendert - orange. Eingabe als Ortszeit (MEZ/MESZ), gespeichert als Unix-Zeit. */ ?>
+<h2><?= sg_e(sg_t('GAST.H_TITEL')) ?></h2>
+<div class="sm-hilfe"><?= sprintf(sg_t('GAST.TEXT'), SG_GAESTE_MAX, SG_GAST_TAGE) ?></div>
+<?php $sg_gw = sg_gast_befehlsauswahl($sg_cfg); $sg_gl = $sg_cfg['gaeste']; $sg_gn = count($sg_gl); ?>
+<form action="index.php" method="post" autocomplete="off">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+  <input data-role="none" type="hidden" name="gaeste_speichern" value="1">
+<div style="overflow-x:auto;">
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('GAST.T_NUMMER')) ?></th><th><?= sg_e(sg_t('GAST.T_NAME')) ?></th><th><?= sg_e(sg_t('GAST.T_BIS')) ?></th>
+    <th><?= sg_e(sg_t('GAST.T_BEFEHLE')) ?></th><th><?= sg_e(sg_t('GAST.T_ZUSTAND')) ?></th><th><?= sg_e(sg_t('GAST.T_AKTION')) ?></th></tr>
+<?php for ($sg_gi = 0; $sg_gi <= $sg_gn && $sg_gi < SG_GAESTE_MAX; $sg_gi++) {
+    $sg_g = $sg_gi < $sg_gn ? $sg_gl[$sg_gi] : array('nummer' => '', 'name' => '', 'bis' => 0, 'befehle' => array(), 'angelegt' => 0);
+    $sg_gueltig = $sg_gi < $sg_gn && sg_gast_gueltig($sg_g);
+    $sg_rest = (int) $sg_g['bis'] - time(); ?>
+<tr<?= ($sg_gi < $sg_gn && !$sg_gueltig) ? ' style="color:#888;"' : '' ?>>
+  <td><input data-role="none" type="text" name="g_nummer[<?= $sg_gi ?>]" value="<?= sg_e(sg_fw('gaeste', 'g_nummer', $sg_g['nummer'], $sg_gi)) ?>"<?= sg_fm('g_nummer', $sg_gi) ?> placeholder="+49..."></td>
+  <td><input data-role="none" type="text" name="g_name[<?= $sg_gi ?>]" value="<?= sg_e(sg_fw('gaeste', 'g_name', $sg_g['name'], $sg_gi)) ?>"<?= sg_fm('g_name', $sg_gi) ?> maxlength="30"></td>
+  <td><input data-role="none" type="datetime-local" name="g_bis[<?= $sg_gi ?>]" value="<?= sg_e(sg_fw('gaeste', 'g_bis', sg_gast_eingabe($sg_g['bis']), $sg_gi)) ?>"<?= sg_fm('g_bis', $sg_gi) ?>></td>
+  <td<?= sg_fm('g_befehle', $sg_gi) ?>>
+<?php if (!$sg_gw) { ?><span class="sm-hilfe"><?= sg_t('GAST.KEINE_BEFEHLE') ?></span><?php } ?>
+<?php foreach ($sg_gw as $sg_gwort) { ?>
+    <label style="display:block;font-weight:400;"><input data-role="none" type="checkbox" name="g_befehle[<?= $sg_gi ?>][]" value="<?= sg_e($sg_gwort) ?>" <?= sg_fl('gaeste', 'g_befehle', $sg_gwort, $sg_g['befehle'], $sg_gi) ? 'checked' : '' ?>> <span class="sm-mono"><?= sg_e($sg_gwort) ?></span></label>
+<?php } ?>
+  </td>
+  <td><?php if ($sg_gi >= $sg_gn) { echo sg_e(sg_t('GAST.NEU')); }
+            elseif ($sg_gueltig) { echo sg_e($sg_rest >= 86400 ? sprintf(sg_t('GAST.NOCH_TAGE'), (int) floor($sg_rest / 86400)) : sprintf(sg_t('GAST.NOCH_STUNDEN'), max(1, (int) ceil($sg_rest / 3600))))
+                                     . '<br><span class="sm-hilfe">' . sg_e(sg_gast_zeit($sg_g['bis'])) . '</span>'; }
+            else { echo sg_e(sg_t('GAST.ABGELAUFEN')); } ?></td>
+  <td><?php if ($sg_gi < $sg_gn) { ?>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input data-role="none" type="checkbox" name="g_weg[<?= $sg_gi ?>]" value="1"> <?= sg_e(sg_t('GAST.L_WEG')) ?></label><br>
+    <button data-role="none" class="sm-btn sm-b-aktion" style="min-width:0;margin-top:4px !important;" type="submit" name="gast_plus" value="<?= $sg_gi ?>"><?= sg_e(sg_t('GAST.K_PLUS')) ?></button>
+  <?php } ?></td>
+</tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hilfe"><?= sg_t('GAST.HILFE') ?></div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('GAST.K_SPEICHERN')) ?></button>
 </div>
 </form>
 
@@ -1033,6 +1336,15 @@ if ($sg_sich_mangel) { ?>
 <h2><?= sg_e(sg_t('BEF.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('BEF.ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= sg_t('BEF.STUFEN') ?></div>
+<?php /* N4 (0.9.30): eine gespeicherte Zeile, deren Thema der Bot inzwischen selbst belegt, wird nicht still
+         umbenannt - sie steht hier und im Reiter Test, und der Bot sendet sie nicht. */
+$sg_res = array();
+foreach ($sg_cfg['befehle'] as $sg_ri => $sg_rb) {
+    if (!empty($sg_rb['aktiv']) && $sg_rb['wort'] !== '' && $sg_rb['thema'] !== '' && sg_thema_reserviert($sg_rb['thema'])) {
+        $sg_res[] = sprintf(sg_t('BEF.FEHLER_THEMA_RESERVIERT'), sg_e($sg_rb['thema']), $sg_ri + 1);
+    }
+}
+if ($sg_res) { ?><div class="sm-fehler"><?= implode('<br>', $sg_res) ?></div><?php } ?>
 
 <form action="index.php" method="post" autocomplete="off">
   <?php echo sg_fmt(); ?>
@@ -1110,6 +1422,24 @@ if ($sg_sich_mangel) { ?>
   <label for="mqtt_topic"><?= sg_e(sg_t('EINST.L_MQTT_TOPIC')) ?></label>
   <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sg_e(sg_fw('mqtt', 'mqtt_topic', $sg_cfg['mqtt_topic'])) ?>"<?= sg_fm('mqtt_topic') ?> placeholder="signalbot">
 </div>
+<?php /* Seit 0.9.30 (Gruppe 32, Entscheidung 2, E-E4/E-E6; Entwurf 3.3): Meldungen aus Loxone ueber die
+         Befehlsbruecke 1.0.1. Zwei Haken, beide ab Werk aus, gespeichert mit diesem Formular; danach schaltet die
+         Seite die Bruecke sofort (sg_bruecke_schalten). Der zweite Haken erlaubt "entsperren" aus Loxone (N9). */ ?>
+<h3><?= sg_e(sg_t('BEFEHL.H_BEFEHLE')) ?></h3>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="befehle_mqtt_ein" value="1" <?= sg_fh('mqtt', 'befehle_mqtt_ein', !empty($sg_cfg['befehle_mqtt_ein'])) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('BEFEHL.L_ANNEHMEN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('BEFEHL.H_ANNEHMEN') ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="befehle_entsperren_ein" value="1" <?= sg_fh('mqtt', 'befehle_entsperren_ein', !empty($sg_cfg['befehle_entsperren_ein'])) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('BEFEHL.L_ENTSPERREN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('BEFEHL.H_ENTSPERREN') ?></div>
+</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -1135,8 +1465,39 @@ if ($sg_sich_mangel) { ?>
 <?= sg_t('MQTT.ABO_TEXT') ?>
 <div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/#</div>
 <?php list($sg_abo_pfad, $sg_abo_da) = sg_abo_datei($sg_cfg['mqtt_topic']); ?>
-<?= $sg_abo_da ? sg_t('MQTT.ABO_MITGELIEFERT') : sg_abo_text() ?>
+<?= $sg_abo_da ? sg_t('MQTT.ABO_MITGELIEFERT') . ' ' . sg_abo_text() : sg_abo_text() ?>
 </div>
+
+<?php
+/* Die V2-Hakenliste (seit 0.9.30, N1/N3; Bauart ACTi 1.9.32): nur bei Gateway-Fassung 2 oder wenn die Fassung nicht
+ * feststellbar ist. Dieselbe Quelle wie die Namenstabelle im Reiter Einbindung (sg_mqtt_namenstabelle()). */
+$sg_gwf = isset($sg_m['fassung']) ? (int) $sg_m['fassung'] : 0;
+$sg_nt = sg_mqtt_namenstabelle($sg_cfg);
+if ($sg_gwf >= 2 || $sg_gwf === 0) { ?>
+<h3><?= sg_e(sg_t('MQTT.H_V2')) ?></h3>
+<div class="sm-hilfe"><?= sg_t('MQTT.V2_TEXT') ?></div>
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('MQTT.T_GATEWAYNAME')) ?></th><th><?= sg_e(sg_t('MQTT.T_NONCACHED')) ?></th></tr>
+<?php foreach ($sg_nt as $sg_ne) {
+    if (!$sg_ne['haken']) { continue; } ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_ne['voll']) ?></span></td><td><span class="sm-mono"><?= sg_e($sg_ne['name']) ?></span></td>
+    <td><?= sg_e($sg_ne['nc'] ? sg_t('MQTT.JA') : '–') ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?= sg_t('MQTT.V2_OHNE') ?></div>
+<?php } ?>
+
+<h3><?= sg_e(sg_t('MQTT.H_STATUS')) ?></h3>
+<p class="sm-hilfe"><?= sg_t('MQTT.STATUS_TEXT') ?></p>
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('LOX.T_BEDEUTUNG')) ?></th><th><?= sg_e(sg_t('LOX.T_BEREICH')) ?></th><th><?= sg_e(sg_t('MQTT.T_WANN')) ?></th></tr>
+<?php foreach (sg_mqtt_status_themen($sg_cfg) as $sg_st) { ?>
+<tr><td><span class="sm-mono"><?= sg_e(sg_mqtt_thema_voll($sg_cfg, $sg_st['thema'])) ?></span></td>
+    <td><?= sg_t($sg_st['bez']) ?><?= $sg_st['fehl'] !== '' ? ' ' . sg_t($sg_st['fehl']) : '' ?></td>
+    <td><span class="sm-mono"><?= sg_e($sg_st['bereich']) ?></span></td>
+    <td><?= sg_e(sg_t($sg_st['leben'] ? 'MQTT.W_MINUTE' : 'MQTT.W_AENDERUNG')) ?></td></tr>
+<?php } ?>
+</table>
 
 <h3><?= sg_e(sg_t('MQTT.H_THEMEN')) ?></h3>
 <p class="sm-hilfe"><?= sg_t('MQTT.THEMEN_TEXT') ?></p>
@@ -1159,7 +1520,13 @@ if ($sg_sich_mangel) { ?>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
 <div class="sm-seite<?= $sg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
-<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span></div>
+<?php /* Seit 0.9.30 (Gruppe 32, E-E22-Form der Hausform): EINE Legende oben im Reiter. Gruen: Kopierknoepfe der
+         Namenstabelle; grau: Vorlagen; orange: Speichern des HTTP-Endpunkts (Abschnitt "Bestehende Anlagen"). */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= sg_t('LEGENDE.LESEN') ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= sg_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= sg_t('LEGENDE.AKTION') ?></span>
+</div>
 <h2><?= sg_e(sg_t('LOX.H_RICHTUNGEN')) ?></h2>
 <div class="sm-hinweis"><?= sg_t('LOX.RICHTUNGEN_TEXT') ?></div>
 
@@ -1190,48 +1557,82 @@ if ($sg_sich_mangel) { ?>
 </table>
 </div>
 
-<div class="sm-step"><b><?= sg_e(sg_t('LOX.SVI_T')) ?></b><br>
-<?= sg_t('LOX.SVI') ?>
+<?php
+/* Schritt 4 (seit 0.9.30, Entscheidung 2, E-E1): der Zustand des Bots ueber das MQTT-Gateway V2. Die Namenstabelle
+ * kommt aus sg_mqtt_namenstabelle() - dieselbe Quelle wie Sendecode, V2-Hakenliste (Reiter MQTT) und Reiter Test. */
+$sg_nt = sg_mqtt_namenstabelle($sg_cfg);
+?>
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SWERTE_T')) ?></b><br>
+<?= sg_t('LOX.SWERTE') ?>
 <table class="sm-tbl">
-<tr><th style="width:170px;"><?= sg_e(sg_t('LOX.T_TITEL')) ?></th><th style="width:70px;"><?= sg_e(sg_t('LOX.T_ART')) ?></th><th style="width:90px;"><?= sg_e(sg_t('LOX.T_BEREICH')) ?></th><th><?= sg_e(sg_t('LOX.T_BEDEUTUNG')) ?></th></tr>
-<?php foreach (sg_felder() as $sg_fn => $sg_fd) {
-    list($sg_analog, $sg_min, $sg_max, $sg_fs) = $sg_fd; ?>
-<tr><td><span class="sm-mono">SIGNAL_<?= sg_e($sg_fn) ?></span></td>
-    <td><?= sg_e($sg_analog ? sg_t('LOX.ANALOG') : sg_t('LOX.DIGITAL')) ?></td>
-    <td><span class="sm-mono"><?= (int) $sg_min ?>..<?= (int) $sg_max ?></span></td>
-    <td><?= sg_t($sg_fs) ?></td></tr>
+<tr><th><?= sg_e(sg_t('LOX.T_NAME_GW')) ?></th><th><?= sg_e(sg_t('LOX.T_BAUFORM')) ?></th><th><?= sg_e(sg_t('LOX.T_BEDEUTUNG')) ?></th>
+    <th><?= sg_e(sg_t('LOX.T_BEREICH')) ?></th><th><?= sg_e(sg_t('LOX.T_V2')) ?></th><th><?= sg_e(sg_t('LOX.T_MUSTER')) ?></th><th></th></tr>
+<?php foreach ($sg_nt as $sg_ne) { ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_ne['name']) ?></span><br><span class="sm-hilfe"><?= sg_e($sg_ne['voll']) ?></span></td>
+    <td><?= sg_e(sg_t($sg_ne['art'] === 'bruecke' ? 'LOX.B_KEIN' : 'LOX.B_EINGANG')) ?></td>
+    <td><?= $sg_ne['bez'] ?></td>
+    <td><span class="sm-mono"><?= sg_e($sg_ne['bereich']) ?></span></td>
+    <td><?= sg_e($sg_ne['haken'] ? sg_t($sg_ne['nc'] ? 'LOX.V2_HAKEN_NC' : 'LOX.V2_HAKEN') : '–') ?></td>
+    <td><?= $sg_ne['mp'] !== '' ? sg_e($sg_ne['mp']) : '–' ?></td>
+    <td><?php if ($sg_ne['name'] !== '–') { ?><button data-role="none" type="button" class="sm-btn sm-b-lesen sg-kopie" style="min-width:0;" data-kopie="<?= sg_e($sg_ne['name']) ?>"><?= sg_e(sg_t('LOX.K_KOPIEREN')) ?></button><?php } ?></td></tr>
 <?php } ?>
 </table>
-<?= sg_t('LOX.SVI_ADRESSE') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('status')) ?></div>
-<?= sg_t('LOX.SVI_HOST') ?>
+<div class="sm-hilfe"><?= sg_t('LOX.SWERTE_RECHTE') ?></div>
+<div class="sm-hilfe"><?= sg_t('LOX.SWERTE_ONLINE') ?></div>
 </div>
 
-<div class="sm-step"><b><?= sg_e(sg_t('LOX.S2_T')) ?></b><br>
-<?= sg_t('LOX.S2') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Alarm%20ausgeloest</div>
-<?= sg_t('LOX.S2_HINWEIS') ?>
-<br><br><?= sg_t('LOX.S2_DRINGEND') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;dringend=1&amp;text=Alarm%20ausgeloest</div>
-<?= sg_t('LOX.S2_BILD') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Bewegung&amp;bild=<?= sg_e(sg_datadir()) ?>/schnappschuss.jpg</div>
-<br><?= sg_t('LOX.S2_SPERRE') ?>
-<?php /* ZWEI Bloecke (U1). Bis 0.9.25 standen beide Adressen in einem Block,
-         getrennt nur durch den Zeilenumbruch nach "?>" - und den verschluckt
-         PHP. Heraus kam EINE Zeile "...aktion=sperrenhttp://...aktion=entsperren";
-         wer sie abschrieb und aufrief, ENTSPERRTE den Bot (gemessen). */ ?>
-<div><b><?= sg_e(sg_t('LOX.L_SPERREN')) ?></b></div>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('sperren')) ?></div>
-<div><b><?= sg_e(sg_t('LOX.L_ENTSPERREN')) ?></b></div>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('entsperren')) ?></div>
+<?php
+/* Schritt 5 (seit 0.9.30, Entscheidung 2, E-E4 bis E-E7): Meldungen aus Loxone ueber die Befehlsbruecke 1.0.1. Die
+ * Tabelle kommt aus bb_liste(), die Befehle der Vorlage aus sg_bruecke_vorlagenbefehle() - eine Quelle. */
+list($sg_bli, $sg_blf) = sg_bruecke_liste();
+$sg_bm = sg_mqtt_zustand();
+?>
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SBEFEHLE_T')) ?></b><br>
+<?= sg_t('LOX.SBEFEHLE') ?>
+<?php if ($sg_bli === null) { ?>
+<div class="sm-fehler"><?= sprintf(sg_t('BEFEHL.T_LISTE_FEHLT'), sg_e($sg_blf)) ?></div>
+<?php } else { ?>
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('MQTT.T_THEMA')) ?></th><th><?= sg_e(sg_t('BEFEHL.T_ART')) ?></th><th><?= sg_e(sg_t('BEFEHL.T_WIRKUNG')) ?></th>
+    <th><?= sg_e(sg_t('BEFEHL.T_SPERRE')) ?></th><th><?= sg_e(sg_t('BEFEHL.T_QUITTUNG')) ?></th></tr>
+<?php foreach ($sg_bli['befehle'] as $sg_bb) { ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_bb['thema']) ?></span></td>
+    <td><?= sg_e($sg_bb['art'] === 'text' ? sprintf(sg_t('BEFEHL.A_TEXT'), (int) $sg_bb['max_byte']) : sg_t('BEFEHL.A_PULS')) ?></td>
+    <td><?= sg_t($sg_bb['kachel']) ?><?= $sg_bb['eingreifend'] ? ' <i>' . sg_e(sg_t('BEFEHL.EINGREIFEND')) . '</i>' : '' ?></td>
+    <td><?= (int) $sg_bb['sperre_s'] ?> s</td>
+    <td><?= sg_e(sg_t($sg_bb['quittung'] === 'uebergeben' ? 'BEFEHL.Q_UEBERGEBEN' : 'BEFEHL.Q_AUSGEFUEHRT')) ?></td></tr>
+<?php } ?>
+</table>
+<?php } ?>
+<table class="sm-tbl">
+<tr><th><?= sg_e(sg_t('LOX.T_TITEL_AUSGANG')) ?></th><th><?= sg_e(sg_t('LOX.T_BEI_EIN')) ?></th><th><?= sg_e(sg_t('LOX.T_BEI_AUS')) ?></th><th></th></tr>
+<?php foreach (sg_bruecke_vorlagenbefehle() as $sg_bv) { ?>
+<tr><td><span class="sm-mono"><?= sg_e($sg_bv['title']) ?></span></td><td><span class="sm-mono"><?= sg_e($sg_bv['on']) ?></span></td>
+    <td><span class="sm-mono"><?= $sg_bv['off'] !== '' ? sg_e($sg_bv['off']) : '–' ?></span></td>
+    <td><button data-role="none" type="button" class="sm-btn sm-b-lesen sg-kopie" style="min-width:0;" data-kopie="<?= sg_e($sg_bv['on']) ?>"><?= sg_e(sg_t('LOX.K_KOPIEREN')) ?></button></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?= sg_t('LOX.SBEFEHLE_FORM') ?></div>
+<div class="sm-hilfe"><?= sprintf(sg_t('LOX.SBEFEHLE_AUSGANG'), '<span class="sm-mono">/dev/udp/loxberry/' . (int) ($sg_bm['udpport'] ? $sg_bm['udpport'] : 11884) . '</span>') ?></div>
+<div class="sm-hilfe"><?= sg_t('LOX.SBEFEHLE_HAKEN') ?></div>
+<div class="sm-knopfreihe">
+<form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="vorlage_bruecke" value="1">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_BRUECKE')) ?></button>
+</form>
+</div>
+<div class="sm-hilfe"><?= sg_t('LOX.VORLAGE_BRUECKE_TEXT') ?></div>
+<div class="sm-hilfe"><?= sg_t('LOX.SBEFEHLE_PLUGINS') ?></div>
 </div>
 
-<?php /* Welle Bild 18 (0.9.28): Schritt 6 steht immer da, damit die Schritte 1-9 durchgezaehlt bleiben;
-         ohne den Haken sagt er, wo man ihn setzt (bis 0.9.27 fehlte der Schritt dann ganz). */ ?>
+<?php /* Schritt 6 steht immer da, damit die Schritte 1-9 durchgezaehlt bleiben; ohne den Haken sagt er, wo man ihn
+         setzt. Seit 0.9.30 ueber die Befehlsbruecke (zustand/<name>); die HTTP-Adresse steht unter "Bestehende Anlagen". */ ?>
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.S3_T')) ?></b><br>
 <?php if (!empty($sg_cfg['zustand_ein'])) { ?>
 <?= sg_t('LOX.S3') ?>
-<div class="sm-pre"><?= sg_e(sg_endpunkt('zustand')) ?>&amp;name=alarm&amp;wert=scharf</div>
+<div class="sm-pre">publish <?= sg_e($sg_cfg['mqtt_topic']) ?>/befehl/zustand/alarm scharf</div>
 <?= sg_t('LOX.S3_HINWEIS') ?>
 <?php } else { ?>
 <?= sg_e(sprintf(sg_t('LOX.S3_AUS'), sg_t('REITER.EINSTELLUNGEN'))) ?>
@@ -1240,25 +1641,8 @@ if ($sg_sich_mangel) { ?>
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.SAUS_T')) ?></b><br>
 <?= sg_t('LOX.SAUS') ?>
-<div class="sm-pre"><?= sg_e($sg_cfg['mqtt_topic']) ?>/online</div>
+<div class="sm-pre"><?= sg_e(sg_gateway_name($sg_cfg['mqtt_topic'], 'status/zaehler')) ?></div>
 <?= sg_t('LOX.SAUS_HINWEIS') ?>
-</div>
-
-<h2><?= sg_e(sg_t('LOX.H_VORLAGE')) ?></h2>
-<div class="sm-hinweis"><?= sg_t('LOX.VORLAGE_TEXT') ?></div>
-<div class="sm-knopfreihe">
-<form action="index.php" method="post">
-  <?php echo sg_fmt(); ?>
-  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
-  <input data-role="none" type="hidden" name="vorlage" value="1">
-  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
-</form>
-<form action="index.php" method="post">
-  <?php echo sg_fmt(); ?>
-  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
-  <input data-role="none" type="hidden" name="vorlage_out" value="1">
-  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
-</form>
 </div>
 
 <?php
@@ -1285,7 +1669,7 @@ function sg_bausteinseiten()
         array('kopf' => 'SignalBot', 'bild' => 'einbindung_loxone.png',
               'schritte' => array(
                   sprintf(sg_t('BAUSTEIN.S1_SCHRITT1'), sg_t('REITER.EINSTELLUNGEN'), sg_t('EINST.K_LINK_START'), sg_t('EINST.K_LINK_FERTIG'), sg_t('EINST.L_ERLAUBT'), sg_t('REITER.TEST'), sg_t('TEST.K_PROBE')),
-                  sprintf(sg_t('BAUSTEIN.S1_SCHRITT2'), sg_t('REITER.LOXONE'), sg_t('LOX.K_VORLAGE')),
+                  sprintf(sg_t('BAUSTEIN.S1_SCHRITT2'), sg_t('REITER.MQTT'), sg_t('REITER.LOXONE')),
                   sg_t('BAUSTEIN.S1_SCHRITT3'),
                   sg_t('BAUSTEIN.S1_SCHRITT4'),
                   sg_t('BAUSTEIN.S1_SCHRITT5'),
@@ -1324,7 +1708,7 @@ function sg_bausteinseiten()
               'schritte' => array(
                   sprintf(sg_t('BAUSTEIN.S2_SCHRITT1'), sg_t('REITER.BEFEHLE')),
                   sg_t('BAUSTEIN.S2_SCHRITT2'),
-                  sprintf(sg_t('BAUSTEIN.S2_SCHRITT3'), sg_t('REITER.LOXONE'), sg_t('LOX.K_VORLAGE_OUT')),
+                  sprintf(sg_t('BAUSTEIN.S2_SCHRITT3'), sg_t('REITER.MQTT'), sg_t('BEFEHL.L_ANNEHMEN'), sg_t('REITER.LOXONE'), sg_t('LOX.K_VORLAGE_BRUECKE')),
                   sg_t('BAUSTEIN.S2_SCHRITT4'),
                   sg_t('BAUSTEIN.S2_SCHRITT5'),
                   sg_t('BAUSTEIN.S2_SCHRITT6'),
@@ -1403,9 +1787,93 @@ function sg_bausteinseiten()
 
 <div class="sm-step"><b><?= sg_e(sg_t('LOX.SGEGEN_T')) ?></b><br>
 <?= sg_t('LOX.SGEGEN') ?>
+</div>
+
+<?php
+/* "Bestehende Anlagen: HTTP-Endpunkt" (seit 0.9.30, E-E8, Bauart ACTi 1.9.32/aWATTar 1.2.39): zugeklappt, offen bei
+ * endpunkt_ein = 1. Der Haken sperrt den GANZEN Endpunkt fuer Loxone (status, senden, zustand, sperren, entsperren);
+ * offen bleibt nur ?selftest=1. Hier stehen die alten Vorlagen und Adressen (alle mit Token). */
+$sg_ep_ein = sg_endpunkt_ein($sg_cfg);
+?>
+<details<?= $sg_ep_ein ? ' open' : '' ?> style="margin-top:16px;">
+<summary><b><?= sg_e(sg_t('LOX.H_BESTEHEND')) ?></b></summary>
+<div class="sm-hinweis"><?= sg_t('LOX.BESTEHEND_TEXT') ?></div>
+<form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="save_endpunkt" value="1">
+  <div class="sm-feld">
+    <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+      <input data-role="none" type="checkbox" name="endpunkt_ein" value="1" <?= $sg_ep_ein ? 'checked' : '' ?>>
+      <?= sg_e(sg_t('LOX.L_ENDPUNKT')) ?>
+    </label>
+    <div class="sm-hilfe"><?= sg_t('LOX.H_ENDPUNKT') ?></div>
+  </div>
+  <div class="sm-knopfreihe">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('ALLG.SPEICHERN')) ?></button>
+  </div>
+</form>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SVI_T')) ?></b><br>
+<?= sg_t('LOX.SVI') ?>
+<table class="sm-tbl">
+<tr><th style="width:170px;"><?= sg_e(sg_t('LOX.T_TITEL')) ?></th><th style="width:70px;"><?= sg_e(sg_t('LOX.T_ART')) ?></th><th style="width:90px;"><?= sg_e(sg_t('LOX.T_BEREICH')) ?></th><th><?= sg_e(sg_t('LOX.T_BEDEUTUNG')) ?></th></tr>
+<?php foreach (sg_felder() as $sg_fn => $sg_fd) {
+    list($sg_analog, $sg_min, $sg_max, $sg_fs) = $sg_fd; ?>
+<tr><td><span class="sm-mono">SIGNAL_<?= sg_e($sg_fn) ?></span></td>
+    <td><?= sg_e($sg_analog ? sg_t('LOX.ANALOG') : sg_t('LOX.DIGITAL')) ?></td>
+    <td><span class="sm-mono"><?= (int) $sg_min ?>..<?= (int) $sg_max ?></span></td>
+    <td><?= sg_t($sg_fs) ?></td></tr>
+<?php } ?>
+</table>
+<?= sg_t('LOX.SVI_ADRESSE') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('status')) ?></div>
+<?= sg_t('LOX.SVI_HOST') ?>
+</div>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.S2_T')) ?></b><br>
+<?= sg_t('LOX.S2') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Alarm%20ausgeloest</div>
+<?= sg_t('LOX.S2_HINWEIS') ?>
+<br><br><?= sg_t('LOX.S2_DRINGEND') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;dringend=1&amp;text=Alarm%20ausgeloest</div>
+<?= sg_t('LOX.S2_BILD') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Bewegung&amp;bild=<?= sg_e(sg_datadir()) ?>/schnappschuss.jpg</div>
+<br><?= sg_t('LOX.S2_SPERRE') ?>
+<?php /* ZWEI Bloecke (U1): eine Zeile "...aktion=sperrenhttp://...aktion=entsperren" entsperrte den Bot (gemessen). */ ?>
+<div><b><?= sg_e(sg_t('LOX.L_SPERREN')) ?></b></div>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('sperren')) ?></div>
+<div><b><?= sg_e(sg_t('LOX.L_ENTSPERREN')) ?></b></div>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('entsperren')) ?></div>
+<?php if (!empty($sg_cfg['zustand_ein'])) { ?>
+<br><?= sg_t('LOX.S3_HTTP') ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('zustand')) ?>&amp;name=alarm&amp;wert=scharf</div>
+<?php } ?>
+</div>
+
+<h3><?= sg_e(sg_t('LOX.H_VORLAGE')) ?></h3>
+<div class="sm-hinweis"><?= sg_t('LOX.VORLAGE_TEXT') ?></div>
+<div class="sm-knopfreihe">
+<form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="vorlage" value="1">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE')) ?></button>
+</form>
+<form action="index.php" method="post">
+  <?php echo sg_fmt(); ?>
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="vorlage_out" value="1">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= sg_e(sg_t('LOX.K_VORLAGE_OUT')) ?></button>
+</form>
+</div>
+
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SHTTP_GEGEN_T')) ?></b><br>
+<?= sg_t('LOX.SHTTP_GEGEN') ?>
 <div class="sm-pre"><?= sg_e(sg_endpunkt('status')) ?>&amp;selftest=1</div>
 <?= sg_t('LOX.SGEGEN_2') ?>
 </div>
+</details>
 </div>
 
 <!-- ================= Reiter: Test ================= -->
@@ -1450,7 +1918,9 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
 
 <h3><?= sg_e(sg_t('TEST.H_KNOEPFE')) ?></h3>
 <div class="sm-knopfreihe">
+<?php if (sg_endpunkt_ein($sg_cfg)) { ?>
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;aktion=status" target="_blank"><?= sg_e(sg_t('TEST.K_STATUS')) ?></a>
+<?php } ?>
 <a data-role="none" class="sm-btn sm-b-lesen" href="/plugins/<?= sg_e($sg_plugin) ?>/index.php?token=<?= sg_e($sg_cfg['aktionstoken']) ?>&amp;selftest=1" target="_blank"><?= sg_e(sg_t('TEST.K_SELFTEST')) ?></a>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <?php echo sg_fmt(); ?>
@@ -1523,6 +1993,9 @@ foreach ($sg_pr as $sg_z) { if ($sg_z[0] === 0) { $sg_schlecht++; } }
   <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-log">
   <input data-role="none" type="hidden" name="clearaudit" value="1">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;margin-right:10px;">
+    <input data-role="none" type="checkbox" name="audit_bestaetigt" value="1"> <?= sg_e(sg_t('LOG.L_AUDIT_BESTAETIGT')) ?>
+  </label>
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('LOG.K_AUDIT_LEEREN')) ?></button>
 </form>
 </div>
@@ -1544,6 +2017,9 @@ $sg_zeilen = is_file($sg_lf) ? array_slice(file($sg_lf, FILE_IGNORE_NEW_LINES) ?
   <?php echo sg_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-log">
   <input data-role="none" type="hidden" name="clearlog" value="1">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;margin-right:10px;">
+    <input data-role="none" type="checkbox" name="log_bestaetigt" value="1"> <?= sg_e(sg_t('LOG.L_LOG_BESTAETIGT')) ?>
+  </label>
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sg_e(sg_t('LOG.K_LEEREN')) ?></button>
 </form>
 </div>
@@ -1573,8 +2049,17 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 		if (history.replaceState) { history.replaceState(null, '', 'index.php?form=' + id.replace('tab-', '')); }
 	}
 	reiter.forEach(function (r) {
+		/* G2 (0.9.30): der Reiter Test misst beim Laden (Netzproben nur im offenen Reiter, Regeln/04) - deshalb ein
+		   echter Seitenwechsel statt Umschalten im Browser; die uebrigen Reiter bleiben JS. */
+		if (r.dataset.ziel === 'tab-test') { return; }
 		r.addEventListener('click', function (e) { e.preventDefault(); zeige(r.dataset.ziel); });
 	});
+	document.querySelectorAll('.sg-kopie').forEach(function (k) { k.addEventListener('click', function () {
+		var t = k.getAttribute('data-kopie') || '';
+		if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t); return; }
+		var f = document.createElement('textarea'); f.value = t; document.body.appendChild(f); f.select();
+		try { document.execCommand('copy'); } catch (x) {} document.body.removeChild(f);
+	}); });
 	zeige(<?= json_encode($sg_tab) ?>);
 })();
 </script>

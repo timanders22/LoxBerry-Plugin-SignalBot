@@ -1,1 +1,8 @@
+# Diese Pakete installiert LoxBerry mit "apt-get -y install" - als root, waehrend der Plugin-Installation
+# (postinstall.sh laeuft als loxberry und koennte es nicht).
 curl qrencode jq
+#
+# Seit 0.9.30 (Gruppe 32, Entwurf 3.1): mosquitto_sub/_pub fuer die Befehlsbruecke (im LoxBerry-Grundabbild
+# ohnehin vorhanden; Hausform). Die MQTT-Probe im Reiter Test und der Haus-Leser brauchen es nicht - sie
+# sprechen ueber den eigenen PHP-Client direkt mit dem Broker (Kennwort nie auf einer Befehlszeile, G9).
+mosquitto-clients

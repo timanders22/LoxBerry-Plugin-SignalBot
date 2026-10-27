@@ -107,7 +107,15 @@ function sg_paths()
                 if (!$home || is_dir($home . '/config/plugins/' . $sg_kand)) { $plugin = $sg_kand; break; }
             }
         }
-        if ($plugin === '') { $plugin = 'signalbot'; }
+        if ($plugin === '') {
+            /* G6 (0.9.30, Haertung): der Rueckfall 'signalbot' gilt nur, wenn diese Datei
+             * wirklich unter <home>/webfrontend/htmlauth/plugins/ liegt - sonst Archivmodus
+             * (kein Griff in config/plugins/signalbot eines fremden Baums). */
+            $sg_rp = realpath(__DIR__);
+            $sg_hp = $home ? realpath($home . '/webfrontend/htmlauth/plugins') : false;
+            if ($sg_rp && $sg_hp && strpos($sg_rp, $sg_hp . DIRECTORY_SEPARATOR) === 0) { $plugin = 'signalbot'; }
+            else { $home = ''; }
+        }
     }
     if ($home) {
         return array(
@@ -314,7 +322,7 @@ function sg_vorgaben()
         // Betrieb
         'gesperrt'       => 0,         // Kill-Schalter: nimmt keine Befehle mehr an
         'audit'          => 1,         // Ereignisprotokoll fuehren
-        'herzschlag'     => 1,         // Lebenszeichen auf MQTT
+        'herzschlag'     => 1,         // Lebenszeichen auf MQTT (<praefix>/online, seit 0.9.30 veraltet)
         'gruppe'         => '',        // Gruppen-Kennung fuer Meldungen (leer = einzeln)
         'nacht_von'      => '',        // Nachtruhe, z. B. 22:00 - leer = aus
         'nacht_bis'      => '',        //             z. B. 07:00
@@ -325,6 +333,18 @@ function sg_vorgaben()
         'mqtt_topic'     => 'signalbot',
         // Endpunkt
         'aktionstoken'   => '',
+        /* Seit 0.9.30 (Gruppe 32). Alle sieben stehen in der Spaetliste der
+         * Sicherung (sg_sicherung_spaet): fehlen sie beim Zurueckspielen, gilt
+         * der geltende Wert. */
+        'befehle_mqtt_ein'       => 0,        // Befehlsbruecke 1.0.1: Meldungen aus Loxone ueber das MQTT-Gateway V2
+        'befehle_entsperren_ein' => 0,        // zweiter Haken: entsperren aus Loxone (N9, E-E6)
+        'notiz_ein'              => 1,        // Weg A: "Notiz an mich" als Befehlsweg (Nachtrag 27.10.; wirkt nur,
+                                              // wenn die eigene Kontonummer unter den erlaubten Absendern steht)
+        'endpunkt_ein'           => 0,        // HTTP-Endpunkt fuer Loxone (Bestand: Lese-Regel -> 1; E-E8)
+        'plugin_absender'        => array(),  // Vorschlag 1: freigegebene Absender-Plugins (Ordnernamen)
+        'haus_status_ein'        => 0,        // Vorschlag 3: Haus-Werte im Chat
+        'haus_bereiche'          => array('strom', 'speicher', 'kalender', 'abfuhr', 'usv', 'abfahrt'),
+        'gaeste'                 => array(),  // Vorschlag 4: befristete Absender
     );
 }
 
@@ -356,7 +376,8 @@ function sg_wort_reserviert($wort)
 function sg_thema_reserviert($thema)
 {
     $t = strtolower(trim((string) $thema, '/'));
-    foreach (array('online', 'selbsttest') as $r) {
+    foreach (array('online', 'selbsttest', 'status', 'befehl', 'rpc', 'daemon', 'konto', 'erlaubte', 'gaeste',
+                   'befehle', 'gesperrt', 'abgewiesen', 'pinfehl', 'offen', 'zustaende', 'letzter_min') as $r) {
         if ($t === $r || strpos($t, $r . '/') === 0) { return true; }
     }
     return false;
@@ -409,6 +430,9 @@ function sg_feldname($k)
         'nacht_bis' => 'EINST.L_NACHT_BIS', 'quittung_takt' => 'EINST.L_QUITTUNG_TAKT',
         'quittung_max' => 'EINST.L_QUITTUNG_MAX', 'mqtt_ein' => 'EINST.L_MQTT_EIN',
         'mqtt_topic' => 'EINST.L_MQTT_TOPIC', 'aktionstoken' => 'TEST.F_TOKEN', 'befehle' => 'BEF.H_TITEL',
+        'befehle_mqtt_ein' => 'BEFEHL.L_ANNEHMEN', 'befehle_entsperren_ein' => 'BEFEHL.L_ENTSPERREN',
+        'endpunkt_ein' => 'LOX.L_ENDPUNKT', 'plugin_absender' => 'EINST.L_PLUGINS',
+        'haus_status_ein' => 'EINST.L_HAUS', 'notiz_ein' => 'EINST.L_NOTIZ', 'haus_bereiche' => 'EINST.L_HAUS_BEREICHE', 'gaeste' => 'GAST.H_TITEL',
     );
     return isset($karte[$k]) ? sg_t($karte[$k]) : (string) $k;
 }
@@ -467,11 +491,30 @@ function sg_config_maengel($c)
             $setze($bk, sprintf(sg_t('EINST.FEHLER_BEREICH'), sg_e(sg_feldname($bk)), $gr[0], $gr[1]));
         }
     }
-    foreach (array('stille', 'zustand_ein', 'gesperrt', 'audit', 'herzschlag', 'mqtt_ein') as $sk) {
+    foreach (array('stille', 'zustand_ein', 'gesperrt', 'audit', 'herzschlag', 'mqtt_ein',
+                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein') as $sk) {
         if (!sg_ist_schalter($hol($sk))) {
             $setze($sk, sprintf(sg_t('EINST.FEHLER_SCHALTER'), sg_e(sg_feldname($sk))));
         }
     }
+    /* Seit 0.9.30: Vorschlag 1 (freigegebene Absender-Plugins), Vorschlag 3 (Bereiche), Vorschlag 4 (Gaeste). */
+    $pa = $hol('plugin_absender');
+    if (!is_array($pa) || ($pa !== array() && array_keys($pa) !== range(0, count($pa) - 1)) || count($pa) > 50
+        || count(array_unique(array_map('strval', $pa))) !== count($pa)) {
+        $setze('plugin_absender', sg_t('EINST.FEHLER_PLUGINS'));
+    } else {
+        foreach ($pa as $x) {
+            if (!is_string($x) || !preg_match('/^[a-z0-9_]{1,40}$/', $x)) { $setze('plugin_absender', sg_t('EINST.FEHLER_PLUGINS')); }
+        }
+    }
+    $hb = $hol('haus_bereiche');
+    if (!is_array($hb) || ($hb !== array() && array_keys($hb) !== range(0, count($hb) - 1))
+        || count(array_unique(array_map('strval', $hb))) !== count($hb)
+        || array_diff(array_map('strval', $hb), array_keys(sg_haus_bereiche_alle()))) {
+        $setze('haus_bereiche', sg_t('EINST.FEHLER_HAUS_BEREICHE'));
+    }
+    $gm = sg_gaeste_maengel($hol('gaeste'), is_array($e) ? $e : array());
+    if ($gm !== '') { $setze('gaeste', $gm); }
     $g = $hol('gruppe');
     if (!($g === '' || (is_string($g) && preg_match('#^[A-Za-z0-9+/=_\-]{10,}$#', $g)))) {
         $setze('gruppe', sg_t('EINST.FEHLER_GRUPPE'));
@@ -682,6 +725,18 @@ function sg_config($anlegen = true)
         if ($anlegen && $roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
         $cfg = array();
     }
+    /* Lese-Regel endpunkt_ein (0.9.30, N8, E-E8): eine eingerichtete Anlage (Datei mit
+     * Schluesseln ausser aktionstoken und dem _-Kopf) ohne den Schluessel behaelt ihren
+     * HTTP-Endpunkt (1); keine Datei oder {} ist eine Neuinstallation (Vorgabe 0). Ohne
+     * diese Regel fiele der Bestand in jeder Upgrade-Luecke auf 0 (Bauart G27 N5). */
+    if (!array_key_exists('endpunkt_ein', $cfg)) {
+        foreach (array_keys($cfg) as $sg_k) {
+            if ($sg_k !== 'aktionstoken' && !(is_string($sg_k) && $sg_k !== '' && $sg_k[0] === '_')) {
+                $cfg['endpunkt_ein'] = 1;
+                break;
+            }
+        }
+    }
     $cfg = array_merge(sg_vorgaben(), $cfg);
 
     /* Beim LESEN wird weiter auf brauchbare Werte gebracht - das ist das Netz
@@ -694,7 +749,8 @@ function sg_config($anlegen = true)
                    'quittung_max' => array(0, 20), 'pin_sperre' => array(1, 1440)) as $sg_k => $sg_gr) {
         $cfg[$sg_k] = max($sg_gr[0], min($sg_gr[1], is_scalar($cfg[$sg_k]) ? (int) $cfg[$sg_k] : $sg_gr[0]));
     }
-    foreach (array('gesperrt', 'audit', 'herzschlag', 'stille', 'mqtt_ein', 'zustand_ein') as $sg_k) {
+    foreach (array('gesperrt', 'audit', 'herzschlag', 'stille', 'mqtt_ein', 'zustand_ein',
+                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein') as $sg_k) {
         $cfg[$sg_k] = empty($cfg[$sg_k]) ? 0 : 1;
     }
     foreach (array('konto', 'pin', 'pin_hash', 'gruppe', 'mqtt_topic', 'aktionstoken', 'nacht_von', 'nacht_bis') as $sg_k) {
@@ -741,6 +797,17 @@ function sg_config($anlegen = true)
         $cfg['befehle'][$i] = $b;
     }
     $cfg['befehle'] = array_slice(array_values($cfg['befehle']), 0, SG_BEFEHLE);
+    /* Seit 0.9.30: Listen als Listen erzwingen (Vorschlag 1, 3, 4). */
+    $cfg['plugin_absender'] = is_array($cfg['plugin_absender']) ? array_values(array_unique(array_filter($cfg['plugin_absender'],
+        function ($x) { return is_string($x) && preg_match('/^[a-z0-9_]{1,40}$/', $x); }))) : array();
+    $cfg['haus_bereiche'] = is_array($cfg['haus_bereiche'])
+        ? array_values(array_intersect(array_keys(sg_haus_bereiche_alle()), $cfg['haus_bereiche'])) : sg_haus_bereiche_werk();
+    $sg_gl = array();
+    foreach (is_array($cfg['gaeste']) ? $cfg['gaeste'] : array() as $sg_g) {
+        $sg_g = sg_gast_normal($sg_g);
+        if ($sg_g !== null && count($sg_gl) < SG_GAESTE_MAX) { $sg_gl[] = $sg_g; }
+    }
+    $cfg['gaeste'] = $sg_gl;
 
     if ($anlegen && $lesbar && !preg_match('/^[A-Za-z0-9]{24,}$/', $cfg['aktionstoken'])) {
         $cfg['aktionstoken'] = sg_token();
@@ -1127,6 +1194,9 @@ function sg_senden($an, $text, $anhang = '')
     }
     if ((string) $cfg['konto'] !== '') { $params['account'] = (string) $cfg['konto']; }
     $a = sg_rpc('send', $params, 25);
+    /* Schleifenschutz "Notiz an mich" (Nachtrag 27.10.): den Zeitstempel jeder eigenen Sendung merken - kaeme sie
+     * als Abgleich zurueck, wertet sg_notiz_pruefen() sie nie aus. */
+    if ($a['ok']) { sg_eigene_sendung_merken($a['result']); }
     if (!$a['ok']) {
         sg_log('Senden an ' . sg_ziel_name($an) . ' fehlgeschlagen: ' . $a['fehler']);
     }
@@ -1185,8 +1255,10 @@ function sg_erlaubt($nummer)
  * ftruncate statt Neuanlage: So bleibt es dieselbe Datei mit derselben
  * Inode, und die Sperre gilt weiter fuer alle, die sie offen haben.
  */
-function sg_bremse_frei($nummer)
+function sg_bremse_frei($nummer, $grenze = null)
 {
+    /* Seit 0.9.30 mit eigener Grenze: die Befehlsbruecke bremst alle Meldungen
+     * zusammen auf SG_BRUECKE_JE_MINUTE (Schluessel 'bruecke'). */
     $cfg = sg_config();
     $f = sg_tmpdir() . '/bremse_' . md5((string) $nummer) . '.json';
     $fp = @fopen($f, 'c+');
@@ -1213,7 +1285,7 @@ function sg_bremse_frei($nummer)
     $liste = $roh !== '' ? json_decode($roh, true) : array();
     if (!is_array($liste)) { $liste = array(); }
     $liste = array_values(array_filter($liste, function ($t) use ($jetzt) { return $t > $jetzt - 60; }));
-    if (count($liste) >= (int) $cfg['bremse']) {
+    if (count($liste) >= ($grenze === null ? (int) $cfg['bremse'] : (int) $grenze)) {
         // Auch den bereinigten Stand zurueckschreiben, sonst waechst die
         // Datei bei Dauerbeschuss unbegrenzt.
         ftruncate($fp, 0); rewind($fp); fwrite($fp, json_encode($liste)); fflush($fp);
@@ -1453,8 +1525,9 @@ function sg_mqtt_zustand()
         if (!isset($gen[$k]) || !is_array($gen[$k])) { continue; }
         $out['gefunden'] = 1;
         /* Die FASSUNG des MQTT-Gateways, ab Werk 1. Sie entscheidet, was der
-         * Anwender eintragen muss: unter V1 jedes Thema von Hand, ab V2
-         * erscheint die Themengruppe von selbst in den Subscriptions.
+         * Anwender eintragen muss: unter V1 das Abo <praefix>/# (traegt das
+         * Plugin selbst ein), unter Gateway V2 je Thema ein Haken in der
+         * Hakenliste (Opt-In je Thema, gemessen am Geraet 18.10.2026; N1).
          * 0 heisst "nicht feststellbar" - dann wird nichts behauptet,
          * sondern es werden beide Faelle genannt. */
         $out['fassung'] = isset($gen[$k]['Gatewayversion'])
@@ -1491,10 +1564,10 @@ function sg_mqtt_zustand()
  * Der Hinweis zum MQTT-Abo - in der Fassung, die zum GATEWAY passt.
  *
  * Bis hierher stand an den Ausgabestellen unbedingt "Ohne diesen Eintrag
- * kommt am Miniserver nichts an". Das gilt fuer Gateway V1, wo jedes Thema
- * von Hand einzutragen ist. Ab V2 erscheint die Themengruppe von selbst in
- * den Subscriptions - der Satz schickte jeden V2-Anwender zu einem
- * Eingabeplatz, den es nicht gibt.
+ * kommt am Miniserver nichts an". Das gilt fuer Gateway V1 (Abo
+ * <praefix>/#). Unter Gateway V2 ist nichts einzutragen, aber je Thema ein
+ * Haken zu setzen (Opt-In je Thema; bis 0.9.29 stand hier "von selbst" -
+ * das Gegenteil des gemessenen Verhaltens, N1). Die Liste steht im Reiter MQTT.
  *
  * Drei Ausgaenge, nicht zwei: ist die Fassung nicht feststellbar, werden
  * BEIDE Faelle genannt statt einer behauptet.
@@ -1678,9 +1751,10 @@ function sg_udp_senden($port, $msg)
  * des LoxBerry: Anmeldung mit Brokeruser/Brokerpass aus der general.json
  * (Regeln/07, Abschnitt 2), PUBLISH mit QoS 1 und retain 0 (Befehle sind
  * Impulse, Entscheidung 3), und erst das PUBACK des Brokers gilt als
- * Bestaetigung. Abonniert hat das Thema das MQTT-Gateway (Abodatei
- * <praefix>/#, Gateway V2 von selbst) - es reicht den Befehl genauso an den
- * Miniserver weiter wie einen, der ueber seinen UDP-Eingang kam.
+ * Bestaetigung. Abonniert hat das Thema das MQTT-Gateway (V1: Abodatei
+ * <praefix>/#; Gateway V2: Haken je Thema, Noncached - N1, N3) - es reicht den
+ * Befehl genauso an den Miniserver weiter wie einen, der ueber seinen
+ * UDP-Eingang kam.
  *
  * Rueckfall auf den UDP-Eingang NUR, wenn nachweislich nichts beim Broker
  * angekommen sein kann: keine Verbindung, Anmeldung abgewiesen (CONNACK
@@ -1779,7 +1853,7 @@ function sg_broker_schreiben($s, $paket)
  * 'detail' => Fehlertext bzw. CONNACK-Code, 'anmeldung' => 1, wenn ein
  * Benutzer mitging, 'ziel' => host:port).
  */
-function sg_broker_verbinden()
+function sg_broker_verbinden($vor = 'sgbot', $keepalive = 30)
 {
     $z = sg_broker_zugang();
     $aus = array('s' => null, 'grund' => '', 'code' => '', 'detail' => '',
@@ -1808,7 +1882,7 @@ function sg_broker_verbinden()
     stream_set_timeout($s, SG_BROKER_FRIST);
     $zk = function ($t) { return pack('n', strlen($t)) . $t; };
     $flags = 0x02;                                  // saubere Sitzung
-    $nutz = $zk('sgbot' . getmypid() . 'q' . mt_rand(100, 999));
+    $nutz = $zk(preg_replace('/[^a-z]/', '', (string) $vor) . getmypid() . 'q' . mt_rand(100, 999));
     if ($z['user'] !== '') {
         $flags |= 0x80;
         // Ein Kennwort ohne Benutzer laesst MQTT 3.1.1 nicht zu.
@@ -1816,7 +1890,7 @@ function sg_broker_verbinden()
         $nutz .= $zk($z['user']);
         if ($z['pass'] !== '') { $nutz .= $zk($z['pass']); }
     }
-    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 30);
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', max(10, min(600, (int) $keepalive)));
     if (!sg_broker_schreiben($s, chr(0x10) . sg_broker_laenge(strlen($kopf . $nutz)) . $kopf . $nutz)) {
         fclose($s);
         $aus['grund'] = 'CONNECT liess sich nicht senden';
@@ -1894,22 +1968,6 @@ function sg_broker_trennen($s)
         @fwrite($s, chr(0xE0) . chr(0));
         @fclose($s);
     }
-}
-
-/**
- * Verbinden, EINE Nachricht senden, trennen (Probe im Reiter Test).
- * Rueckgabe: array('erg' => 'bestaetigt'|'unbestaetigt'|'nicht_gesendet'|'zu',
- * 'grund' => Klartext bei 'zu', 'ziel' => host:port).
- */
-function sg_broker_einmal($thema, $wert)
-{
-    $v = sg_broker_verbinden();
-    if ($v['s'] === null) {
-        return array('erg' => 'zu', 'grund' => $v['grund'], 'ziel' => $v['ziel']);
-    }
-    $erg = sg_broker_publish($v['s'], $thema, $wert, 1);
-    sg_broker_trennen($v['s']);
-    return array('erg' => $erg, 'grund' => '', 'ziel' => $v['ziel']);
 }
 
 /**
@@ -1993,6 +2051,8 @@ function sg_ereignis_merken($wer, $was, $detail = '')
     if ($sperre !== false) { flock($sperre, LOCK_EX); }
     $liste = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
     if (!is_array($liste)) { $liste = array(); }
+    /* Kam der Vorgang ueber "Notiz an mich" (sg_bot.php setzt den Merker nur fuer diesen einen Aufruf)? */
+    if (!empty($GLOBALS['sg_notiz_quelle'])) { $wer = (string) $wer . ' (' . SG_NOTIZ_KENNUNG . ')'; }
     $liste[] = array('ts' => time(), 'wer' => (string) $wer, 'was' => (string) $was,
                      'detail' => (string) $detail);
     if (count($liste) > SG_EREIGNISSE) { $liste = array_slice($liste, -SG_EREIGNISSE); }
@@ -2046,8 +2106,8 @@ function sg_warteschlange_schreiben($liste)
     return sg_write_atomic(sg_datadir() . '/ausgang.json', json_encode(array_values($liste)), 0600);
 }
 
-/** Eine Meldung einreihen. $ab = fruehester Zeitpunkt, 0 = sofort. */
-function sg_warteschlange_ein($an, $text, $dringend = 0, $ab = 0)
+/** Eine Meldung einreihen. $ab = fruehester Zeitpunkt, 0 = sofort. $anhang (seit 0.9.30): Bildkopie in anhang/. */
+function sg_warteschlange_ein($an, $text, $dringend = 0, $ab = 0, $anhang = '')
 {
     $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
     if ($sperre !== false) { flock($sperre, LOCK_EX); }
@@ -2057,6 +2117,7 @@ function sg_warteschlange_ein($an, $text, $dringend = 0, $ab = 0)
         'dringend' => $dringend ? 1 : 0, 'ab' => (int) $ab,
         'versuche' => 0, 'ts' => time(),
     );
+    if ((string) $anhang !== '') { $liste[count($liste) - 1]['anhang'] = (string) $anhang; }
     if (count($liste) > 200) { $liste = array_slice($liste, -200); }
     $ok = sg_warteschlange_schreiben($liste);
     if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
@@ -2089,7 +2150,14 @@ function sg_quittieren($an, &$gruppen = null)
             unset($liste[$k]); $n++;
         }
     }
-    if ($n) { sg_warteschlange_schreiben($liste); }
+    if ($n) {
+        $sg_vorher = sg_warteschlange();
+        sg_warteschlange_schreiben($liste);
+        /* Seit 0.9.30: Bildkopien quittierter Meldungen entfernen (Vorschlag 1). */
+        foreach ($sg_vorher as $sg_x) {
+            if (!empty($sg_x['anhang'])) { sg_anhang_weg_falls_frei((string) $sg_x['anhang'], $liste); }
+        }
+    }
     if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
     return $n;
 }
@@ -2108,12 +2176,15 @@ function sg_warteschlange_arbeiten()
     $sperre = @fopen(sg_tmpdir() . '/ausgang.lock', 'c');
     if ($sperre !== false) { flock($sperre, LOCK_EX); }
     $liste = sg_warteschlange();
+    $weg = array();
     foreach ($liste as $k => $e) {
         if ((int) $e['ab'] > $jetzt) { continue; }
+        $anhang = isset($e['anhang']) ? (string) $e['anhang'] : '';
         if (empty($e['dringend'])) {
             // Einmal senden, dann ist sie erledigt - gleich ob es klappt.
-            sg_senden($e['an'], $e['text']);
+            sg_senden($e['an'], $e['text'], $anhang);
             unset($liste[$k]);
+            if ($anhang !== '') { $weg[] = $anhang; }
             $gesendet++;
             continue;
         }
@@ -2122,17 +2193,19 @@ function sg_warteschlange_arbeiten()
             sg_log('Dringende Meldung an ' . sg_ziel_name($e['an']) . ' bleibt unquittiert - aufgegeben.');
             sg_ereignis_merken(sg_ziel_name($e['an']), 'unquittiert', sg_kuerzen($e['text'], 60));
             unset($liste[$k]);
+            if ($anhang !== '') { $weg[] = $anhang; }
             continue;
         }
         $text = $e['versuche'] > 0
             ? sg_t('BOT.WIEDERHOLUNG') . ' ' . $e['text']
             : $e['text'];
-        sg_senden($e['an'], $text . "\n" . sg_t('BOT.BITTE_QUITTIEREN'));
+        sg_senden($e['an'], $text . "\n" . sg_t('BOT.BITTE_QUITTIEREN'), $anhang);
         $liste[$k]['versuche'] = (int) $e['versuche'] + 1;
         $liste[$k]['ab'] = $jetzt + ((int) $cfg['quittung_takt'] * 60);
         $gesendet++;
     }
     sg_warteschlange_schreiben($liste);
+    foreach (array_unique($weg) as $a) { sg_anhang_weg_falls_frei($a, $liste); }
     if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
     return $gesendet;
 }
@@ -2152,11 +2225,8 @@ function sg_melden($an, $text, $dringend = 0)
         return 'dringend';
     }
     if (sg_nachtruhe($cfg)) {
-        // bis zum Ende der Nachtruhe zurueckhalten
-        list($bh, $bm) = array_map('intval', explode(':', $cfg['nacht_bis']));
-        $ziel = mktime($bh, $bm, 0);
-        if ($ziel <= time()) { $ziel += 86400; }
-        sg_warteschlange_ein($an, $text, 0, $ziel);
+        // bis zum Ende der Nachtruhe zurueckhalten (seit 0.9.30 sg_nachtruhe_ende, auch fuer die Bruecke)
+        sg_warteschlange_ein($an, $text, 0, sg_nachtruhe_ende($cfg));
         return 'nachtruhe';
     }
     return sg_senden($an, $text) ? 'gesendet' : 'fehler';
@@ -2210,34 +2280,46 @@ function sg_verarbeite($von, $text, $trocken = false)
     $text = trim(preg_replace('/\s+/', ' ', (string) $text));
     $klein = sg_klein($text);
 
-    /* ---- Schicht 1: Weissliste ---- */
+    /* ---- Schicht 1: Weissliste ----
+       Seit 0.9.30 (Vorschlag 4) dazu befristete Gaeste: nur Absender, nie
+       Empfaenger; nur die Woerter ihrer Liste und "hilfe"; kein status, kein
+       Quittieren. Abgelaufen = wie ein Fremder (Ereignis einmal je Gast). */
+    $gast = null;
     if (!sg_erlaubt($von)) {
-        sg_log('Abgewiesen: ' . sg_maske($von) . ' (nicht auf der Weissliste)');
-        /* Der Trockenlauf merkt nichts (I3): bis 0.9.25 trug der Probelauf
-         * von postinstall.sh bei jeder Installation ein erfundenes
-         * "abgewiesen" ins Ereignisprotokoll ein (Installer-Pruefstand B8). */
-        if (!$trocken) { sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'nicht auf der Weissliste'); }
-        // Bewusst schweigen: eine Antwort wuerde Fremden bestaetigen, dass
-        // hier ein Bot horcht. Wer die Nummer nur vertippt hat, merkt es am
-        // ausbleibenden Echo genauso.
-        return array('antwort' => empty($cfg['stille']) ? sg_t('BOT.NICHT_ERLAUBT') : '',
-                     'grund' => 'nicht_erlaubt');
+        $gast = sg_gast_finden($cfg, $von);
+        if ($gast === null || !sg_gast_gueltig($gast)) {
+            $sg_abgelaufen = ($gast !== null);
+            sg_log('Abgewiesen: ' . sg_maske($von) . ($sg_abgelaufen ? ' (Gast abgelaufen)' : ' (nicht auf der Weissliste)'));
+            /* Der Trockenlauf merkt nichts (I3). */
+            if (!$trocken) {
+                if ($sg_abgelaufen) { sg_gast_abgewiesen_merken($gast); }
+                else { sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'nicht auf der Weissliste'); }
+            }
+            // Bewusst schweigen: eine Antwort wuerde Fremden bestaetigen, dass
+            // hier ein Bot horcht.
+            return array('antwort' => empty($cfg['stille']) ? sg_t('BOT.NICHT_ERLAUBT') : '',
+                         'grund' => $sg_abgelaufen ? 'gast_abgelaufen' : 'nicht_erlaubt');
+        }
     }
+    $sg_gastwort = function ($wort) use ($gast) {
+        return $gast === null || in_array((string) $wort, $gast['befehle'], true);
+    };
+    $sg_gastnein = function () use ($gast) {
+        return array('antwort' => sprintf(sg_t('BOT.GAST_NICHT'), $gast['befehle'] ? implode(', ', $gast['befehle']) : '-'),
+                     'grund' => 'gast_nicht');
+    };
 
     /* ---- Kill-Schalter ----
-       Ist der Bot gesperrt, wird gar nichts mehr ausgefuehrt. Gedacht fuer
-       den Fall, dass ein Handy abhandenkommt: sperren laesst sich das aus
-       Loxone heraus (Endpunkt, Aktion sperren) und in der Oberflaeche. Die
-       eingebauten Woerter bleiben erreichbar, sonst wuesste niemand, warum
-       nichts passiert. */
+       Ist der Bot gesperrt, wird gar nichts mehr ausgefuehrt. Sperren laesst
+       sich das aus Loxone heraus (Endpunkt bzw. Befehlsbruecke) und in der
+       Oberflaeche. Die eingebauten Woerter bleiben erreichbar. */
     if (!empty($cfg['gesperrt']) && !in_array($klein, array('hilfe', 'help', '?'), true)) {
         sg_log('Abgewiesen (Bot gesperrt): ' . sg_maske($von) . ' - ' . sg_kuerzen($text, 40));
         return array('antwort' => sg_t('BOT.GESPERRT'), 'grund' => 'gesperrt');
     }
 
     /* ---- Schicht 3 (vorgezogen): Bremse ----
-       Im Trockenlauf wird nicht gezaehlt: der Probelauf des Verwalters darf
-       das Kontingent des Bewohners nicht aufbrauchen. */
+       Im Trockenlauf wird nicht gezaehlt. Gilt fuer Gaeste genauso. */
     if (!$trocken && !sg_bremse_frei($von)) {
         sg_log('Gebremst: ' . sg_maske($von) . ' (mehr als ' . (int) $cfg['bremse'] . ' je Minute)');
         sg_ereignis_merken(sg_maske($von), 'abgewiesen', 'Bremse');
@@ -2245,19 +2327,10 @@ function sg_verarbeite($von, $text, $trocken = false)
     }
 
     /* ---- Laeuft eine Rueckfrage? ----
-       Im Trockenlauf uebergangen. Sonst beantwortete der Probelauf eine
-       offene Rueckfrage des Bewohners - oder loeschte sie. */
+       Im Trockenlauf uebergangen. */
     $warte = $trocken ? null : sg_wartend($von);
     if ($warte !== null) {
-        /* Die Rueckfrage haengt am WORT, nicht nur an der Zeilennummer.
-         *
-         * Bis 0.9.11 wurde allein der Tabellenindex gemerkt und beim
-         * Ausfuehren die Stufe aus der Wartedatei genommen. Wer die
-         * Befehlstabelle waehrend der 90 Sekunden umsortierte, liess ein
-         * "ja" einen ANDEREN Befehl ausloesen; wer eine Zeile in dieser Zeit
-         * von rueckfrage auf pin hochstufte, bekam sie trotzdem ohne PIN
-         * ausgefuehrt. Jetzt muessen Wort UND Stufe noch passen, sonst wird
-         * abgebrochen und gesagt, warum. */
+        /* Die Rueckfrage haengt am WORT, nicht nur an der Zeilennummer. */
         $bi = (int) $warte['befehl'];
         $b = isset($cfg['befehle'][$bi]) ? $cfg['befehle'][$bi] : null;
         $sg_wort = isset($warte['wort']) ? (string) $warte['wort'] : '';
@@ -2271,6 +2344,11 @@ function sg_verarbeite($von, $text, $trocken = false)
             sg_wartend($von, false);
             return array('antwort' => sg_t('BOT.ABGEBROCHEN'), 'grund' => 'abgebrochen');
         }
+        /* Ein Gast darf nur bestaetigen, was auf seiner Liste steht (seit 0.9.30). */
+        if (!$sg_gastwort($b['wort'])) {
+            sg_wartend($von, false);
+            return $sg_gastnein();
+        }
         if (isset($warte['stufe']) && $b['stufe'] !== $warte['stufe']) {
             sg_wartend($von, false);
             sg_log('Rueckfrage verworfen: Stufe von "' . $b['wort'] . '" hat sich waehrenddessen geaendert.');
@@ -2279,9 +2357,7 @@ function sg_verarbeite($von, $text, $trocken = false)
         if (in_array($klein, array('nein', 'no', 'abbrechen', 'stop'), true)) {
             sg_wartend($von, false);
             sg_log('Abgebrochen von ' . sg_maske($von) . ': ' . $b['wort']);
-            /* Bei einer Vier-Augen-Freigabe wartet jemand anders auf die
-             * Antwort. Ohne diese Nachricht bliebe er ratlos zurueck: sein
-             * Befehl wurde nie ausgefuehrt, und niemand hat ihm gesagt warum. */
+            /* Bei einer Vier-Augen-Freigabe wartet jemand anders auf die Antwort. */
             if (!empty($warte['fuer'])) {
                 sg_senden((string) $warte['fuer'], sg_t('BOT.ZWEIT_ABGELEHNT'));
                 sg_ereignis_merken(sg_maske($von), 'Freigabe abgelehnt',
@@ -2307,30 +2383,28 @@ function sg_verarbeite($von, $text, $trocken = false)
             return array('antwort' => sg_t('BOT.BITTE_JA_NEIN'), 'grund' => 'unklar');
         }
         sg_wartend($von, false);
-        /* Wer hier bestaetigt, kann der Absender selbst sein - oder der
-         * Zweite bei einem Befehl mit Vier-Augen-Freigabe. Im zweiten Fall
-         * steht in der Wartedatei, fuer wen freigegeben wird; dann ist die
-         * Freigabe erteilt und wird nicht noch einmal verlangt. */
+        /* Wer hier bestaetigt, kann der Absender selbst sein - oder der Zweite
+         * bei einem Befehl mit Vier-Augen-Freigabe. */
         $sg_fuer = isset($warte['fuer']) ? (string) $warte['fuer'] : '';
         $sg_mit = isset($warte['wert']) ? (string) $warte['wert'] : null;
         if ($sg_fuer !== '') {
             sg_ereignis_merken(sg_maske($von), 'Freigabe erteilt', $b['wort'] . ' fuer ' . sg_maske($sg_fuer));
         }
-        return sg_ausfuehren($b, $sg_fuer !== '' ? $sg_fuer : $von, $trocken, $sg_fuer !== '', $sg_mit);
+        $sg_alsgast = $sg_fuer !== '' ? !empty($warte['gast']) : ($gast !== null);
+        return sg_ausfuehren($b, $sg_fuer !== '' ? $sg_fuer : $von, $trocken, $sg_fuer !== '', $sg_mit, $sg_alsgast);
     }
 
     /* ---- Eingebaute Woerter ---- */
     if (in_array($klein, array('hilfe', 'help', '?'), true)) {
-        return array('antwort' => sg_hilfetext($von), 'grund' => 'hilfe');
+        return array('antwort' => sg_hilfetext($von, $gast), 'grund' => 'hilfe');
     }
     if (sg_quittungswort($klein)) {
+        if ($gast !== null) { return $sg_gastnein(); }
         if ($trocken) { return array('antwort' => sg_t('BOT.NICHTS_ZU_QUITTIEREN'), 'grund' => 'quittiert'); }
         $sg_gruppen = array();
         $n = sg_quittieren($von, $sg_gruppen);
         sg_ereignis_merken(sg_maske($von), 'quittiert', (string) $n);
-        /* Die anderen in der Gruppe sollen sehen, dass sich jemand kuemmert -
-         * sonst eilen zwei los (E13). Sofort, auch in der Nachtruhe: es ist
-         * die Antwort auf einen Alarm, der selbst durch die Nachtruhe ging. */
+        /* Die anderen in der Gruppe sollen sehen, dass sich jemand kuemmert (E13). */
         foreach ($sg_gruppen as $sg_g) {
             sg_senden($sg_g, sprintf(sg_t('BOT.GRUPPE_QUITTIERT'), sg_maske($von)));
         }
@@ -2339,10 +2413,19 @@ function sg_verarbeite($von, $text, $trocken = false)
     }
     if ($klein === 'status' || $klein === 'zustand'
         || strpos($klein, 'status ') === 0 || strpos($klein, 'zustand ') === 0) {
+        if ($gast !== null) { return $sg_gastnein(); }
+        $sg_teil = strpos($klein, ' ') !== false ? trim(substr($klein, strpos($klein, ' ') + 1)) : '';
+        /* Vorschlag 3 (seit 0.9.30, N7): "status <wort>" fragt Haus-Werte ab -
+           ein von Loxone gemeldeter Zustand gleichen Namens gewinnt (Bestand),
+           sonst das Haus-Wort, sonst wie bisher "nicht bekannt". */
+        if ($sg_teil !== '' && strpos($klein, 'status ') === 0 && sg_haus_wort_an($cfg, $sg_teil)
+            && (empty($cfg['zustand_ein']) || !sg_zustand_da($sg_teil))) {
+            $sg_h = sg_haus_antwort($sg_teil, $cfg);
+            if ($sg_h !== null) { return array('antwort' => $sg_h, 'grund' => 'haus'); }
+        }
         if (empty($cfg['zustand_ein'])) {
             return array('antwort' => sg_t('BOT.ZUSTAND_AUS'), 'grund' => 'zustand_aus');
         }
-        $sg_teil = strpos($klein, ' ') !== false ? trim(substr($klein, strpos($klein, ' ') + 1)) : '';
         return array('antwort' => sg_zustand_text($sg_teil), 'grund' => 'status');
     }
 
@@ -2350,12 +2433,11 @@ function sg_verarbeite($von, $text, $trocken = false)
     foreach ($cfg['befehle'] as $i => $b) {
         if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
 
-        /* Ein Befehl kann einen WERT mitbekommen: "heizung 21".
-         * Erwartet wird er nur, wenn die Zeile auf 'zahl' steht - sonst ist
-         * alles hinter dem Wort ein anderer Befehl oder ein Vertipper. */
+        /* Ein Befehl kann einen WERT mitbekommen: "heizung 21". */
         $sg_mit = null;
         if ($klein === $b['wort']) {
             if ($b['wert_art'] === 'zahl') {
+                if (!$sg_gastwort($b['wort'])) { return $sg_gastnein(); }
                 return array('antwort' => sprintf(sg_t('BOT.WERT_FEHLT'), $b['wort'],
                                  (int) $b['min'], (int) $b['max'], $b['wort']),
                              'grund' => 'wert_fehlt');
@@ -2364,6 +2446,7 @@ function sg_verarbeite($von, $text, $trocken = false)
             if ($b['wert_art'] !== 'zahl') { continue; }
             $sg_vor = $b['wort'] . ' ';
             if (strpos($klein, $sg_vor) !== 0) { continue; }
+            if (!$sg_gastwort($b['wort'])) { return $sg_gastnein(); }
             $sg_rest = str_replace(',', '.', trim(substr($klein, strlen($sg_vor))));
             if (!preg_match('/^-?[0-9]+(\.[0-9]+)?$/', $sg_rest)) {
                 return array('antwort' => sprintf(sg_t('BOT.WERT_UNGUELTIG'), (int) $b['min'], (int) $b['max']),
@@ -2377,10 +2460,11 @@ function sg_verarbeite($von, $text, $trocken = false)
             // Ganze Zahlen ohne Nachkomma schreiben - das erwartet Loxone.
             $sg_mit = (floor($sg_zahl) == $sg_zahl) ? (string) (int) $sg_zahl : (string) $sg_zahl;
         }
+        /* Gast: nur die Woerter seiner Liste (seit 0.9.30, Vorschlag 4). */
+        if (!$sg_gastwort($b['wort'])) { return $sg_gastnein(); }
 
         /* Berechtigung je Befehl. Die Weissliste sagt, WER ueberhaupt reden
-         * darf; hier steht, wer DIESEN Befehl ausloesen darf. Ohne das duerfte
-         * jeder Erlaubte alles - auch das Tor und die Alarmanlage. */
+         * darf; hier steht, wer DIESEN Befehl ausloesen darf. */
         if ((string) $b['absender'] !== '') {
             $sg_n = preg_replace('/[^0-9+]/', '', (string) $von);
             $sg_darf = false;
@@ -2407,19 +2491,19 @@ function sg_verarbeite($von, $text, $trocken = false)
             if (!$trocken && !sg_pin_zaehler_bereit($von)) {
                 return array('antwort' => sg_t('BOT.PIN_STOERUNG'), 'grund' => 'pin_stoerung');
             }
-            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit)); }
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'pin', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit, 'gast' => $gast !== null ? 1 : 0)); }
             return array('antwort' => sg_t('BOT.PIN_BITTE'), 'grund' => 'pin_angefordert');
         }
         if ($b['stufe'] === 'rueckfrage') {
-            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit)); }
+            if (!$trocken) { sg_wartend($von, array('befehl' => $i, 'art' => 'rueckfrage', 'wort' => $b['wort'], 'stufe' => $b['stufe'], 'wert' => $sg_mit, 'gast' => $gast !== null ? 1 : 0)); }
             return array('antwort' => sprintf(sg_t('BOT.RUECKFRAGE'), $b['wort']
                          . ($sg_mit === null ? '' : ' ' . $sg_mit)), 'grund' => 'rueckfrage');
         }
-        return sg_ausfuehren($b, $von, $trocken, false, $sg_mit);
+        return sg_ausfuehren($b, $von, $trocken, false, $sg_mit, $gast !== null);
     }
 
-    // Der Vergleich laeuft am ERSTEN WORT. Wer "heizzung 21" schreibt, hat
-    // sich im Befehl vertippt, nicht in der Zahl.
+    if ($gast !== null) { return $sg_gastnein(); }
+    // Der Vergleich laeuft am ERSTEN WORT.
     $sg_erstes = strpos($klein, ' ') === false ? $klein : substr($klein, 0, strpos($klein, ' '));
     $sg_nah = sg_vorschlag($sg_erstes, $cfg);
     if ($sg_nah !== '') {
@@ -2436,11 +2520,16 @@ function sg_verarbeite($von, $text, $trocken = false)
  * Antworttext ist derselbe, den der Absender bekommen haette - darum geht es
  * im Probelauf ja.
  */
-function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert = null)
+function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert = null, $gast = false)
 {
     if ($b['thema'] === '') {
         return array('antwort' => sg_t('BOT.KEIN_THEMA'), 'grund' => 'kein_thema');
     }
+    if (sg_thema_reserviert($b['thema'])) {
+        sg_log('Befehl "' . $b['wort'] . '" nicht gesendet: das Thema ' . $b['thema'] . ' ist seit 0.9.30 reserviert - bitte umbenennen.');
+        return array('antwort' => sprintf(sg_t('BOT.THEMA_RESERVIERT'), $b['wort']), 'grund' => 'thema_reserviert');
+    }
+    $sg_wer = sg_maske($von) . ($gast ? ' (Gast)' : '');
     // Der mitgeschickte Wert schlaegt die feste Nutzlast der Zeile.
     $nutz = $wert === null ? (string) $b['wert'] : (string) $wert;
     $wortzeile = $b['wort'] . ($wert === null ? '' : ' ' . $wert);
@@ -2458,15 +2547,14 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
 
     /* ---- Vier-Augen ----
      * Steht eine zweite Nummer in der Zeile, wird nicht ausgefuehrt, sondern
-     * dort gefragt. Erst deren "ja" fuehrt aus - dann kommt dieser Aufruf mit
-     * $freigegeben = true noch einmal hier an. */
+     * dort gefragt. Erst deren "ja" fuehrt aus. */
     if (!$freigegeben && (string) $b['zweit'] !== '') {
         sg_wartend($b['zweit'], array('befehl' => -1, 'art' => 'rueckfrage', 'wort' => $b['wort'],
-                                      'stufe' => $b['stufe'], 'fuer' => $von, 'wert' => $wert));
+                                      'stufe' => $b['stufe'], 'fuer' => $von, 'wert' => $wert, 'gast' => $gast ? 1 : 0));
         sg_senden($b['zweit'], sprintf(sg_t('BOT.ZWEIT_FRAGE'), sg_maske($von), $wortzeile));
-        sg_log('Vier-Augen: ' . sg_maske($von) . ' will "' . $wortzeile . '", gefragt wird '
+        sg_log('Vier-Augen: ' . $sg_wer . ' will "' . $wortzeile . '", gefragt wird '
              . sg_maske($b['zweit']));
-        sg_ereignis_merken(sg_maske($von), 'Freigabe angefragt', $wortzeile);
+        sg_ereignis_merken($sg_wer, 'Freigabe angefragt', $wortzeile);
         return array('antwort' => sprintf(sg_t('BOT.ZWEIT_WARTET'), sg_maske($b['zweit'])),
                      'grund' => 'zweitfreigabe');
     }
@@ -2476,11 +2564,11 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
     $sg_broker = ($sg_erg['weg'] === 'broker');
     /* WAS "ok" HEISST (M2, Entscheidung 28; SignalBot-q1):
      *   weg broker - der Broker hat den Befehl bestaetigt (PUBACK, QoS 1).
-     *                Weiter zum Miniserver reicht ihn das MQTT-Gateway, das
-     *                das Thema abonniert hat; das sieht der Bot nicht.
+     *                Weiter zum Miniserver reicht ihn das MQTT-Gateway V2,
+     *                wenn das Thema in seiner Hakenliste angehakt ist (V1:
+     *                Abo <praefix>/#); das sieht der Bot nicht.
      *   weg udp    - Rueckfall: das Paket ist an den UDP-Eingang des Gateways
-     *                UEBERGEBEN, unbestaetigt (Regeln/07). Antwort wie bis
-     *                0.9.26: "an Loxone uebergeben".
+     *                UEBERGEBEN, unbestaetigt (Regeln/07).
      *   unklar     - der Broker hat das PUBLISH bekommen, aber nicht
      *                bestaetigt. Nicht nachgeschickt; die Antwort sagt es.
      * letzter.json ist der Zeitpunkt der letzten Uebergabe. */
@@ -2490,10 +2578,10 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
     }
     $sg_wie = $ok ? ($sg_broker ? 'vom Broker bestaetigt, QoS 1' : 'an das Gateway uebergeben, unbestaetigt')
                   : (!empty($sg_erg['unklar']) ? 'an den Broker gesendet, NICHT bestaetigt' : 'FEHLGESCHLAGEN');
-    sg_log('Befehl "' . $wortzeile . '" von ' . sg_maske($von) . ' -> '
+    sg_log('Befehl "' . $wortzeile . '" von ' . $sg_wer . ' -> '
          . $b['thema'] . '=' . $nutz . ($impuls && $nutz !== '0' ? ', dann 0' : '')
          . ' (' . $sg_wie . ')');
-    sg_ereignis_merken(sg_maske($von),
+    sg_ereignis_merken($sg_wer,
                 $ok ? ($sg_broker ? 'bestaetigt' : 'uebergeben') : (!empty($sg_erg['unklar']) ? 'unbestaetigt' : 'fehlgeschlagen'),
                 $wortzeile . ' -> ' . $b['thema'] . '=' . $nutz);
     if (!$ok && !empty($sg_erg['unklar'])) {
@@ -2508,13 +2596,14 @@ function sg_ausfuehren($b, $von, $trocken = false, $freigegeben = false, $wert =
 }
 
 /** Die Hilfe, die der Bot auf "hilfe" schickt. */
-function sg_hilfetext($fuer = '')
+function sg_hilfetext($fuer = '', $gast = null)
 {
     $cfg = sg_config();
     $zeilen = array(sg_t('BOT.HILFE_KOPF'));
     $n = preg_replace('/[^0-9+]/', '', (string) $fuer);
     foreach ($cfg['befehle'] as $b) {
         if (empty($b['aktiv']) || $b['wort'] === '') { continue; }
+        if ($gast !== null && !in_array($b['wort'], $gast['befehle'], true)) { continue; }
         // Was jemand nicht ausloesen darf, gehoert auch nicht in seine Liste.
         if ($n !== '' && (string) $b['absender'] !== '') {
             $darf = false;
@@ -2531,7 +2620,13 @@ function sg_hilfetext($fuer = '')
             ? ' <' . (int) $b['min'] . '..' . (int) $b['max'] . '>' : '');
         $zeilen[] = '- ' . $wort . $marke;
     }
-    if (!empty($cfg['zustand_ein'])) { $zeilen[] = '- status'; }
+    if ($gast === null) {
+        if (!empty($cfg['zustand_ein'])) { $zeilen[] = '- status'; }
+        foreach (sg_haus_woerter($cfg) as $sg_hw) { $zeilen[] = '- status ' . $sg_hw; }
+        if (sg_haus_woerter($cfg)) { $zeilen[] = '- status haus'; }
+    } else {
+        $zeilen[] = sprintf(sg_t('BOT.GAST_BIS'), sg_gast_zeit($gast['bis']));
+    }
     $zeilen[] = '- hilfe';
     if (!empty($cfg['gesperrt'])) { $zeilen[] = ''; $zeilen[] = sg_t('BOT.GESPERRT'); }
     return implode("\n", $zeilen);
@@ -2717,8 +2812,11 @@ function sg_endpunkt($aktion = 'status')
 
 /* ---- Herzschlag des Bots (C2, Entscheidung 4) ----
  *
- * Der Bot legt in jedem Takt (nach der Uhr, hoechstens alle 20 s) den
- * Zeitstempel in <tmp>/herz ab. Der Endpunkt meldet daraus BOT und ALTER, und
+ * Seit 0.9.30 (Entscheidung 1, eigener Fund des Pruefberichts) legt der Bot
+ * den Zeitstempel in <tmp>/herz nur ab, solange der Ereignisstrom NUTZBAR ist
+ * (eine Datenzeile kam oder die Verbindung steht >= 10 s; G13) - OK=1 heisst
+ * damit "Nachrichten kommen an". Bis 0.9.29 in jedem Takt, auch in den
+ * Rueckzugspausen. Der Endpunkt meldet daraus BOT und ALTER, und
  * OK=1 nur, wenn signal-cli antwortet UND das Lebenszeichen hoechstens
  * SG_HERZ_GRENZE Sekunden alt ist (3 x 60 s Takt). Bis 0.9.25 hiess OK nur
  * "signal-cli antwortet auf /check" - ob jemand den Ereignisstrom abhoert,
@@ -3005,9 +3103,10 @@ function sg_t($schluessel)
 function sg_sicherung_lesen($roh)
 {
     $mangel = array();
+    $hinweise = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten) || ($daten !== array() && array_keys($daten) === range(0, count($daten) - 1))) {
-        return array(null, array(sg_t('EINST.SICH_KEIN_JSON')), 0);
+        return array(null, array(sg_t('EINST.SICH_KEIN_JSON')), 0, array());
     }
     $neu = sg_vorgaben();
     $bekannt = array_keys($neu);
@@ -3028,16 +3127,29 @@ function sg_sicherung_lesen($roh)
         $mangel[] = sg_t('EINST.SICH_LEER');
     }
     $fehlend = array_values(array_diff($bekannt, $gesehen));
+    $spaet = array_values(array_intersect($fehlend, sg_sicherung_spaet()));
+    $fehlend = array_values(array_diff($fehlend, $spaet));
     if ($fehlend) {
         $mangel[] = sprintf(sg_t('EINST.SICH_FEHLEND'), count($fehlend),
             htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
+    }
+    if (!$mangel && $spaet) {
+        $gilt = sg_config();
+        foreach ($spaet as $k) { $neu[$k] = $gilt[$k]; }
+        $hinweise[] = sprintf(sg_t('EINST.SICH_SPAET'), htmlspecialchars(implode(', ', $spaet), ENT_QUOTES, 'UTF-8'));
     }
     if (!$mangel) {
         foreach (sg_config_maengel($neu) as $feld => $text) {
             $mangel[] = '<span class="sm-mono">' . sg_e($feld) . '</span>: ' . $text;
         }
     }
-    return array($mangel ? null : $neu, $mangel, $anzahl);
+    if (!$mangel) {
+        $hatte_pin = sg_pin_gesetzt(sg_config());
+        list($neu, $mig) = sg_pin_migrieren($neu);
+        if ($mig) { $hinweise[] = sg_t('EINST.SICH_PIN_GEHASHT'); }
+        if ($hatte_pin && !sg_pin_gesetzt($neu)) { $hinweise[] = sg_t('EINST.SICH_PIN_ENTFERNT'); }
+    }
+    return array($mangel ? null : $neu, $mangel, $anzahl, $hinweise);
 }
 
 /**
@@ -3052,6 +3164,7 @@ function sg_sicherung_json($cfg)
         '_stand'   => date('Y-m-d H:i:s'),
         '_hinweis' => sg_klartext('EINST.SICH_KOPF_HINWEIS'),
     );
+    list($cfg, ) = sg_pin_migrieren($cfg);
     $m = sg_sicherung_eigene_maengel($cfg);
     if ($m) {
         $aus['_warnung'] = sprintf(sg_klartext('EINST.SICH_KOPF_WARNUNG'), implode(', ', $m));
@@ -3059,6 +3172,7 @@ function sg_sicherung_json($cfg)
     foreach (array_keys(sg_vorgaben()) as $k) {
         $aus[$k] = $cfg[$k];
     }
+    $aus['pin'] = '';
     return json_encode($aus, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }
 
@@ -3185,8 +3299,9 @@ function sg_wachposten()
         return '';
     }
     $soll = sg_formtoken();
-    $ist = isset($_POST['fmt']) ? $_POST['fmt']
-         : (isset($_GET['fmt']) ? $_GET['fmt'] : null);
+    /* Seit 0.9.30 (G1) nur aus $_POST - alle Formulare schicken POST; ein
+     * Merkmal in der Adresse stuende im Verlauf und im Protokoll des Webservers. */
+    $ist = isset($_POST['fmt']) ? $_POST['fmt'] : null;
     if (!is_string($ist) || $ist === '' || $soll === '') {
         return sg_t('WACHE.FEHLT');
     }
@@ -3194,4 +3309,1672 @@ function sg_wachposten()
         return sg_t('WACHE.FALSCH');
     }
     return '';
+}
+
+/* ==================================================================
+ * Seit 0.9.30 (Gruppe 32, 26.10.2026) - Status ueber das MQTT-Gateway V2
+ * ==================================================================
+ *
+ * Hausform = MQTT-Gateway V2 (Entscheidung 2; Entwurf entwurf_gruppe32_sg.txt
+ * Abschnitt 2): der Bot sendet seinen Zustand im Takt an den UDP-Eingang des
+ * Gateways (fluechtig, nie retained). Gateway V2 abonniert genau die Themen,
+ * die in seiner Hakenliste angehakt sind (Opt-In je Thema, gemessen am Geraet
+ * 18.10.2026) - daher die Namenstabelle und die V2-Hakenliste mit
+ * "Noncached" fuer status/zaehler, status/ok und die Chat-Befehle. Gateway V1
+ * (Abo <praefix>/# ueber mqtt_subscriptions.cfg) bleibt nur Rueckfall.
+ *
+ * EINE Quelle fuer Endpunktzeile und MQTT: sg_status_werte(). EINE Liste fuer
+ * Sendecode, Namenstabelle, V2-Hakenliste und Reiter Test:
+ * sg_mqtt_status_themen().
+ */
+
+/** Mindestzeit zwischen zwei vollen Saetzen (Sekunden) - dazwischen nur Aenderungen und das Lebenszeichen. */
+define('SG_STATUS_VOLL', 1800);
+
+/** Der Webserver-Port des LoxBerry (general.json Webserver.Port, Rueckfall 80; G10). */
+function sg_webport()
+{
+    $p = sg_paths();
+    if ($p['home'] === '') { return 80; }
+    $gen = @json_decode((string) @file_get_contents($p['home'] . '/config/system/general.json'), true);
+    $port = 0;
+    if (is_array($gen)) {
+        foreach (array('Webserver', 'webserver') as $k) {
+            if (!isset($gen[$k]) || !is_array($gen[$k])) { continue; }
+            foreach (array('Port', 'port') as $pk) {
+                if (isset($gen[$k][$pk]) && is_scalar($gen[$k][$pk]) && preg_match('/^[0-9]{1,5}$/', trim((string) $gen[$k][$pk]))) {
+                    $port = (int) trim((string) $gen[$k][$pk]);
+                    break 2;
+                }
+            }
+        }
+    }
+    return ($port > 0 && $port <= 65535) ? $port : 80;
+}
+
+/**
+ * Der Name, den das MQTT-Gateway (V1 wie V2, build_vi_name) einem Thema als
+ * Virtuellen Eingang gibt: "/", "%" und Leerzeichen werden "_". EINE Stelle
+ * fuer Namenstabelle, Hakenliste und Bausteinliste.
+ */
+function sg_gateway_name($praefix, $thema)
+{
+    return str_replace(array('/', '%', ' '), '_', (string) $praefix . '_' . (string) $thema);
+}
+
+/** Kennt systemd den Dienst signal-cli-loxberry? (fuer daemon = -1: kein eigener Dienst, etwa Docker) */
+function sg_dienst_bekannt()
+{
+    $aus = array();
+    @exec('systemctl show -p LoadState --value signal-cli-loxberry 2>/dev/null', $aus);
+    return in_array(trim(implode('', $aus)), array('loaded', 'masked'), true);
+}
+
+/**
+ * Die Zahlen des Bots - EINE Quelle fuer die Statuszeile des Endpunkts
+ * (byte-gleich zu 0.9.29) und die Themen ueber das MQTT-Gateway V2.
+ * $mit_netz: true = auch signal-cli fragen (/api/v1/check) und systemd
+ * (Endpunkt, Takt des Bots); false = nur Dateien (healthcheck, Oberflaeche).
+ */
+function sg_status_werte(array $cfg, $mit_netz)
+{
+    $z = sg_zustaende();
+    $alter = sg_herz_alter();
+    $frisch = $alter >= 0 && $alter <= SG_HERZ_GRENZE;
+    $w = array();
+    if ($mit_netz) {
+        $lebt = sg_daemon_lebt();
+        $w['ok_http'] = ($lebt && $frisch) ? 1 : 0;
+        $w['rpc'] = $lebt ? 1 : 0;
+        $w['daemon'] = sg_dienst_laeuft() ? 1 : 0;
+    }
+    $w['konto'] = (string) $cfg['konto'] !== '' ? 1 : 0;
+    $w['erlaubte'] = count($cfg['erlaubt']);
+    $w['befehle'] = count(array_filter($cfg['befehle'], function ($b) { return !empty($b['aktiv']) && $b['wort'] !== ''; }));
+    $w['zustaende'] = count($z);
+    $w['gesperrt'] = !empty($cfg['gesperrt']) ? 1 : 0;
+    $w['offen'] = sg_offene_meldungen();
+    $w['letzter'] = sg_letzter_befehl();
+    $w['abgewiesen'] = sg_zaehle_ereignisse('abgewiesen');
+    $w['pinfehl'] = sg_zaehle_ereignisse('PIN falsch');
+    $w['bot'] = sg_bot_laeuft() ? 1 : 0;
+    $w['alter'] = $alter;
+    $w['gaeste'] = count(sg_gaeste_gueltig($cfg));
+    $w['letzter_min'] = $w['letzter'] < 0 ? -1 : intdiv($w['letzter'], 60);
+    return $w;
+}
+
+/** Die Statuszeile des Endpunkts (aktion=status) - Wortlaut und Reihenfolge wie bis 0.9.29. */
+function sg_status_zeile(array $w)
+{
+    return sprintf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d;GESPERRT=%d;OFFEN=%d;LETZTER=%d;ABGEWIESEN=%d;PINFEHL=%d;BOT=%d;ALTER=%d",
+        $w['ok_http'], $w['daemon'], $w['konto'], $w['erlaubte'], $w['befehle'], $w['zustaende'], $w['gesperrt'],
+        $w['offen'], $w['letzter'], $w['abgewiesen'], $w['pinfehl'], $w['bot'], $w['alter']);
+}
+
+/**
+ * Die Status-Themen ueber das MQTT-Gateway V2 (Entwurf 2.2) - EINE Liste fuer
+ * Sendecode (sg_mqtt_status), Namenstabelle, V2-Hakenliste und Reiter Test.
+ * Je Eintrag: thema (unter dem Praefix), schl (Feld aus sg_status_werte bzw.
+ * vom Takt), leben (geht jede Minute mit, am Filter vorbei), haken (V2-Haken
+ * fuers Musterprojekt), nc (Noncached), mp (Stelle im Musterprojekt), bez
+ * (Sprachschluessel), bereich, fehl (Fehlwert-Sprachschluessel oder '').
+ * BOT und ALTER bleiben nur HTTP (Regeln/07: ueber MQTT gibt es kein Alter).
+ */
+function sg_mqtt_status_themen($cfg = null)
+{
+    $m1 = 'SignalBot';
+    $m2 = 'SignalBot Befehle und Meldungen';
+    return array(
+        array('thema' => 'status/zaehler', 'schl' => 'zaehler', 'leben' => true, 'haken' => true, 'nc' => true,
+              'mp' => $m1 . ' #2', 'bez' => 'MQTT.T_ZAEHLER', 'bereich' => '0 … 999', 'fehl' => ''),
+        array('thema' => 'status/ok', 'schl' => 'ok', 'leben' => true, 'haken' => true, 'nc' => true,
+              'mp' => $m1 . ' #1', 'bez' => 'MQTT.T_OK', 'bereich' => '0 … 1', 'fehl' => ''),
+        array('thema' => 'status/ts', 'schl' => 'ts', 'leben' => true, 'haken' => false, 'nc' => false,
+              'mp' => '', 'bez' => 'MQTT.T_TS', 'bereich' => 'Unix', 'fehl' => ''),
+        array('thema' => 'rpc', 'schl' => 'rpc', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #4', 'bez' => 'MQTT.T_RPC', 'bereich' => '0 … 1', 'fehl' => ''),
+        array('thema' => 'daemon', 'schl' => 'daemon_mqtt', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #3', 'bez' => 'MQTT.T_DAEMON', 'bereich' => '-1 … 1', 'fehl' => 'MQTT.F_DAEMON'),
+        array('thema' => 'konto', 'schl' => 'konto', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #5', 'bez' => 'MQTT.T_KONTO', 'bereich' => '0 … 1', 'fehl' => ''),
+        array('thema' => 'erlaubte', 'schl' => 'erlaubte', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #6', 'bez' => 'MQTT.T_ERLAUBTE', 'bereich' => '0 … 100', 'fehl' => ''),
+        array('thema' => 'gaeste', 'schl' => 'gaeste', 'leben' => false, 'haken' => false, 'nc' => false,
+              'mp' => '', 'bez' => 'MQTT.T_GAESTE', 'bereich' => '0 … 10', 'fehl' => ''),
+        array('thema' => 'befehle', 'schl' => 'befehle', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #7', 'bez' => 'MQTT.T_BEFEHLE', 'bereich' => '0 … ' . SG_BEFEHLE, 'fehl' => ''),
+        array('thema' => 'gesperrt', 'schl' => 'gesperrt', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #8, ' . $m2 . ' #20', 'bez' => 'MQTT.T_GESPERRT', 'bereich' => '0 … 1', 'fehl' => ''),
+        array('thema' => 'abgewiesen', 'schl' => 'abgewiesen', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #9', 'bez' => 'MQTT.T_ABGEWIESEN', 'bereich' => '0 … 500', 'fehl' => ''),
+        array('thema' => 'pinfehl', 'schl' => 'pinfehl', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m1 . ' #10', 'bez' => 'MQTT.T_PINFEHL', 'bereich' => '0 … 500', 'fehl' => ''),
+        array('thema' => 'offen', 'schl' => 'offen', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m2 . ' #21', 'bez' => 'MQTT.T_OFFEN', 'bereich' => '0 … 200', 'fehl' => ''),
+        array('thema' => 'zustaende', 'schl' => 'zustaende', 'leben' => false, 'haken' => true, 'nc' => false,
+              'mp' => $m2 . ' #22', 'bez' => 'MQTT.T_ZUSTAENDE', 'bereich' => '0 … 50', 'fehl' => ''),
+        array('thema' => 'letzter_min', 'schl' => 'letzter_min', 'leben' => true, 'haken' => true, 'nc' => false,
+              'mp' => $m2 . ' #5', 'bez' => 'MQTT.T_LETZTER_MIN', 'bereich' => '-1 … 525600', 'fehl' => 'MQTT.F_LETZTER'),
+    );
+}
+
+/**
+ * Die Namenstabelle (Reiter Einbindung) und die V2-Hakenliste (Reiter MQTT):
+ * Status-Themen, die Themen der eingeschalteten Chat-Befehle (Haken und
+ * Noncached, N3), das alte Lebenszeichen online (veraltet, E-E3) und die
+ * Brueckenthemen (Quittungen, status/befehle - ohne Haken).
+ * Je Zeile: thema, voll, name, bez (fertiger Text, HTML), bereich, haken, nc, mp, retain.
+ */
+function sg_mqtt_namenstabelle(array $cfg)
+{
+    $pf = (string) $cfg['mqtt_topic'];
+    $aus = array();
+    foreach (sg_mqtt_status_themen($cfg) as $t) {
+        $bez = sg_t($t['bez']) . ($t['fehl'] !== '' ? ' ' . sg_t($t['fehl']) : '');
+        $aus[] = array('thema' => $t['thema'], 'voll' => sg_mqtt_thema_voll($cfg, $t['thema']),
+                       'name' => sg_gateway_name($pf, $t['thema']), 'bez' => $bez, 'bereich' => $t['bereich'],
+                       'haken' => $t['haken'], 'nc' => $t['nc'], 'mp' => $t['mp'], 'retain' => false, 'art' => 'status');
+    }
+    foreach (sg_mqtt_themen($cfg) as $th) {
+        if ($th['art'] !== 'fest' && $th['art'] !== 'zahl') { continue; }
+        $thema = substr($th['thema'], strlen($pf) + 1);
+        $aus[] = array('thema' => $thema, 'voll' => $th['thema'], 'name' => sg_gateway_name($pf, $thema),
+                       'bez' => sprintf(sg_t('MQTT.T_CHATBEFEHL'), sg_e($th['quelle'])),
+                       'bereich' => $th['art'] === 'zahl' ? $th['wert'] : '0 … 1', 'haken' => true, 'nc' => true,
+                       'mp' => '', 'retain' => false, 'art' => 'befehl');
+    }
+    if (!empty($cfg['herzschlag'])) {
+        $aus[] = array('thema' => 'online', 'voll' => sg_mqtt_thema_voll($cfg, 'online'), 'name' => sg_gateway_name($pf, 'online'),
+                       'bez' => sg_t('MQTT.T_ONLINE_VERALTET'), 'bereich' => 'Unix', 'haken' => false, 'nc' => false,
+                       'mp' => '', 'retain' => false, 'art' => 'online');
+    }
+    $aus[] = array('thema' => 'befehl/<name>/quittung', 'voll' => $pf . '/befehl/<name>/quittung', 'name' => '–',
+                   'bez' => sg_t('MQTT.T_QUITTUNG'), 'bereich' => sg_t('MQTT.B_TEXT'), 'haken' => false, 'nc' => false,
+                   'mp' => '', 'retain' => false, 'art' => 'bruecke');
+    $aus[] = array('thema' => 'status/befehle', 'voll' => $pf . '/status/befehle', 'name' => sg_gateway_name($pf, 'status/befehle'),
+                   'bez' => sg_t('MQTT.T_STATUS_BEFEHLE'), 'bereich' => '-1 … 1', 'haken' => false, 'nc' => false,
+                   'mp' => '', 'retain' => false, 'art' => 'bruecke');
+    return $aus;
+}
+
+/**
+ * Stehen unter Gateway V2 die Haken? (Reiter Test, healthcheck; N1) Gelesen
+ * wird nur config/system/subscriptions.json (Subscriptions[].Id je Thema,
+ * Noncached; Form wie aWATTar spot_mqtt_v2_haken_lage()). Rueckgabe
+ * array(1|0|2, Klartext, gesetzt, soll, fehlende Status-Haken): 1 alle
+ * Haken der Hakenliste gesetzt und Noncached wie markiert, 0 es fehlt etwas,
+ * 2 nicht feststellbar (Gateway V1, Fassung oder Datei nicht lesbar).
+ */
+function sg_mqtt_v2_haken_lage(array $cfg)
+{
+    $m = sg_mqtt_zustand();
+    $f = isset($m['fassung']) ? (int) $m['fassung'] : 0;
+    if ($f <= 0) { return array(2, sg_t('TEST.A_V2_UNKLAR'), 0, 0, array()); }
+    if ($f < 2) { return array(2, sg_t('TEST.A_V2_V1'), 0, 0, array()); }
+    $p = sg_paths();
+    $d = @json_decode((string) @file_get_contents($p['home'] . '/config/system/subscriptions.json'), true);
+    if (!is_array($d)) { return array(2, sg_t('TEST.A_V2_UNKLAR'), 0, 0, array()); }
+    $liste = array();
+    foreach (array('Subscriptions', 'subscriptions') as $s) {
+        if (isset($d[$s]) && is_array($d[$s])) { $liste = $d[$s]; break; }
+    }
+    $abo = array();
+    foreach ($liste as $e) {
+        if (!is_array($e)) { continue; }
+        $id = '';
+        foreach (array('Id', 'id', 'Topic', 'topic') as $k) {
+            if (isset($e[$k]) && is_string($e[$k])) { $id = $e[$k]; break; }
+        }
+        if ($id === '') { continue; }
+        $nc = false;
+        foreach (array('Noncached', 'noncached') as $k) {
+            if (isset($e[$k])) {
+                $nc = ($e[$k] === true || in_array(strtolower(trim((string) $e[$k])), array('1', 'true', 'yes', 'on'), true));
+            }
+        }
+        $abo[$id] = $nc;
+    }
+    $soll = 0; $da = 0; $fehlt = array(); $ohne_nc = array(); $status_fehlt = array();
+    foreach (sg_mqtt_namenstabelle($cfg) as $r) {
+        if (!$r['haken']) { continue; }
+        $soll++;
+        if (!array_key_exists($r['voll'], $abo)) {
+            $fehlt[] = $r['voll'];
+            if ($r['art'] === 'status') { $status_fehlt[] = $r['voll']; }
+            continue;
+        }
+        $da++;
+        if ($r['nc'] && !$abo[$r['voll']]) {
+            $ohne_nc[] = $r['voll'];
+            if ($r['art'] === 'status') { $status_fehlt[] = $r['voll'] . ' (Noncached)'; }
+        }
+    }
+    if (!$fehlt && !$ohne_nc) {
+        return array(1, sprintf(sg_t('TEST.A_V2_OK'), $da, $soll), $da, $soll, array());
+    }
+    $txt = sprintf(sg_t('TEST.A_V2_FEHLT'), $da, $soll);
+    if ($fehlt) { $txt .= ' ' . sprintf(sg_t('TEST.A_V2_FEHLEN'), sg_e(implode(', ', array_slice($fehlt, 0, 6))) . (count($fehlt) > 6 ? ' …' : '')); }
+    if ($ohne_nc) { $txt .= ' ' . sprintf(sg_t('TEST.A_V2_NONCACHED'), sg_e(implode(', ', $ohne_nc))); }
+    return array(0, $txt, $da, $soll, $status_fehlt);
+}
+
+/**
+ * Eine Runde an den UDP-Eingang des MQTT-Gateways: alle Paare thema => wert
+ * hintereinander, ab dem zweiten Datagramm 5 ms Pause IN der Sendefunktion
+ * (Regeln/07). Nur mit mqtt_ein und erkanntem UDP-Port; ohne Gateway still
+ * (gebremste Protokollzeile). Rueckgabe: Zahl der gesendeten Datagramme.
+ */
+function sg_mqtt_runde(array $cfg, array $paare)
+{
+    if (empty($cfg['mqtt_ein']) || !$paare) { return 0; }
+    $z = sg_mqtt_zustand();
+    if (!$z['udpport']) {
+        sg_log_gebremst('status_kein_port', 'MQTT-Gateway V2: kein UDP-Eingangsport in der general.json - der Status geht nicht hinaus.');
+        return 0;
+    }
+    $n = 0;
+    $erst = true;
+    foreach ($paare as $thema => $wert) {
+        $w = sg_mqtt_wert_saeubern($wert);
+        if ($w === '') { continue; }
+        if (!$erst) { usleep(5000); }
+        $erst = false;
+        $n += sg_udp_senden($z['udpport'], 'publish ' . sg_mqtt_thema_voll($cfg, (string) $thema) . ' ' . $w);
+    }
+    return $n;
+}
+
+/** Lebenszeichen-Zaehler 0...999 in tmp/status_zaehler (weiter ab dem gemerkten Wert; fehlt die Datei: 0). */
+function sg_status_zaehler_weiter()
+{
+    $f = sg_tmpdir() . '/status_zaehler';
+    $roh = is_file($f) ? trim((string) @file_get_contents($f)) : '';
+    $n = preg_match('/^[0-9]{1,3}$/', $roh) ? ((int) $roh + 1) % 1000 : 0;
+    sg_write_atomic($f, (string) $n, 0644);
+    return $n;
+}
+
+/**
+ * Den Status ueber das MQTT-Gateway V2 senden (vom Takt des Bots, einmal je
+ * 60 s; Entwurf 2.4): Lebenszeichen status/zaehler, status/ok, status/ts und
+ * letzter_min IMMER, die uebrigen bei Aenderung gegen tmp/mqtt_letzte.json,
+ * voll bei $voll (Start des Bots, alle 30 min). $ok = 1 heisst "Nachrichten
+ * kommen an" (der laufende Ereignisstrom ist nutzbar, 2.3). Alles fluechtig.
+ * Rueckgabe: Zahl der gesendeten Datagramme.
+ */
+function sg_mqtt_status(array $cfg, $ok, $voll)
+{
+    if (empty($cfg['mqtt_ein'])) { return 0; }
+    $w = sg_status_werte($cfg, true);
+    $w['ok'] = $ok ? 1 : 0;
+    $w['ts'] = time();
+    $w['daemon_mqtt'] = $w['daemon'] ? 1 : (sg_dienst_bekannt() ? 0 : -1);
+    $w['zaehler'] = sg_status_zaehler_weiter();
+    $merker = sg_tmpdir() . '/mqtt_letzte.json';
+    $alt = array();
+    if (!$voll && is_file($merker)) {
+        $alt = json_decode((string) @file_get_contents($merker), true);
+        if (!is_array($alt)) { $alt = array(); }
+    }
+    $paare = array();
+    $neu = array();
+    foreach (sg_mqtt_status_themen($cfg) as $t) {
+        $v = (string) $w[$t['schl']];
+        $neu[$t['thema']] = $v;
+        if ($t['leben'] || $voll || !array_key_exists($t['thema'], $alt) || (string) $alt[$t['thema']] !== $v) {
+            $paare[$t['thema']] = $v;
+        }
+    }
+    $n = sg_mqtt_runde($cfg, $paare);
+    // Nur nach einer ganz gesendeten Runde merken - sonst gehen Aenderungen der naechsten Minute mit.
+    if ($n === count($paare)) { sg_write_atomic($merker, json_encode($neu), 0644); }
+    return $n;
+}
+
+/* ==================================================================
+ * Seit 0.9.30 (Gruppe 32) - Meldungen aus Loxone: EIN Ablauf fuer den
+ * HTTP-Endpunkt und die Befehlsbruecke 1.0.1 (Entscheidung 2, E-E4 bis E-E7)
+ * ==================================================================
+ *
+ * Der Endpunkt (Quelle 'http') antwortet byte-gleich zu 0.9.29 und sendet wie
+ * bisher sofort. Die Bruecke (Quelle 'mqtt') sendet NIE selbst an signal-cli:
+ * sie reiht in die Ausgangswarteschlange ein, zugestellt wird vom Bot (Takt
+ * <= 10 s). sg_senden() wartet bis 25 s je Ziel - synchron in der Bruecke
+ * gesendet, hielte ein Rundruf bei haengendem signal-cli den Brueckendienst
+ * Minuten an, und kein "sperren" kaeme durch (N6).
+ */
+
+/** Plugin-Bremse fuer Meldungen ueber die Bruecke (alle Namen zusammen, je 60 s; die Warteschlange haelt 200). */
+define('SG_BRUECKE_JE_MINUTE', 20);
+/** Vorschlag 1: Bild eines Plugins hoechstens 5 MB, hoechstens 20 Kopien liegen in anhang/. */
+define('SG_ANHANG_MAX', 5242880);
+define('SG_ANHANG_ANZAHL', 20);
+
+/** Endpunkt fuer Loxone an? (Lese-Regel in sg_config: Bestand 1, Neuinstallation 0; E-E8) */
+function sg_endpunkt_ein(array $cfg)
+{
+    return !empty($cfg['endpunkt_ein']);
+}
+
+/** Text aus Loxone/Plugin: woertliches \n -> Umbruch, Steuerzeichen raus, hoechstens 2000 Zeichen (wie der Endpunkt). */
+function sg_meldetext($roh, &$gekuerzt)
+{
+    $t = str_replace('\n', "\n", (string) $roh);
+    $t = trim(preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $t));
+    $gekuerzt = 0;
+    if (sg_laenge($t) > 2000) { $t = sg_kuerzen($t, 2000); $gekuerzt = 1; }
+    return $t;
+}
+
+/** Ziele wie der Endpunkt: an = gepruefte Nummer der Weissliste, sonst die Gruppe, sonst alle Erlaubten. array(ziele, grund). */
+function sg_meldeziele(array $cfg, $an)
+{
+    if ((string) $an !== '') {
+        if (!preg_match('/^\+[0-9]{6,20}$/', (string) $an)) { return array(array(), 'EMPFAENGER_UNGUELTIG'); }
+        if (!sg_erlaubt($an)) { return array(array(), 'EMPFAENGER_NICHT_ERLAUBT'); }
+        return array(array((string) $an), '');
+    }
+    if ((string) $cfg['gruppe'] !== '') { return array(array(SG_GRUPPE_VOR . $cfg['gruppe']), ''); }
+    if (!$cfg['erlaubt']) { return array(array(), 'KEIN_EMPFAENGER'); }
+    return array($cfg['erlaubt'], '');
+}
+
+/** Ende der Nachtruhe als Unix-Zeit (herausgeloest aus sg_melden(); auch fuer die Bruecke). */
+function sg_nachtruhe_ende(array $cfg)
+{
+    list($bh, $bm) = array_map('intval', explode(':', $cfg['nacht_bis']));
+    $ziel = mktime($bh, $bm, 0);
+    if ($ziel <= time()) { $ziel += 86400; }
+    return $ziel;
+}
+
+/**
+ * Eine Aktion aus Loxone ausfuehren - EINE Stelle fuer den Endpunkt ('http')
+ * und die Befehlsbruecke ('mqtt'). Rueckgabe array(HTTP-Code, Zeile ohne
+ * Zeilenende); fuer den Endpunkt byte-gleich zu 0.9.29.
+ * $par: sperren/entsperren -; zustand name, wert; senden text, dringend,
+ * an (mqtt: +Nummer) bzw. an_roh und bild (http); plugin absender, roh.
+ */
+function sg_befehl_ausfuehren($aktion, array $par, $quelle)
+{
+    $cfg = $quelle === 'http' ? sg_config(false) : sg_config();
+    if ($aktion === 'sperren' || $aktion === 'entsperren') {
+        $neu = $aktion === 'sperren' ? 1 : 0;
+        /* Unter der Konfigurationssperre, mit frischem Lesen (C9). */
+        $geaendert = false;
+        list($ok, ) = sg_config_aendern(function ($c) use ($neu, &$geaendert) {
+            if ((int) $c['gesperrt'] === $neu) { return null; }
+            $c['gesperrt'] = $neu;
+            $geaendert = true;
+            return $c;
+        });
+        if (!$ok) { return array(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT'); }
+        if ($geaendert) {
+            if ($quelle === 'http') {
+                sg_log($neu ? 'Bot ueber den Endpunkt GESPERRT.' : 'Bot ueber den Endpunkt entsperrt.');
+                sg_ereignis_merken('Loxone', $neu ? 'gesperrt' : 'entsperrt', '');
+            } else {
+                sg_log($neu ? 'Bot ueber MQTT (Befehlsbruecke) GESPERRT.' : 'Bot ueber MQTT (Befehlsbruecke) entsperrt.');
+                sg_ereignis_merken('Loxone (MQTT)', $neu ? 'gesperrt' : 'entsperrt', '');
+            }
+        }
+        return array(200, sprintf('SIGNAL;OK=1;AKTION=%s;GESPERRT=%d', $aktion, $neu));
+    }
+    if ($aktion === 'zustand') {
+        if (empty($cfg['zustand_ein'])) { return array(403, 'SIGNAL;OK=0;GRUND=ZUSTAENDE_AUS'); }
+        $name = trim((string) (isset($par['name']) ? $par['name'] : ''));
+        $wert = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) (isset($par['wert']) ? $par['wert'] : '')));
+        if ($name === '' || $wert === '') { return array(400, 'SIGNAL;OK=0;GRUND=NAME_ODER_WERT_FEHLT'); }
+        /* Der Name wird geprueft, nicht gesaeubert (C11, Nr. 19). */
+        if (!preg_match('/^[A-Za-z0-9_\-]{1,40}$/', $name)) { return array(400, 'SIGNAL;OK=0;GRUND=NAME_UNGUELTIG'); }
+        $gek = 0;
+        if (sg_laenge($wert) > 120) { $wert = sg_kuerzen($wert, 120); $gek = 1; }
+        if (!sg_zustand_setzen($name, $wert)) { return array(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT'); }
+        return array(200, sprintf('SIGNAL;OK=1;AKTION=zustand;NAME=%s%s', $name, $gek ? ';GEKUERZT=1' : ''));
+    }
+    if ($aktion === 'senden' && $quelle === 'http') {
+        return sg_befehl_senden_http($cfg, $par);
+    }
+    if ($aktion === 'senden' || $aktion === 'plugin') {
+        return sg_befehl_senden_mqtt($cfg, $aktion, $par);
+    }
+    return array(400, 'SIGNAL;OK=0;GRUND=UNBEKANNTE_AKTION');
+}
+
+/**
+ * senden ueber den Endpunkt - der Ablauf von 0.9.29 (webfrontend/html/index.php
+ * :228-322), unveraendert hierher verlegt: sofort senden (sg_melden), mit Bild
+ * sg_senden(), Antwortzeilen und Protokollzeilen wie bisher.
+ */
+function sg_befehl_senden_http(array $cfg, array $par)
+{
+    $text = isset($par['text']) ? (string) $par['text'] : '';
+    // Steuerzeichen raus, Zeilenumbruch als \n zugelassen: Loxone kann keinen
+    // echten Umbruch in eine URL schreiben.
+    $text = str_replace('\n', "\n", $text);
+    $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
+    $text = trim($text);
+    if ($text === '') {
+        return array(400, 'SIGNAL;OK=0;GRUND=TEXT_FEHLT');
+    }
+    /* Gekuerzt wird weiter (eine Alarmmeldung soll hinausgehen), aber gemeldet (C11). */
+    $sg_gekuerzt = 0;
+    if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); $sg_gekuerzt = 1; }
+
+    /* Ein gesetztes, aber unbrauchbares &an= wird ABGEWIESEN (seit 0.9.12); ein
+     * LEERES &an= bleibt der ausdrueckliche Rundruf. */
+    $sg_an_roh = isset($par['an_roh']) ? (string) $par['an_roh'] : '';
+    $an = preg_replace('/[^0-9+]/', '', $sg_an_roh);
+    if ($sg_an_roh !== '' && !preg_match('/^\+[0-9]{6,20}$/', $an)) {
+        sg_log('Senden abgewiesen: "' . sg_maske($sg_an_roh) . '" ist keine gueltige Rufnummer');
+        return array(400, 'SIGNAL;OK=0;GRUND=EMPFAENGER_UNGUELTIG');
+    }
+    if ($an !== '') {
+        // Auch beim Senden gilt die Weissliste.
+        if (!sg_erlaubt($an)) {
+            sg_log('Senden abgewiesen: ' . sg_maske($an) . ' steht nicht auf der Weissliste');
+            return array(403, 'SIGNAL;OK=0;GRUND=EMPFAENGER_NICHT_ERLAUBT');
+        }
+        $ziele = array($an);
+    } elseif ((string) $cfg['gruppe'] !== '') {
+        /* Der Rundruf geht EINMAL in die eingestellte Gruppe (0.9.29, E13). */
+        $ziele = array(SG_GRUPPE_VOR . $cfg['gruppe']);
+    } else {
+        $ziele = $cfg['erlaubt'];
+    }
+    $sg_gruppe = ($ziele && sg_ist_gruppe($ziele[0])) ? 1 : 0;
+    if (!$ziele) {
+        return array(400, 'SIGNAL;OK=0;GRUND=KEIN_EMPFAENGER');
+    }
+    $dringend = !empty($par['dringend']) ? 1 : 0;
+
+    /* Ein Anhang NUR aus dem eigenen Datenordner, verglichen MIT Trenner, nur mit Bildendung (C5). */
+    $anhang = '';
+    $sg_bild = isset($par['bild']) ? (string) $par['bild'] : '';
+    if ($sg_bild !== '') {
+        $echt = realpath($sg_bild);
+        $ort = realpath(sg_datadir());
+        $drin = $ort && $echt && strpos($echt, rtrim($ort, '/\\') . DIRECTORY_SEPARATOR) === 0;
+        $bild = $echt && preg_match('/\.(jpe?g|png|gif|webp)$/i', $echt);
+        if (!$drin || !$bild || !is_file($echt)) {
+            return array(400, 'SIGNAL;OK=0;GRUND=ANHANG_UNZULAESSIG');
+        }
+        $anhang = $echt;
+    }
+
+    $ok = 0;
+    foreach ($ziele as $ziel) {
+        if ($anhang !== '') {
+            // Mit Anhang wird unmittelbar gesendet.
+            if (sg_senden($ziel, $text, $anhang)) { $ok++; }
+        } else {
+            $art = sg_melden($ziel, $text, $dringend);
+            if ($art !== 'fehler') { $ok++; }
+        }
+    }
+    sg_log('Meldung aus Loxone ' . ($sg_gruppe ? 'in die Gruppe' : 'an ' . $ok . ' von ' . count($ziele) . ' Empfaenger')
+         . ($dringend ? ' (dringend)' : '') . ($anhang !== '' ? ' (mit Anhang)' : ''));
+    if ($ok === 0) {
+        return array(502, 'SIGNAL;OK=0;GRUND=SENDEN_FEHLGESCHLAGEN');
+    }
+    return array(200, sprintf('SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s%s', $ok, $dringend,
+        $sg_gruppe ? ';GRUPPE=1' : '', $sg_gekuerzt ? ';GEKUERZT=1' : ''));
+}
+
+/**
+ * senden/dringend/plugin ueber die Befehlsbruecke: IMMER einreihen (der Bot
+ * stellt zu), Bremse 20 je Minute ueber alle Meldungen der Bruecke, Ziele wie
+ * der Endpunkt (Plugins nur Gruppe bzw. alle Erlaubten, nie eine Einzelnummer).
+ */
+function sg_befehl_senden_mqtt(array $cfg, $aktion, array $par)
+{
+    $absender = '';
+    $anhang = '';
+    if ($aktion === 'plugin') {
+        $absender = isset($par['absender']) ? (string) $par['absender'] : '';
+        list($par, $grund) = sg_plugin_nachricht($cfg, $absender, isset($par['roh']) ? (string) $par['roh'] : '');
+        if ($grund !== '') {
+            sg_plugin_abgelehnt_merken($absender, $grund);
+            return array(403, 'SIGNAL;OK=0;GRUND=' . $grund);
+        }
+        $anhang = isset($par['anhang']) ? (string) $par['anhang'] : '';
+        unset($par['an']);   // Plugins: nie eine Einzelnummer (Rufnummern gehoeren nicht in fremde Plugins)
+    }
+    $gek = 0;
+    $text = sg_meldetext(isset($par['text']) ? $par['text'] : '', $gek);
+    if ($text === '') { sg_anhang_weg_falls_frei($anhang); return array(400, 'SIGNAL;OK=0;GRUND=TEXT_FEHLT'); }
+    list($ziele, $grund) = sg_meldeziele($cfg, isset($par['an']) ? (string) $par['an'] : '');
+    if ($grund !== '') {
+        sg_anhang_weg_falls_frei($anhang);
+        return array($grund === 'KEIN_EMPFAENGER' ? 400 : 403, 'SIGNAL;OK=0;GRUND=' . $grund);
+    }
+    $dringend = !empty($par['dringend']) ? 1 : 0;
+    if (!sg_bremse_frei('bruecke', SG_BRUECKE_JE_MINUTE)) {
+        sg_anhang_weg_falls_frei($anhang);
+        sg_log_gebremst('bruecke_bremse', 'Befehlsbruecke: mehr als ' . SG_BRUECKE_JE_MINUTE
+            . ' Meldungen je Minute - weitere werden abgelehnt (GEBREMST).', 60);
+        if ($absender !== '') { sg_plugin_abgelehnt_merken($absender, 'GEBREMST'); }
+        return array(429, 'SIGNAL;OK=0;GRUND=GEBREMST');
+    }
+    $vor = $absender !== '' ? '[' . $absender . '] ' : '';
+    $ab = (!$dringend && sg_nachtruhe($cfg)) ? sg_nachtruhe_ende($cfg) : 0;
+    $n = 0;
+    foreach ($ziele as $z) {
+        if (sg_warteschlange_ein($z, $vor . $text, $dringend, $ab, $anhang)) { $n++; }
+    }
+    if ($n === 0) { sg_anhang_weg_falls_frei($anhang); return array(502, 'SIGNAL;OK=0;GRUND=NICHT_EINGEREIHT'); }
+    sg_log('Meldung aus ' . ($absender !== '' ? 'Plugin ' . $absender : 'Loxone') . ' (MQTT) eingereiht fuer ' . $n . ' Ziel(e)'
+         . ($dringend ? ' (dringend)' : '') . ($gek ? ' (gekuerzt)' : '') . ($anhang !== '' ? ' (mit Bild)' : ''));
+    if ($absender !== '') {
+        sg_ereignis_merken('Plugin ' . $absender, 'Meldung', sg_kuerzen($text, 60) . ($anhang !== '' ? ' (mit Bild)' : ''));
+    }
+    return array(200, sprintf('SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s', $n, $dringend, $gek ? ';GEKUERZT=1' : ''));
+}
+
+/**
+ * Vorschlag 1: Nutzlast eines Plugins pruefen. Klartext ODER JSON
+ * {"text": "...", "dringend": 0|1, "bild": "<pfad>"}. Der Absender steht im
+ * Thema (plugin/<ordner>) und muss in plugin_absender freigegeben sein.
+ * Rueckgabe array(par, grund); par traegt bei einem Bild 'anhang' (Kopie).
+ */
+function sg_plugin_nachricht(array $cfg, $absender, $roh)
+{
+    $frei = isset($cfg['plugin_absender']) && is_array($cfg['plugin_absender']) ? $cfg['plugin_absender'] : array();
+    if (!preg_match('/^[a-z0-9_]{1,40}$/', (string) $absender) || !in_array($absender, $frei, true)) {
+        return array(array(), 'ABSENDER_NICHT_FREIGEGEBEN');
+    }
+    $par = array('absender' => $absender, 'text' => $roh, 'dringend' => 0);
+    if (substr(ltrim($roh), 0, 1) === '{') {
+        $j = json_decode($roh, true);
+        if (!is_array($j) || !isset($j['text']) || !is_string($j['text'])) { return array(array(), 'NUTZLAST_UNGUELTIG'); }
+        $par['text'] = $j['text'];
+        $par['dringend'] = !empty($j['dringend']) ? 1 : 0;
+        if (isset($j['bild']) && $j['bild'] !== '' && $j['bild'] !== null) {
+            if (!is_string($j['bild'])) { return array(array(), 'BILD_UNZULAESSIG'); }
+            list($kopie, $g) = sg_plugin_bild($absender, $j['bild']);
+            if ($g !== '') { return array(array(), $g); }
+            $par['anhang'] = $kopie;
+        }
+    }
+    return array($par, '');
+}
+
+/** Der Ordner fuer Bildkopien (data/plugins/<ordner>/anhang, 0700). */
+function sg_anhang_ordner()
+{
+    $d = sg_datadir() . '/anhang';
+    if (!is_dir($d)) { @mkdir($d, 0700, true); }
+    @chmod($d, 0700);
+    return $d;
+}
+
+/**
+ * Vorschlag 1, Weg A (E-E13): ein Bild aus dem Datenordner des Absenders.
+ * Nach realpath unter <home>/data/plugins/<absender>/ (Vergleich MIT Trenner),
+ * regulaere Datei, Endung jpg/jpeg/png/gif/webp, hoechstens 5 MB, die ersten
+ * Byte passen zur Endung. Sofort kopiert nach anhang/<id>.<endung> (0600) -
+ * die Warteschlange stellt bis 10 s spaeter zu, und ein Kamera-Plugin
+ * ueberschreibt sein "letztes Bild" vielleicht vorher. Rueckgabe array(Kopie, grund).
+ */
+function sg_plugin_bild($absender, $pfad)
+{
+    $p = sg_paths();
+    if ($p['home'] === '' || !preg_match('/^[a-z0-9_]{1,40}$/', (string) $absender)) { return array('', 'BILD_UNZULAESSIG'); }
+    $basis = realpath($p['home'] . '/data/plugins/' . $absender);
+    $echt = realpath((string) $pfad);
+    if (!$basis || !$echt || strpos($echt, rtrim($basis, '/\\') . DIRECTORY_SEPARATOR) !== 0) { return array('', 'BILD_UNZULAESSIG'); }
+    if (!preg_match('/\.(jpe?g|png|gif|webp)$/i', $echt, $m) || !is_file($echt) || !is_readable($echt)) {
+        return array('', 'BILD_UNZULAESSIG');
+    }
+    $groesse = @filesize($echt);
+    if ($groesse === false || $groesse <= 0 || $groesse > SG_ANHANG_MAX) { return array('', 'BILD_ZU_GROSS'); }
+    $fp = @fopen($echt, 'rb');
+    $kopf = $fp ? (string) fread($fp, 12) : '';
+    if ($fp) { fclose($fp); }
+    $endung = strtolower($m[1]);
+    $passt = array('jpg' => "\xFF\xD8", 'jpeg' => "\xFF\xD8", 'png' => "\x89PNG", 'gif' => 'GIF');
+    if ($endung === 'webp') {
+        $gut = substr($kopf, 0, 4) === 'RIFF' && substr($kopf, 8, 4) === 'WEBP';
+    } else {
+        $gut = strpos($kopf, $passt[$endung]) === 0;
+    }
+    if (!$gut) { return array('', 'BILD_UNZULAESSIG'); }
+    $ziel = sg_anhang_ordner() . '/' . sg_token(16) . '.' . ($endung === 'jpeg' ? 'jpg' : $endung);
+    if (!@copy($echt, $ziel) || @filesize($ziel) !== $groesse) {
+        @unlink($ziel);
+        return array('', 'BILD_NICHT_KOPIERT');
+    }
+    @chmod($ziel, 0600);
+    sg_anhang_aufraeumen();
+    return array($ziel, '');
+}
+
+/** Ist $datei eine Kopie in anhang/ (nur solche raeumt der Bot weg)? */
+function sg_anhang_eigen($datei)
+{
+    $d = (string) $datei;
+    if ($d === '') { return false; }
+    $ordner = realpath(sg_datadir() . '/anhang');
+    $echt = realpath($d);
+    return $ordner && $echt && dirname($echt) === $ordner && preg_match('/^[A-Za-z0-9]{16}\.(jpg|png|gif|webp)$/', basename($echt));
+}
+
+/** Hoechstens SG_ANHANG_ANZAHL Kopien liegen; die aeltesten fallen weg. */
+function sg_anhang_aufraeumen()
+{
+    $liste = glob(sg_datadir() . '/anhang/*') ?: array();
+    if (count($liste) <= SG_ANHANG_ANZAHL) { return; }
+    usort($liste, function ($a, $b) { return (int) @filemtime($a) - (int) @filemtime($b); });
+    foreach (array_slice($liste, 0, count($liste) - SG_ANHANG_ANZAHL) as $f) {
+        if (sg_anhang_eigen($f)) { @unlink($f); }
+    }
+}
+
+/** Eine Kopie entfernen, wenn kein Eintrag der Warteschlange sie mehr traegt. */
+function sg_anhang_weg_falls_frei($datei, $liste = null)
+{
+    if (!sg_anhang_eigen($datei)) { return; }
+    if ($liste === null) { $liste = sg_warteschlange(); }
+    foreach ($liste as $e) {
+        if (isset($e['anhang']) && (string) $e['anhang'] === (string) $datei) { return; }
+    }
+    @unlink($datei);
+}
+
+/** Abgelehnte Plugin-Meldung ins Ereignisprotokoll - je Absender und Grund hoechstens einmal je 60 s. */
+function sg_plugin_abgelehnt_merken($absender, $grund)
+{
+    $f = sg_tmpdir() . '/plugin_ab_' . md5((string) $absender . '|' . (string) $grund);
+    $letzt = is_file($f) ? (int) @file_get_contents($f) : 0;
+    if (time() - $letzt < 60) { return; }
+    @file_put_contents($f, (string) time());
+    sg_ereignis_merken('Plugin ' . sg_kuerzen(preg_replace('/[^a-z0-9_]/', '', (string) $absender), 40), 'Plugin abgelehnt', (string) $grund);
+}
+
+/** Rueckgabe des Ablaufs -> Quittung der Bruecke (Bauart spot_befehl_bruecke). array(bool, GRUND). */
+function sg_befehl_bruecke($r)
+{
+    $z = (is_array($r) && isset($r[1])) ? (string) $r[1] : '';
+    $code = (is_array($r) && isset($r[0])) ? (int) $r[0] : 0;
+    if ($code === 200 && strpos($z, ';OK=1;') !== false) { return array(true, ''); }
+    if (preg_match('/;GRUND=([A-Z0-9_]+)/', $z, $m)) { return array(false, $m[1]); }
+    return array(false, 'FEHLER');
+}
+
+/** Einstellungen fuer die Bruecke (bin/befehle_zuordnung.php). */
+function sg_befehle_einstellungen()
+{
+    $c = sg_config();
+    $m = !empty($c['mqtt_ein']);
+    return array('praefix' => (string) $c['mqtt_topic'], 'annehmen' => !empty($c['befehle_mqtt_ein']) && $m,
+                 'eingreifend' => !empty($c['befehle_entsperren_ein']), 'mqtt_ein' => $m);
+}
+
+/**
+ * Die Befehlsbruecke als Bibliothek laden (BB_NUR_LADEN; Bauart
+ * cam_bruecke_laden(), fer_bruecke_laden()). Installiert unter
+ * bin/plugins/<ordner>/, im Archiv unter bin/ neben webfrontend/.
+ */
+function sg_bruecke_laden()
+{
+    if (function_exists('bb_waechter')) { return true; }
+    $p = sg_paths();
+    $kand = array();
+    if ($p['home'] !== '') { $kand[] = $p['home'] . '/bin/plugins/' . $p['plugin'] . '/befehlsbruecke.php'; }
+    $kand[] = dirname(dirname(__DIR__)) . '/bin/befehlsbruecke.php';
+    foreach ($kand as $k) {
+        if (is_file($k)) {
+            if (!defined('BB_NUR_LADEN')) { define('BB_NUR_LADEN', true); }
+            require_once $k;
+            return function_exists('bb_waechter');
+        }
+    }
+    return false;
+}
+
+/** Die Befehlsliste der Bruecke (bb_liste(): EINE Quelle fuer Reiter und Vorlage). array(Liste|null, Fehlertext). */
+function sg_bruecke_liste()
+{
+    if (!sg_bruecke_laden()) { return array(null, sg_t('BEFEHL.T_NICHT_DA')); }
+    list($z, $fehler) = bb_zuordnung_laden();
+    if ($z === null) { return array(null, $fehler); }
+    $GLOBALS['bb_zuordnung'] = $z;
+    list($fehl) = bb_zuordnung_pruefen($z);
+    if ($fehl) { return array(null, $fehl[0]); }
+    return array(bb_liste($z, bb_einstellungen($z)), '');
+}
+
+/**
+ * Die Bruecke sofort schalten - nach dem Speichern im Reiter MQTT und nach dem
+ * Zurueckspielen (Bauart cam_bruecke_schalten()). Rueckgabe array(rc oder null
+ * = nichts zu tun, 'start'|'stop'|'', Ausgabe).
+ */
+function sg_bruecke_schalten(array $cfg)
+{
+    if (!sg_bruecke_laden()) { return array(1, '', sg_t('BEFEHL.T_NICHT_DA')); }
+    $p = bb_pfade();
+    if (!$p) { return array(1, '', sg_t('BEFEHL.T_KEINE_WURZEL')); }
+    if (!empty($cfg['befehle_mqtt_ein']) && !empty($cfg['mqtt_ein'])) {
+        list($rc, $aus) = bb_sh($p, 'start');
+        return array($rc, 'start', $aus);
+    }
+    if (!bb_dienste()) { return array(null, '', ''); }
+    list($rc, $aus) = bb_sh($p, 'stop');
+    return array($rc, 'stop', $aus);
+}
+
+/** Meldungen nach sg_bruecke_schalten(): array(ok-Meldungen, Fehlermeldungen), maskiert. */
+function sg_bruecke_meldungen(array $r)
+{
+    list($rc, $art, $aus) = $r;
+    if ($art === 'start') {
+        return $rc === 0 ? array(array(sg_t('BEFEHL.M_EIN') . ' ' . sg_e($aus)), array())
+                         : array(array(), array(sprintf(sg_t('BEFEHL.M_START_FEHL'), sg_e($aus))));
+    }
+    if ($art === 'stop') {
+        return $rc === 0 ? array(array(sg_t('BEFEHL.M_AUS')), array())
+                         : array(array(), array(sprintf(sg_t('BEFEHL.M_STOP_FEHL'), sg_e($aus))));
+    }
+    if ($rc !== null && $rc !== 0) { return array(array(), array(sprintf(sg_t('BEFEHL.M_START_FEHL'), sg_e($aus)))); }
+    return array(array(), array());
+}
+
+/**
+ * Lage der Befehlsbruecke fuer Reiter Test und healthcheck (Bauart
+ * cam_bruecke_lage()): Dienst laeuft (argumentweise), zustand.json juenger als
+ * 180 s, Abo steht. Rueckgabe array(true|false|null, Text) - null heisst "aus".
+ */
+function sg_bruecke_lage()
+{
+    if (!sg_bruecke_laden()) { return array(false, sg_t('BEFEHL.T_NICHT_DA')); }
+    if (!bb_pfade()) { return array(null, sg_t('BEFEHL.T_KEINE_WURZEL')); }
+    list($soll, $grund) = bb_soll_ermitteln();
+    if ($soll === 1) { return array(null, sg_t('BEFEHL.T_AUS')); }
+    if ($soll !== 0) { return array(false, sprintf(sg_t('BEFEHL.T_DEFEKT'), sg_e($grund))); }
+    $zu = bb_zustand_lesen();
+    $pids = bb_dienste();
+    $alter = (is_array($zu) && isset($zu['ts'])) ? time() - (int) $zu['ts'] : null;
+    if ($pids && $alter !== null && $alter <= BB_WACHE_GRENZE && !empty($zu['abo'])) {
+        $zl = (isset($zu['zaehler']) && is_array($zu['zaehler'])) ? $zu['zaehler'] : array();
+        $txt = sprintf(sg_t('BEFEHL.T_LAEUFT'), sg_e(implode(' ', $pids)), sg_e(is_string($zu['abo']) ? $zu['abo'] : ''),
+            isset($zl['angenommen']) ? (int) $zl['angenommen'] : 0, isset($zl['abgelehnt']) ? (int) $zl['abgelehnt'] : 0);
+        $lz = (isset($zu['letzter']) && is_array($zu['letzter'])) ? $zu['letzter'] : null;
+        if ($lz !== null && isset($lz['name'])) {
+            $txt .= ' ' . sprintf(sg_t('BEFEHL.T_LETZTER'), sg_e((string) $lz['name']),
+                sg_e(isset($lz['ergebnis']) ? (string) $lz['ergebnis'] : '-'), isset($lz['zeit']) ? max(0, time() - (int) $lz['zeit']) : 0);
+        } else {
+            $txt .= ' ' . sg_t('BEFEHL.T_KEINER');
+        }
+        return array(true, $txt);
+    }
+    $wie = !$pids ? sg_t('BEFEHL.W_KEIN_DIENST') : ($alter === null ? sg_t('BEFEHL.W_KEIN_ZUSTAND') : ($alter > BB_WACHE_GRENZE
+        ? sprintf(sg_t('BEFEHL.W_ALT'), $alter) : sg_t('BEFEHL.W_OHNE_ABO') . (is_array($zu) && !empty($zu['fehler']) ? ': ' . $zu['fehler'] : '')));
+    return array(false, sprintf(sg_t('BEFEHL.T_STEHT'), sg_e($wie)));
+}
+
+/**
+ * Die Befehle der Vorlage "Befehle (MQTT)" - die sechs Befehle des
+ * Musterprojekts (Seite "SignalBot Befehle und Meldungen" #8, #12, #14, #16,
+ * #17, #19), jetzt "publish <praefix>/befehl/..." an den UDP-Eingang des
+ * MQTT-Gateways. Titel wie bis 0.9.29 (Gedaechtnis gateway-werte-virtueller-
+ * eingang: kein Eingang des Gateways heisst so). bb_vorlage() der
+ * Stammfassung schriebe Textbefehle nur als Kommentar - deshalb eigene Liste.
+ */
+function sg_bruecke_vorlagenbefehle()
+{
+    $cfg = sg_config();
+    $w = (string) $cfg['mqtt_topic'] . '/befehl/';
+    return array(
+        array('title' => 'Signal - Meldung senden', 'kom' => 'SignalBot: Meldung senden (MQTT)',
+              'on' => 'publish ' . $w . 'senden ' . sg_klartext('VORLAGE.TEXT1'), 'off' => '', 'analog' => false),
+        array('title' => "Signal - T\u{fc}rklingel", 'kom' => "SignalBot: T\u{fc}rklingel (MQTT)",
+              'on' => 'publish ' . $w . 'senden ' . sg_klartext('VORLAGE.TEXT6'), 'off' => '', 'analog' => false),
+        array('title' => 'Signal - dringende Meldung', 'kom' => 'SignalBot: dringende Meldung (MQTT)',
+              'on' => 'publish ' . $w . 'dringend ' . sg_klartext('VORLAGE.TEXT3'), 'off' => '', 'analog' => false),
+        array('title' => 'Signal - Zustand melden', 'kom' => 'SignalBot: Zustand alarm (MQTT)',
+              'on' => 'publish ' . $w . 'zustand/alarm <v.0>', 'off' => '', 'analog' => true),
+        array('title' => 'Signal - Meldung mit Wert', 'kom' => 'SignalBot: Meldung mit Wert (MQTT)',
+              'on' => 'publish ' . $w . 'senden ' . sg_klartext('VORLAGE.TEXT2') . ' <v.0>', 'off' => '', 'analog' => true),
+        array('title' => 'Signal - Bot sperren', 'kom' => 'SignalBot: Bot sperren/entsperren (MQTT)',
+              'on' => 'publish ' . $w . 'sperren 1', 'off' => 'publish ' . $w . 'entsperren 1', 'analog' => false),
+    );
+}
+
+/** Die Vorlage VQ_signalbot_mqtt.xml: eigener Ausgang am UDP-Eingang des MQTT-Gateways (Form bb_vorlage()). */
+function sg_bruecke_vorlage()
+{
+    $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+        ? preg_replace('/:[0-9]+$/', '', preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST']))
+        : (gethostname() ?: 'loxberry');
+    $m = sg_mqtt_zustand();
+    $port = $m['udpport'] ? (int) $m['udpport'] : 11884;
+    $x = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8'); };
+    $z = array('<?xml version="1.0" encoding="utf-8"?>');
+    $z[] = '<VirtualOut HintText="" Title="SignalBot MQTT-Befehle" Comment="'
+         . $x('UDP-Eingang des MQTT-Gateways V2 auf dem LoxBerry; wirkt nur mit Haken "Befehle ueber MQTT annehmen"')
+         . '" Address="' . $x('/dev/udp/' . $host . '/' . $port) . '" CmdInit="" CloseAfterSend="true" CmdSep="">';
+    $z[] = "\t" . '<Info templateType="3" minVersion="17010727"/>';
+    foreach (sg_bruecke_vorlagenbefehle() as $b) {
+        $z[] = "\t" . '<VirtualOutCmd Title="' . $x($b['title']) . '" Comment="' . $x($b['kom']) . '" CmdOnMethod="GET" CmdOffMethod="GET" CmdOn="'
+             . $x($b['on']) . '" CmdOnHTTP="" CmdOnPost="" CmdOff="' . $x($b['off']) . '" CmdOffHTTP="" CmdOffPost="" CmdAnswer=""'
+             . ($b['analog'] ? ' Analog="true"' : '') . ' Repeat="0" RepeatRate="0"'
+             . ($b['analog'] ? ' SourceValLow="0" DestValLow="0" SourceValHigh="10" DestValHigh="10"' : '') . ' HintText=""/>';
+    }
+    $z[] = '</VirtualOut>';
+    return array('VQ_signalbot_mqtt.xml', implode("\n", $z) . "\n");
+}
+
+/**
+ * Vorschlag 1: die Ordnernamen der installierten Plugins (data/system/plugindatabase.json, nur gelesen; duldsam:
+ * {"plugins": {md5: {...}}}, eine Liste oder die Eintraege ohne "plugins"). Ohne den eigenen Ordner. Nur Namen
+ * aus [a-z0-9_]{1,40} - so steht ein Absender im Thema plugin/<ordner>.
+ */
+function sg_plugins_installiert()
+{
+    $p = sg_paths();
+    if ($p['home'] === '') { return array(); }
+    $d = json_decode((string) @file_get_contents($p['home'] . '/data/system/plugindatabase.json'), true);
+    if (!is_array($d)) { return array(); }
+    $liste = (isset($d['plugins']) && is_array($d['plugins'])) ? $d['plugins'] : $d;
+    $aus = array();
+    foreach ($liste as $e) {
+        if (!is_array($e) || !isset($e['folder']) || !is_string($e['folder'])) { continue; }
+        $f = $e['folder'];
+        if ($f !== $p['plugin'] && preg_match('/^[a-z0-9_]{1,40}$/', $f)) { $aus[] = $f; }
+    }
+    $aus = array_values(array_unique($aus));
+    sort($aus);
+    return $aus;
+}
+
+/* ==================================================================
+ * Seit 0.9.30 (Gruppe 32) - PIN-Migration (G4), Spaetliste der Sicherung,
+ * Gaeste mit "gueltig bis" (Vorschlag 4, E-E17)
+ * ================================================================== */
+
+/** Hoechstzahl der Gaeste und laengste Frist ab dem Speichern (Tage). */
+define('SG_GAESTE_MAX', 10);
+define('SG_GAST_TAGE', 30);
+
+/**
+ * G4: eine Klartext-PIN (Altbestand vor 0.9.12, Sicherung, Handeintrag) in
+ * einen Hash ueberfuehren. Ein vorhandener Hash gewinnt (sg_pin_stimmt()
+ * prueft ihn zuerst) - der Klartext faellt in jedem Fall weg.
+ * Rueckgabe array(Konfiguration, geaendert).
+ */
+function sg_pin_migrieren(array $c)
+{
+    $klar = isset($c['pin']) && (is_string($c['pin']) || is_int($c['pin'])) ? (string) $c['pin'] : '';
+    if ($klar === '') { return array($c, false); }
+    if (!isset($c['pin_hash']) || (string) $c['pin_hash'] === '') { $c['pin_hash'] = password_hash($klar, PASSWORD_DEFAULT); }
+    $c['pin'] = '';
+    return array($c, true);
+}
+
+/**
+ * Die Spaetliste der Sicherung (E-E19, Bauart G25 N2): Schluessel, die eine
+ * Sicherung von 0.9.29 nicht kennt. Fehlen sie beim Zurueckspielen, gilt der
+ * GELTENDE Wert und der Hinweis sagt es - sonst wiese das Einspielen jeder
+ * aelteren Sicherung ab ("fehlend").
+ */
+function sg_sicherung_spaet()
+{
+    return array('befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'plugin_absender',
+                 'haus_status_ein', 'haus_bereiche', 'gaeste', 'notiz_ein');
+}
+
+/** Ein Gast-Eintrag in der gespeicherten Form - oder null. */
+function sg_gast_normal($g)
+{
+    if (!is_array($g) || !isset($g['nummer'], $g['bis']) || !sg_ist_nummer($g['nummer'])) { return null; }
+    $bef = array();
+    if (isset($g['befehle']) && is_array($g['befehle'])) {
+        foreach ($g['befehle'] as $w) {
+            if (is_string($w) && $w !== '' && sg_ist_text($w, 60)) { $bef[] = sg_klein(trim(preg_replace('/\s+/', ' ', $w))); }
+        }
+    }
+    $name = (isset($g['name']) && is_string($g['name']) && !preg_match('/[\x00-\x1F\x7F]/', $g['name'])) ? sg_kuerzen(trim($g['name']), 30) : '';
+    return array('nummer' => $g['nummer'], 'name' => $name, 'bis' => is_int($g['bis']) ? $g['bis'] : (int) $g['bis'],
+                 'befehle' => array_values(array_unique($bef)), 'angelegt' => isset($g['angelegt']) ? (int) $g['angelegt'] : 0);
+}
+
+/** Pruefung der Gaesteliste fuer sg_config_maengel(): '' = in Ordnung, sonst die Meldung. */
+function sg_gaeste_maengel($g, array $erlaubt)
+{
+    if (!is_array($g) || ($g !== array() && array_keys($g) !== range(0, count($g) - 1)) || count($g) > SG_GAESTE_MAX) {
+        return sprintf(sg_t('GAST.FEHLER_LISTE'), SG_GAESTE_MAX);
+    }
+    $vorgabe = array('nummer', 'name', 'bis', 'befehle', 'angelegt');
+    $gesehen = array();
+    foreach ($g as $i => $e) {
+        $z = $i + 1;
+        if (!is_array($e) || array_diff(array_keys($e), $vorgabe) || array_diff($vorgabe, array_keys($e))) {
+            return sprintf(sg_t('GAST.FEHLER_ZEILE'), $z);
+        }
+        if (!sg_ist_nummer($e['nummer'])) { return sprintf(sg_t('GAST.FEHLER_NUMMER'), $z); }
+        if (in_array($e['nummer'], $erlaubt, true)) { return sprintf(sg_t('GAST.FEHLER_SCHON_ERLAUBT'), $z); }
+        if (isset($gesehen[$e['nummer']])) { return sprintf(sg_t('GAST.FEHLER_DOPPELT'), $z); }
+        $gesehen[$e['nummer']] = 1;
+        if (!is_string($e['name']) || sg_laenge($e['name']) > 30 || preg_match('/[\x00-\x1F\x7F]/', $e['name'])) {
+            return sprintf(sg_t('GAST.FEHLER_NAME'), $z);
+        }
+        if (!is_int($e['bis']) || $e['bis'] <= 0 || !is_int($e['angelegt']) || $e['angelegt'] < 0) {
+            return sprintf(sg_t('GAST.FEHLER_ZEIT'), $z);
+        }
+        if (!is_array($e['befehle']) || count($e['befehle']) > SG_BEFEHLE
+            || ($e['befehle'] !== array() && array_keys($e['befehle']) !== range(0, count($e['befehle']) - 1))) {
+            return sprintf(sg_t('GAST.FEHLER_BEFEHLE'), $z);
+        }
+        foreach ($e['befehle'] as $w) {
+            if (!sg_ist_text($w, 60) || $w === '') { return sprintf(sg_t('GAST.FEHLER_BEFEHLE'), $z); }
+        }
+    }
+    return '';
+}
+
+/** Der Gast zu einer Rufnummer (Eintrag) oder null - abgelaufen oder nicht. */
+function sg_gast_finden(array $cfg, $nummer)
+{
+    $n = preg_replace('/[^0-9+]/', '', (string) $nummer);
+    if (!isset($cfg['gaeste']) || !is_array($cfg['gaeste']) || $n === '') { return null; }
+    foreach ($cfg['gaeste'] as $g) {
+        if (is_array($g) && isset($g['nummer']) && hash_equals((string) $g['nummer'], $n)) { return $g; }
+    }
+    return null;
+}
+
+/** Gilt der Gast jetzt noch? Sekundengenau gegen time() (kein Takt noetig). */
+function sg_gast_gueltig($g, $jetzt = null)
+{
+    if ($jetzt === null) { $jetzt = time(); }
+    return is_array($g) && isset($g['bis']) && $jetzt < (int) $g['bis'];
+}
+
+/** Die gerade gueltigen Gaeste. */
+function sg_gaeste_gueltig(array $cfg)
+{
+    $aus = array();
+    if (isset($cfg['gaeste']) && is_array($cfg['gaeste'])) {
+        foreach ($cfg['gaeste'] as $g) { if (sg_gast_gueltig($g)) { $aus[] = $g; } }
+    }
+    return $aus;
+}
+
+/** Fuer Protokoll und Ereignisse: maskierte Nummer und Name eines Gastes. */
+function sg_gast_wer($g)
+{
+    return sg_maske($g['nummer']) . ((string) $g['name'] !== '' ? ' (' . $g['name'] . ')' : '');
+}
+
+/** Merker je Gast (tmp/gaeste_gemeldet.json): Schluessel Nummer|bis|Art. */
+function sg_gast_merker($schluessel, $setzen = false)
+{
+    $f = sg_tmpdir() . '/gaeste_gemeldet.json';
+    $sperre = @fopen(sg_tmpdir() . '/gaeste.lock', 'c');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
+    if (!is_array($d)) { $d = array(); }
+    $da = isset($d[$schluessel]);
+    if ($setzen && !$da) {
+        $d[$schluessel] = time();
+        if (count($d) > 200) { asort($d); $d = array_slice($d, -200, null, true); }
+        sg_write_atomic($f, json_encode($d), 0600);
+    }
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $da;
+}
+
+/** Abgelaufener Gast schreibt: Ereignis "abgewiesen: Gast abgelaufen" einmal je Gast, nicht je Nachricht. */
+function sg_gast_abgewiesen_merken($g)
+{
+    $k = $g['nummer'] . '|' . (int) $g['bis'] . '|abgewiesen';
+    if (!sg_gast_merker($k)) {
+        sg_gast_merker($k, true);
+        sg_ereignis_merken(sg_maske($g['nummer']), 'abgewiesen', 'Gast abgelaufen');
+    }
+}
+
+/**
+ * Vom Takt des Bots (einmal je Minute): "Gast ... abgelaufen" einmal je Gast
+ * ins Ereignisprotokoll; abgelaufene Eintraege bleiben 7 Tage grau in der
+ * Liste (zum Verlaengern), danach entfernt der Takt sie (Ereignis "Gast entfernt").
+ */
+function sg_gaeste_takt()
+{
+    $cfg = sg_config();
+    if (empty($cfg['gaeste'])) { return; }
+    $jetzt = time();
+    $weg = false;
+    foreach ($cfg['gaeste'] as $g) {
+        if (sg_gast_gueltig($g, $jetzt)) { continue; }
+        $k = $g['nummer'] . '|' . (int) $g['bis'] . '|abgelaufen';
+        if (!sg_gast_merker($k)) {
+            sg_gast_merker($k, true);
+            sg_log('Gast ' . sg_gast_wer($g) . ' abgelaufen.');
+            sg_ereignis_merken('Bot', 'Gast abgelaufen', sg_gast_wer($g));
+        }
+        if ($jetzt - (int) $g['bis'] > 7 * 86400) { $weg = true; }
+    }
+    if (!$weg) { return; }
+    $entfernt = array();
+    sg_config_aendern(function ($c) use ($jetzt, &$entfernt) {
+        $neu = array();
+        foreach ($c['gaeste'] as $g) {
+            if (!sg_gast_gueltig($g, $jetzt) && $jetzt - (int) $g['bis'] > 7 * 86400) { $entfernt[] = $g; continue; }
+            $neu[] = $g;
+        }
+        if (!$entfernt) { return null; }
+        $c['gaeste'] = $neu;
+        return $c;
+    });
+    foreach ($entfernt as $g) {
+        sg_log('Gast ' . sg_gast_wer($g) . ' entfernt (seit 7 Tagen abgelaufen).');
+        sg_ereignis_merken('Bot', 'Gast entfernt', sg_gast_wer($g));
+    }
+}
+
+/**
+ * Eingabe aus <input type="datetime-local"> (Ortszeit Europe/Berlin) ->
+ * array(Unix-Zeit|null, Grund). Grund '' | 'FORM' | 'DATUM' | 'VERGANGEN' |
+ * 'ZU_LANG' | 'VERSCHOBEN_AUF <Y-m-dTH:i>' (N12: die fehlende Fruehjahrsstunde
+ * legt PHP auf die naechste gueltige; die doppelte Herbststunde auf die zweite).
+ */
+function sg_gast_bis_lesen($ein, $jetzt = null)
+{
+    if ($jetzt === null) { $jetzt = time(); }
+    if (!is_string($ein) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $ein)) { return array(null, 'FORM'); }
+    $d = DateTime::createFromFormat('!Y-m-d\TH:i', $ein, new DateTimeZone('Europe/Berlin'));
+    $e = DateTime::getLastErrors();
+    if ($d === false || ($e && ($e['warning_count'] || $e['error_count']))) { return array(null, 'DATUM'); }
+    $u = $d->getTimestamp();
+    $rueck = $d->format('Y-m-d\TH:i');
+    if ($u <= $jetzt) { return array(null, 'VERGANGEN'); }
+    if ($u > $jetzt + SG_GAST_TAGE * 86400) { return array(null, 'ZU_LANG'); }
+    return array($u, $rueck === $ein ? '' : 'VERSCHOBEN_AUF ' . $rueck);
+}
+
+/** Eine Unix-Zeit als Ortszeit mit (MEZ/MESZ). */
+function sg_gast_zeit($u)
+{
+    $u = (int) $u;
+    return date('d.m.Y H:i', $u) . ' (' . (date('I', $u) ? 'MESZ' : 'MEZ') . ')';
+}
+
+/** Wert fuer <input type="datetime-local"> (Ortszeit). */
+function sg_gast_eingabe($u)
+{
+    return (int) $u > 0 ? date('Y-m-d\TH:i', (int) $u) : '';
+}
+
+/** Die Befehle, die ein Gast bekommen kann: aktiv, mit Wort, ohne Einschraenkung "Wer darf". */
+function sg_gast_befehlsauswahl(array $cfg)
+{
+    $aus = array();
+    foreach ($cfg['befehle'] as $b) {
+        if (!empty($b['aktiv']) && $b['wort'] !== '' && (string) $b['absender'] === '') { $aus[] = $b['wort']; }
+    }
+    return array_values(array_unique($aus));
+}
+
+/* ==================================================================
+ * Seit 0.9.30 (Gruppe 32) - Vorschlag 3: Haus-Werte im Chat
+ * ("status strom", "status speicher" ...; E-E15, E-E16)
+ * ==================================================================
+ *
+ * SignalBot ist hier nur ABNEHMER der Haus-Themen (Regeln/07 Nr. 15); unter
+ * haus/ schreibt er nichts. Die Zaehler der Anbieter kommen einmal je Minute
+ * in fester Sekunde (Gedaechtnis abnehmer-phasenfalle) - deshalb haelt ein
+ * eigener Begleitprozess bin/sg_haus.php eine Dauerverbindung zum Broker und
+ * schreibt tmp/haus_werte.json; der Bot liest beim Chat-Befehl nur diese
+ * Datei (kein Netz im Bot). Ein Bereich zaehlt nur, wenn sein Zaehler binnen
+ * 120 s LIVE gewechselt hat (ein zurueckbehaltener Zaehler beim Anmelden
+ * zaehlt nie).
+ */
+
+/** Frist fuer einen live gesehenen Zaehler (Sekunden). */
+define('SG_HAUS_FRIST', 120);
+
+/** Die Haus-Woerter: Wort => array(Bereich unter haus/, Themen ohne "haus/<bereich>/"). */
+function sg_haus_bereiche_alle()
+{
+    return array(
+        'strom'    => array('strompreis', array('aktuell', 'vorschau', 'ab', 'raster', 'anbieter', 'zaehler')),
+        'speicher' => array('speicher', array('soc', 'kwh', 'leistung', 'richtung', 'zaehler')),
+        'kalender' => array('kalender', array('datum', 'heute/frei', 'heute/feiertag', 'morgen/frei', 'ferien_in', 'zaehler')),
+        'abfuhr'   => array('abfuhr', array('heute_satz', 'morgen_satz', 'quittiert', 'zaehler')),
+        'usv'      => array('usv', array('stufe', 'zaehler')),
+        'abfahrt'  => array('abfahrt', array('in_min', 'zaehler')),
+        'zuhause'  => array('anwesenheit', array('jemand', 'zaehler')),
+    );
+}
+
+/** Werksauswahl der Bereiche: zuhause aus (Aufenthalt im Chat nur, wenn ausdruecklich gewollt). */
+function sg_haus_bereiche_werk()
+{
+    return array('strom', 'speicher', 'kalender', 'abfuhr', 'usv', 'abfahrt');
+}
+
+/** Eingeschaltete Haus-Woerter (leer, wenn der Haken aus ist). */
+function sg_haus_woerter(array $cfg)
+{
+    if (empty($cfg['haus_status_ein']) || !isset($cfg['haus_bereiche']) || !is_array($cfg['haus_bereiche'])) { return array(); }
+    return array_values(array_intersect(array_keys(sg_haus_bereiche_alle()), $cfg['haus_bereiche']));
+}
+
+/** Ist $wort ein eingeschaltetes Haus-Wort ("haus" = Uebersicht)? */
+function sg_haus_wort_an(array $cfg, $wort)
+{
+    $w = sg_haus_woerter($cfg);
+    return $w && ($wort === 'haus' || in_array($wort, $w, true));
+}
+
+/** Die einzeln zu abonnierenden Themen der eingeschalteten Bereiche (nie haus/#, nie #). */
+function sg_haus_themen(array $cfg)
+{
+    $alle = sg_haus_bereiche_alle();
+    $aus = array();
+    foreach (sg_haus_woerter($cfg) as $w) {
+        foreach ($alle[$w][1] as $t) { $aus[] = 'haus/' . $alle[$w][0] . '/' . $t; }
+    }
+    return $aus;
+}
+
+/** Das Abbild der Dauerverbindung (tmp/haus_werte.json) - leer, wenn es keines gibt. */
+function sg_haus_lesen()
+{
+    $f = sg_paths()['tmp'] . '/haus_werte.json';
+    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+    return is_array($d) ? $d : array();
+}
+
+function sg_haus_w(array $h, $t)
+{
+    return (isset($h['werte'][$t]['w']) && is_scalar($h['werte'][$t]['w'])) ? (string) $h['werte'][$t]['w'] : null;
+}
+
+/** Zahl mit Komma im Antworttext (deutsch) bzw. Punkt (englisch) - nie in einem MQTT-Wert. */
+function sg_haus_zahl($v, $n)
+{
+    return number_format((float) $v, $n, sg_sprache() === 'de' ? ',' : '.', '');
+}
+
+/** Der Antwortsatz zu einem Haus-Wort (Entwurf 7.3); null = kein Haus-Wort. */
+function sg_haus_antwort($wort, array $cfg, $h = null, $jetzt = null)
+{
+    if ($h === null) { $h = sg_haus_lesen(); }
+    if ($jetzt === null) { $jetzt = time(); }
+    if ($wort === 'haus') {
+        $z = array();
+        foreach (sg_haus_woerter($cfg) as $w) { $z[] = sg_haus_antwort($w, $cfg, $h, $jetzt); }
+        return $z ? implode("\n", $z) : null;
+    }
+    $alle = sg_haus_bereiche_alle();
+    if (!isset($alle[$wort])) { return null; }
+    $b = $alle[$wort][0];
+    $live = isset($h['live'][$b]) ? (int) $h['live'][$b] : 0;
+    if ($live <= 0) { return sprintf(sg_t('HAUS.SENDET_NICHT'), 'haus/' . $b); }
+    if ($jetzt - $live > SG_HAUS_FRIST) {
+        return sprintf(sg_t('HAUS.SCHWEIGT'), (int) round(($jetzt - $live) / 60), 'haus/' . $b);
+    }
+    switch ($b) {
+        case 'strompreis':
+            $a = sg_haus_w($h, 'haus/strompreis/aktuell');
+            $v = sg_haus_w($h, 'haus/strompreis/vorschau');
+            $ab = (int) sg_haus_w($h, 'haus/strompreis/ab');
+            $r = (int) sg_haus_w($h, 'haus/strompreis/raster');
+            if ($a === null || $a === '-' || $v === null || $v === '-' || $ab <= 0 || ($r !== 3600 && $r !== 900)) {
+                return sg_t('HAUS.STROM_KEINE');
+            }
+            $l = array_map('floatval', explode(';', $v));
+            $n = min(count($l), (int) (12 * 3600 / $r));
+            $min = 0;
+            for ($i = 1; $i < $n; $i++) { if ($l[$i] < $l[$min]) { $min = $i; } }
+            return sprintf(sg_t('HAUS.STROM'), sg_haus_zahl($a, 1), (string) sg_haus_w($h, 'haus/strompreis/anbieter'),
+                (int) round($n * $r / 3600), date('H:i', $ab + $min * $r), sg_haus_zahl($l[$min], 1));
+        case 'speicher':
+            $s = sg_haus_w($h, 'haus/speicher/soc');
+            if ($s === null || (int) $s < 0) { return sg_t('HAUS.SPEICHER_KEINE'); }
+            $k = sg_haus_w($h, 'haus/speicher/kwh');
+            $p = (int) sg_haus_w($h, 'haus/speicher/leistung');
+            $ri = (int) sg_haus_w($h, 'haus/speicher/richtung');
+            $rt = $ri === 1 ? sprintf(sg_t('HAUS.LAEDT'), $p) : ($ri === 2 ? sprintf(sg_t('HAUS.ENTLAEDT'), $p) : sg_t('HAUS.RUHT'));
+            return sprintf(sg_t('HAUS.SPEICHER'), (int) $s,
+                ($k !== null && (float) $k >= 0) ? ' (' . sg_haus_zahl($k, 1) . ' kWh)' : '', $rt);
+        case 'kalender':
+            if (sg_haus_w($h, 'haus/kalender/datum') !== date('Ymd', $jetzt)) { return sg_t('HAUS.KALENDER_KEINE'); }
+            $ja = function ($x) { return $x === '1' ? sg_t('HAUS.JA') : ($x === '0' ? sg_t('HAUS.NEIN') : '?'); };
+            $f = (int) sg_haus_w($h, 'haus/kalender/ferien_in');
+            return sprintf(sg_t('HAUS.KALENDER'), $ja(sg_haus_w($h, 'haus/kalender/heute/frei')),
+                $ja(sg_haus_w($h, 'haus/kalender/heute/feiertag')), $ja(sg_haus_w($h, 'haus/kalender/morgen/frei')))
+                . ($f < 0 ? '' : ($f === 0 ? ' ' . sg_t('HAUS.FERIEN_LAUFEN') : ' ' . sprintf(sg_t('HAUS.FERIEN_IN'), $f)));
+        case 'abfuhr':
+            $m = sg_haus_w($h, 'haus/abfuhr/morgen_satz');
+            $hs = sg_haus_w($h, 'haus/abfuhr/heute_satz');
+            $q = sg_haus_w($h, 'haus/abfuhr/quittiert');
+            $teile = array();
+            if ($hs !== null && $hs !== '-' && $hs !== '') { $teile[] = $hs; }
+            if ($m !== null && $m !== '-' && $m !== '') { $teile[] = $m; }
+            if (!$teile) { return sg_t('HAUS.ABFUHR_KEINE'); }
+            return implode(' ', $teile) . ($q === '1' ? ' ' . sg_t('HAUS.DRAUSSEN') : ($q === '0' ? ' ' . sg_t('HAUS.NICHT_QUITTIERT') : ''));
+        case 'usv':
+            $s = sg_haus_w($h, 'haus/usv/stufe');
+            $t = array('0' => 'HAUS.USV_0', '1' => 'HAUS.USV_1', '2' => 'HAUS.USV_2', '3' => 'HAUS.USV_3');
+            return sprintf(sg_t('HAUS.USV'), isset($t[$s]) ? sg_t($t[$s]) : sg_t('HAUS.KEINE_AUSSAGE'));
+        case 'abfahrt':
+            $m = sg_haus_w($h, 'haus/abfahrt/in_min');
+            if ($m === null || (int) $m < 0) { return sg_t('HAUS.ABFAHRT_KEINE'); }
+            return (int) $m === 0 ? sg_t('HAUS.ABFAHRT_JETZT') : sprintf(sg_t('HAUS.ABFAHRT'), (int) $m);
+        case 'anwesenheit':
+            $j = sg_haus_w($h, 'haus/anwesenheit/jemand');
+            return $j === '1' ? sg_t('HAUS.ZUHAUSE_JA') : ($j === '0' ? sg_t('HAUS.ZUHAUSE_NEIN') : sg_t('HAUS.ZUHAUSE_KEINE'));
+    }
+    return null;
+}
+
+/** Hat Loxone einen Zustand dieses Namens gemeldet? (N7: dann gewinnt der Zustand) */
+function sg_zustand_da($wort)
+{
+    foreach (array_keys(sg_zustaende()) as $n) {
+        if (sg_klein($n) === sg_klein($wort)) { return true; }
+    }
+    return false;
+}
+
+/** Laeuft der Begleitprozess? (Sperre tmp/haus.lock gehalten; legt nichts an) */
+function sg_haus_laeuft()
+{
+    $f = sg_paths()['tmp'] . '/haus.lock';
+    if (!is_file($f)) { return false; }
+    $fh = @fopen($f, 'r');
+    if (!$fh) { return false; }
+    $laeuft = !flock($fh, LOCK_EX | LOCK_NB);
+    if (!$laeuft) { flock($fh, LOCK_UN); }
+    fclose($fh);
+    return $laeuft;
+}
+
+/**
+ * Lage des Haus-Lesers fuer Reiter Test und healthcheck: array(1|0|-1|null, Text).
+ * null = aus; 1 = verbunden, alle Bereiche frisch; -1 = verbunden, ein Bereich
+ * schweigt (Hinweis); 0 = Begleitprozess steht.
+ */
+function sg_haus_lage(array $cfg)
+{
+    $w = sg_haus_woerter($cfg);
+    if (!$w) { return array(null, sg_t('HAUS.L_AUS')); }
+    if (!sg_haus_laeuft()) { return array(0, sg_t('HAUS.L_STEHT')); }
+    $h = sg_haus_lesen();
+    $jetzt = time();
+    $alle = sg_haus_bereiche_alle();
+    $teile = array();
+    $still = 0;
+    foreach ($w as $x) {
+        $b = $alle[$x][0];
+        $live = isset($h['live'][$b]) ? (int) $h['live'][$b] : 0;
+        if ($live > 0 && $jetzt - $live <= SG_HAUS_FRIST) {
+            $teile[] = sprintf(sg_t('HAUS.L_FRISCH'), $x, $jetzt - $live);
+        } else {
+            $still++;
+            $teile[] = $live > 0 ? sprintf(sg_t('HAUS.L_SCHWEIGT'), $x, (int) round(($jetzt - $live) / 60)) : sprintf(sg_t('HAUS.L_NIE'), $x);
+        }
+    }
+    $seit = isset($h['verbunden']) ? (int) $h['verbunden'] : 0;
+    $txt = sprintf(sg_t('HAUS.L_VERBUNDEN'), $seit > 0 ? date('d.m. H:i', $seit) : '-') . ' ' . implode(', ', $teile);
+    return array($still ? -1 : 1, $txt);
+}
+
+/**
+ * SUBSCRIBE (QoS 0) auf ein oder mehrere Themen, warten auf das SUBACK
+ * derselben Kennung (G9, Entwurf 3.6). Rueckgabe true, wenn kein Thema mit
+ * 0x80 abgelehnt wurde.
+ */
+function sg_broker_abonnieren($s, $themen, $kennung)
+{
+    $themen = is_array($themen) ? array_values($themen) : array((string) $themen);
+    if (!$themen) { return false; }
+    $rumpf = pack('n', (int) $kennung);
+    foreach ($themen as $t) { $rumpf .= pack('n', strlen($t)) . $t . chr(0); }
+    // 0x82: SUBSCRIBE (Pflichtbits 0010)
+    if (!sg_broker_schreiben($s, chr(0x82) . sg_broker_laenge(strlen($rumpf)) . $rumpf)) { return false; }
+    $ende = microtime(true) + SG_BROKER_FRIST;
+    while (microtime(true) < $ende) {
+        $pk = sg_broker_paket($s);
+        if ($pk === null) { return false; }
+        if (($pk[0] >> 4) === 9 && strlen($pk[1]) >= 3) {
+            $k = unpack('n', substr($pk[1], 0, 2));
+            if ((int) $k[1] !== (int) $kennung) { continue; }
+            return strpos(substr($pk[1], 2), chr(0x80)) === false;
+        }
+    }
+    return false;
+}
+
+/** Ein PUBLISH-Paket zerlegen: array(Thema, Nutzlast, retain) oder null. */
+function sg_broker_publish_lesen(array $pk)
+{
+    if (($pk[0] >> 4) !== 3 || strlen($pk[1]) < 2) { return null; }
+    $t = unpack('n', substr($pk[1], 0, 2));
+    $n = (int) $t[1];
+    if (strlen($pk[1]) < 2 + $n) { return null; }
+    $thema = substr($pk[1], 2, $n);
+    $qos = ($pk[0] >> 1) & 3;
+    $rest = substr($pk[1], 2 + $n + ($qos ? 2 : 0));
+    return array($thema, (string) $rest, ($pk[0] & 1) === 1);
+}
+
+/**
+ * Der Begleitprozess bin/sg_haus.php (E-E16): Dauerverbindung zum Broker des
+ * LoxBerry (Client-ID sghaus<pid>, saubere Sitzung, Keepalive 60 s mit
+ * PINGREQ, kein Letzter Wille), abonniert NUR die Themen der eingeschalteten
+ * Bereiche einzeln, Nutzlast hoechstens 4096 Byte, schreibt hoechstens alle 2 s
+ * atomar tmp/haus_werte.json (0600). Ein Zaehler setzt "live" nur, wenn er
+ * NICHT retained kam und sich geaendert hat. Verbindungsverlust: Rueckzug
+ * 5/10/.../60 s, gebremste Protokollzeile. Endet, sobald der Haken aus ist
+ * (Blick in die Konfiguration je 60 s) oder die Upgrade-Marke liegt.
+ * $ende > 0 nur fuer Proben (Laufzeit begrenzen).
+ */
+function sg_haus_lauf($ende = 0)
+{
+    $p = sg_paths();
+    $datei = sg_tmpdir() . '/haus_werte.json';
+    $folge = 0;
+    $gelaufen = false;   // die Zeile "beendet" nur, wenn er wirklich lief (der Wecker ruft jede Minute)
+    while (true) {
+        if ($ende && time() >= $ende) { return 0; }
+        $cfg = sg_config();
+        $themen = sg_haus_themen($cfg);
+        if (!$themen) { if ($gelaufen) { sg_log('Haus-Leser beendet (Haken aus oder kein Bereich).'); } return 0; }
+        if (sg_upgrade_marke()) { if ($gelaufen) { sg_log('Haus-Leser beendet (Aktualisierung laeuft).'); } return 0; }
+        if (!$gelaufen) { sg_log('Haus-Leser gestartet (' . count($themen) . ' Themen).'); }
+        $gelaufen = true;
+        $v = sg_broker_verbinden('sghaus', 60);
+        $ok = false;
+        if ($v['s'] !== null) {
+            stream_set_timeout($v['s'], SG_BROKER_FRIST);
+            $ok = sg_broker_abonnieren($v['s'], $themen, 1);
+            if (!$ok) { $v['grund'] = 'der Broker nimmt das Abo nicht an'; sg_broker_trennen($v['s']); }
+        }
+        if (!$ok) {
+            $folge++;
+            if ($folge === 1 || $folge % 10 === 0) {
+                sg_log_gebremst('haus_zu', 'Haus-Leser: Broker ' . ($v['ziel'] !== '' ? $v['ziel'] : '(unbekannt)')
+                    . ' nicht nutzbar - ' . $v['grund'] . ' (Versuch ' . $folge . ').', 600);
+            }
+            $pause = min(60, 5 * $folge);
+            for ($i = 0; $i < $pause; $i++) {
+                if ($ende && time() >= $ende) { return 0; }
+                sleep(1);
+            }
+            continue;
+        }
+        if ($folge > 0) { sg_log('Haus-Leser: Broker wieder erreichbar.'); }
+        $folge = 0;
+        $s = $v['s'];
+        stream_set_timeout($s, 1);
+        $h = sg_haus_lesen();
+        $werte = isset($h['werte']) && is_array($h['werte']) ? $h['werte'] : array();
+        $live = isset($h['live']) && is_array($h['live']) ? $h['live'] : array();
+        $verbunden = time();
+        $letzt_paket = time();
+        $letzt_ping = time();
+        $letzt_blick = time();
+        $letzt_schreiben = 0;
+        $schmutzig = true;
+        $alle = sg_haus_bereiche_alle();
+        $bereich_von = array();
+        foreach ($alle as $w => $d) { $bereich_von['haus/' . $d[0] . '/zaehler'] = $d[0]; }
+        $gleich = $themen;
+        while (true) {
+            $jetzt = time();
+            if ($ende && $jetzt >= $ende) { break; }
+            $r = array($s); $wx = null; $ex = null;
+            $n = @stream_select($r, $wx, $ex, 1);
+            if ($n === false) { break; }
+            if ($n > 0) {
+                $pk = sg_broker_paket($s);
+                if ($pk === null) {
+                    $meta = stream_get_meta_data($s);
+                    if (!empty($meta['eof']) || feof($s)) { sg_log_gebremst('haus_abbruch', 'Haus-Leser: Verbindung zum Broker abgebrochen - neu verbinden.', 600); break; }
+                } else {
+                    $letzt_paket = time();
+                    $pub = sg_broker_publish_lesen($pk);
+                    if ($pub !== null && in_array($pub[0], $themen, true) && strlen($pub[1]) <= 4096) {
+                        list($t, $w, $retain) = $pub;
+                        $vorher = isset($werte[$t]['w']) ? (string) $werte[$t]['w'] : null;
+                        $werte[$t] = array('w' => $w, 't' => time());
+                        if (isset($bereich_von[$t]) && !$retain && $vorher !== $w) {
+                            $live[$bereich_von[$t]] = time();
+                        }
+                        $schmutzig = true;
+                    }
+                }
+            }
+            $jetzt = time();
+            if ($jetzt - $letzt_ping >= 30) {
+                if (!sg_broker_schreiben($s, chr(0xC0) . chr(0))) { break; }
+                $letzt_ping = $jetzt;
+            }
+            if ($jetzt - $letzt_paket > 90) {
+                sg_log_gebremst('haus_still', 'Haus-Leser: 90 s keine Antwort des Brokers - neu verbinden.', 600);
+                break;
+            }
+            if ($schmutzig && $jetzt - $letzt_schreiben >= 2) {
+                $js = json_encode(array('verbunden' => $verbunden, 'ts' => $jetzt, 'werte' => $werte, 'live' => $live),
+                                  JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                if ($js !== false && sg_write_atomic($datei, $js, 0600)) { $schmutzig = false; $letzt_schreiben = $jetzt; }
+            }
+            if ($jetzt - $letzt_blick >= 60) {
+                $letzt_blick = $jetzt;
+                $cfg = sg_config();
+                if (sg_upgrade_marke() || sg_haus_themen($cfg) !== $gleich) { break; }
+            }
+        }
+        sg_broker_trennen($s);
+        if ($ende && time() >= $ende) { return 0; }
+        $cfg = sg_config();
+        if (!sg_haus_themen($cfg)) { sg_log('Haus-Leser beendet (Haken aus oder kein Bereich).'); return 0; }
+        sleep(2);
+    }
+}
+
+/* ==================================================================
+ * Seit 0.9.30 (Gruppe 32) - bin/healthcheck (Vorschlag 5, E-E9)
+ * ================================================================== */
+
+/**
+ * Der Zustand fuer den LoxBerry-Healthcheck aus billigen Groessen: Bot-Sperre,
+ * Alter des Lebenszeichens, Konfiguration, Konto, Kill-Schalter, offene
+ * dringende Meldungen, Befehlsbruecke (nur mit Haken), Haus-Leser (nur mit
+ * Haken), V2-Haken (nur lesen). KEIN Abruf bei signal-cli, kein Broker, nichts
+ * angelegt (sg_config(false); sg_pruefungen() wird nicht gerufen - der Reiter
+ * Test liest index.php mit und macht Netzproben). Stufen nach LoxBerry:
+ * 3 Fehler, 4 Warnung, 6 Hinweis, 5 in Ordnung. Rueckgabe array(Stufe, Text).
+ */
+function sg_gesundheit()
+{
+    $lage = sg_config_lage();
+    if ($lage !== 'ok') {
+        return array(3, sprintf(sg_t('HEALTH.CONFIG'), sg_t('TEST.A_CONFIG_' . strtoupper($lage))));
+    }
+    $cfg = sg_config(false);
+    if (!sg_bot_laeuft()) { return array(3, sg_t('HEALTH.BOT_TOT')); }
+    $warn = array();
+    $hinweis = array();
+    $alter = sg_herz_alter();
+    if ($alter < 0 || $alter > SG_HERZ_GRENZE) {
+        $warn[] = $alter < 0 ? sg_t('HEALTH.HERZ_NIE') : sprintf(sg_t('HEALTH.HERZ_ALT'), $alter);
+    }
+    if ((string) $cfg['konto'] === '') { $warn[] = sg_t('HEALTH.KEIN_KONTO'); }
+    if (!empty($cfg['befehle_mqtt_ein']) && !empty($cfg['mqtt_ein'])) {
+        list($bl, $bt) = sg_bruecke_lage();
+        if ($bl === false) { $warn[] = sprintf(sg_t('HEALTH.BRUECKE'), strip_tags($bt)); }
+    }
+    $alt_dringend = 0;
+    foreach (sg_warteschlange() as $e) {
+        if (!empty($e['dringend']) && isset($e['ts']) && time() - (int) $e['ts'] > 900) { $alt_dringend++; }
+    }
+    if ($alt_dringend) { $warn[] = sprintf(sg_t('HEALTH.DRINGEND'), $alt_dringend); }
+    if (!empty($cfg['gesperrt'])) { $hinweis[] = sg_t('HEALTH.GESPERRT'); }
+    if (!empty($cfg['mqtt_ein'])) {
+        $v2 = sg_mqtt_v2_haken_lage($cfg);
+        if ($v2[0] === 0 && $v2[4]) { $hinweis[] = sprintf(sg_t('HEALTH.V2_HAKEN'), implode(', ', $v2[4])); }
+    }
+    list($hl, $ht) = sg_haus_lage($cfg);
+    if ($hl === 0 || $hl === -1) { $hinweis[] = sprintf(sg_t('HEALTH.HAUS'), strip_tags($ht)); }
+    if ($warn) { return array(4, implode(' ', $warn) . ($hinweis ? ' ' . implode(' ', $hinweis) : '')); }
+    if ($hinweis) { return array(6, implode(' ', $hinweis)); }
+    $l = sg_letzter_befehl();
+    return array(5, sprintf(sg_t('HEALTH.OK'), count($cfg['erlaubt']),
+        count(array_filter($cfg['befehle'], function ($b) { return !empty($b['aktiv']) && $b['wort'] !== ''; })),
+        $l < 0 ? sg_t('HEALTH.NOCH_KEINE') : sprintf(sg_t('HEALTH.VOR_MIN'), intdiv($l, 60))));
+}
+
+/* ==================================================================
+ * Notiz an mich als Befehlsweg (Weg A, Nachtrag 27.10.2026)
+ * ==================================================================
+ *
+ * Gemessen am Geraet (Probe 98d6c720): Laeuft der Bot als VERKNUEPFTES
+ * Geraet unter der eigenen Nummer des Hausherrn, kommt eine Nachricht im
+ * Chat "Notiz an mich" nicht als dataMessage, sondern als Abgleich:
+ * envelope.syncMessage.sentMessage, Quelle = eigenes Konto (Geraet 1),
+ * Ziel (destinationNumber/destination) = eigenes Konto. Bis zum Nachbau
+ * wurde das uebergangen - der Ein-Nummer-Betrieb hatte keinen Chat-Weg.
+ *
+ * Ausgewertet wird NUR, wenn alles zutrifft:
+ *   - Haken notiz_ein (ab Werk an) und die eigene Kontonummer steht unter
+ *     den erlaubten Absendern (sonst wirkt nichts - wie bisher);
+ *   - Ziel ist das eigene Konto (Nummer gleich oder destinationUuid gleich
+ *     sourceUuid); KEINE Gruppe; ein Abgleich an Dritte wird nie ausgewertet;
+ *   - es ist keine eigene Sendung des Bots (Zeitstempel aus sg_senden,
+ *     sg_eigene_sendung_merken) - Schleifenschutz.
+ * Dann gilt der Text als Nachricht des Kontoinhabers: gleiche Befehlstabelle,
+ * PIN-Stufen, Bremse; das Ereignisprotokoll traegt "(Notiz an mich)".
+ */
+define('SG_NOTIZ_KENNUNG', 'Notiz an mich');
+define('SG_EIGENE_HALTEN', 86400);   // so lange (s) bleibt ein eigener Zeitstempel gemerkt
+define('SG_EIGENE_MAX', 500);        // hoechstens so viele
+
+/** Ein Signal-Zeitstempel (ms) als Ziffernfolge - auch auf 32-Bit-PHP, wo er als float ankommt. '' = keiner. */
+function sg_ts_text($v)
+{
+    if (is_int($v)) { $t = (string) $v; }
+    elseif (is_float($v)) { $t = sprintf('%.0f', $v); }
+    elseif (is_string($v)) { $t = $v; }
+    else { return ''; }
+    return (preg_match('/^[1-9][0-9]{0,19}$/', $t) === 1) ? $t : '';
+}
+
+/** Der Zeitstempel einer eigenen Sendung (Ergebnis von send) - fuer den Schleifenschutz. */
+function sg_eigene_sendung_merken($ergebnis)
+{
+    $ts = (is_array($ergebnis) && isset($ergebnis['timestamp'])) ? sg_ts_text($ergebnis['timestamp']) : '';
+    if ($ts === '') { return false; }
+    $f = sg_tmpdir() . '/eigene_sendungen.json';
+    $sperre = @fopen(sg_tmpdir() . '/eigene_sendungen.lock', 'ce');
+    if ($sperre !== false) { flock($sperre, LOCK_EX); }
+    $liste = is_file($f) ? json_decode((string) @file_get_contents($f), true) : array();
+    if (!is_array($liste)) { $liste = array(); }
+    $jetzt = time();
+    foreach ($liste as $k => $bei) {
+        if (!is_int($bei) || $jetzt - $bei > SG_EIGENE_HALTEN) { unset($liste[$k]); }
+    }
+    $liste[$ts] = $jetzt;
+    if (count($liste) > SG_EIGENE_MAX) { $liste = array_slice($liste, -SG_EIGENE_MAX, null, true); }
+    $ok = sg_write_atomic($f, json_encode((object) $liste), 0600);
+    if ($sperre !== false) { flock($sperre, LOCK_UN); fclose($sperre); }
+    return $ok;
+}
+
+/** Hat der Bot selbst unter diesem Zeitstempel gesendet? */
+function sg_eigene_sendung($ts)
+{
+    $ts = sg_ts_text($ts);
+    if ($ts === '') { return false; }
+    $f = sg_tmpdir() . '/eigene_sendungen.json';
+    if (!is_file($f)) { return false; }
+    $liste = json_decode((string) @file_get_contents($f), true);
+    return is_array($liste) && isset($liste[$ts]);
+}
+
+/**
+ * Einen Abgleich (envelope mit syncMessage) pruefen. Rueckgabe:
+ * array('ok' => bool, 'grund' => Kurzwort, 'von' => eigenes Konto, 'text' => Text, 'geraet' => sourceDevice).
+ * Reine Entscheidung ohne Senden - der Bot ruft danach sg_verarbeite().
+ */
+function sg_notiz_pruefen($env)
+{
+    $cfg = sg_config();
+    $nein = function ($g) { return array('ok' => false, 'grund' => $g, 'von' => '', 'text' => '', 'geraet' => 0); };
+    $sm = (is_array($env) && isset($env['syncMessage']['sentMessage']) && is_array($env['syncMessage']['sentMessage']))
+        ? $env['syncMessage']['sentMessage'] : null;
+    if ($sm === null) { return $nein('kein_sent'); }
+    if (isset($sm['groupInfo']) && $sm['groupInfo'] !== null) { return $nein('gruppe'); }
+    if (!isset($sm['message']) || !is_string($sm['message']) || trim($sm['message']) === '') { return $nein('kein_text'); }
+    $konto = is_string($cfg['konto']) ? $cfg['konto'] : '';
+    if ($konto === '') { return $nein('kein_konto'); }
+    $s = function ($a, $k) { return (isset($a[$k]) && is_string($a[$k])) ? $a[$k] : ''; };
+    $ziel = $s($sm, 'destinationNumber') !== '' ? $s($sm, 'destinationNumber') : $s($sm, 'destination');
+    $ziel_uuid = $s($sm, 'destinationUuid');
+    $quelle = $s($env, 'sourceNumber') !== '' ? $s($env, 'sourceNumber') : $s($env, 'source');
+    $quelle_uuid = $s($env, 'sourceUuid');
+    $selbst = ($ziel !== '' && hash_equals($konto, $ziel))
+           || ($ziel_uuid !== '' && $quelle_uuid !== '' && hash_equals($quelle_uuid, $ziel_uuid)
+               && ($ziel === '' || $ziel === $ziel_uuid));
+    if (!$selbst) { return $nein('dritter'); }
+    if ($quelle !== '' && !hash_equals($konto, $quelle) && $quelle !== $quelle_uuid) { return $nein('fremde_quelle'); }
+    $ts = isset($sm['timestamp']) ? sg_ts_text($sm['timestamp']) : '';
+    if ($ts === '' && isset($env['timestamp'])) { $ts = sg_ts_text($env['timestamp']); }
+    if ($ts !== '' && sg_eigene_sendung($ts)) { return $nein('eigene'); }
+    if (empty($cfg['notiz_ein'])) { return $nein('aus'); }
+    if (!sg_erlaubt($konto)) { return $nein('nicht_erlaubt'); }
+    return array('ok' => true, 'grund' => 'notiz', 'von' => $konto, 'text' => (string) $sm['message'],
+                 'geraet' => isset($env['sourceDevice']) ? (int) $env['sourceDevice'] : 0);
+}
+
+/** Eine ausgewertete Notiz merken (Zeit, Geraet) - fuer den Reiter Test und die Anzeige des Wegs. */
+function sg_notiz_merken($geraet)
+{
+    return sg_write_atomic(sg_datadir() . '/notiz.json',
+        json_encode(array('ts' => time(), 'geraet' => (int) $geraet)), 0600);
+}
+
+/** array('ts' => letzte ausgewertete Notiz oder 0, 'geraet' => sourceDevice). */
+function sg_notiz_stand()
+{
+    $f = sg_datadir() . '/notiz.json';
+    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+    if (!is_array($d) || !isset($d['ts'])) { return array('ts' => 0, 'geraet' => 0); }
+    return array('ts' => (int) $d['ts'], 'geraet' => isset($d['geraet']) ? (int) $d['geraet'] : 0);
+}
+
+/**
+ * Welcher Weg ist aktiv? 'A' = eigene Nummer, Bot als verknuepftes Geraet ("Notiz an mich");
+ * 'B' = eigene Nummer fuer den Bot (registriert, Hauptgeraet); 'keins' = kein Konto; 'unbekannt'.
+ * Gemessen ueber listDevices (signal-cli), sonst aus einer ausgewerteten Notiz (sie kam von einem
+ * anderen Geraet desselben Kontos - also ist der Bot verknuepft). Nur gelesen, nichts geaendert.
+ */
+function sg_konto_weg($cfg, $lebt)
+{
+    $konto = is_string($cfg['konto']) ? $cfg['konto'] : '';
+    if ($konto === '') { return 'keins'; }
+    if ($lebt) {
+        $a = sg_rpc('listDevices', array('account' => $konto), 8);
+        if ($a['ok'] && is_array($a['result'])) {
+            $ids = array();
+            $botname = false;
+            foreach ($a['result'] as $d) {
+                if (!is_array($d) || !isset($d['id'])) { continue; }
+                $id = (int) $d['id'];
+                if (!empty($d['isThisDevice']) || !empty($d['thisDevice'])) { return $id === 1 ? 'B' : 'A'; }
+                $ids[] = $id;
+                if ($id > 1 && isset($d['name']) && $d['name'] === 'LoxBerry Signal Bot') { $botname = true; }
+            }
+            if ($botname) { return 'A'; }
+            if ($ids === array(1)) { return 'B'; }
+        }
+    }
+    $n = sg_notiz_stand();
+    if ($n['ts'] > 0) { return 'A'; }
+    return 'unbekannt';
 }

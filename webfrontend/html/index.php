@@ -17,6 +17,13 @@
  *   status    Kurzauskunft ueber den Bot selbst, fuer einen virtuellen
  *             HTTP-Eingang
  *
+ * Seit 0.9.30 (Gruppe 32): fuer neue Anlagen ist der Endpunkt ab Werk AUS
+ * (endpunkt_ein, E-E8) - Werte kommen ueber das MQTT-Gateway V2, Meldungen
+ * ueber die Befehlsbruecke, beides ohne Token. Eine bestehende Anlage behaelt
+ * ihn (Lese-Regel in sg_config, postinstall.sh). Offen bleibt nur ?selftest=1.
+ * Die Antworten sind byte-gleich zu 0.9.29; der Ablauf steht in
+ * sg_befehl_ausfuehren() - dieselbe Funktion ruft die Befehlsbruecke.
+ *
  * BEWUSST NICHT MOEGLICH: einen Chat-Befehl von hier aus ausloesen. Der
  * Endpunkt darf melden und senden, aber nicht schalten - sonst waere die
  * ganze Absicherung des Bots ueber einen HTTP-Aufruf zu umgehen.
@@ -50,7 +57,9 @@ header('Content-Type: text/plain; charset=utf-8');
  * "Failed opening required '.../webfrontend/html/plugins/htmlauth/sg_lib.php'".
  */
 $sg_ordner = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
-$sg_kandidaten = array();
+/* G14 (0.9.30): ZUERST der Archivkandidat (html/ und htmlauth/ nebeneinander) - in der Installation gibt es
+ * ihn nie; eine Archivkopie im Webserver laedt so ihre eigene Bibliothek und nicht die produktive. */
+$sg_kandidaten = array(dirname(__DIR__) . '/htmlauth/sg_lib.php');
 $sg_lb = getenv('LBHOMEDIR');
 if ($sg_lb) {
     $sg_kandidaten[] = $sg_lb . '/webfrontend/htmlauth/plugins/' . $sg_ordner . '/sg_lib.php';
@@ -59,8 +68,6 @@ if ($sg_lb) {
 // .../webfrontend/html/plugins/<ordner>  ->  .../webfrontend/htmlauth/plugins/<ordner>
 $sg_kandidaten[] = dirname(dirname(dirname(__DIR__)))
                  . '/htmlauth/plugins/' . basename(__DIR__) . '/sg_lib.php';
-// entpacktes Archiv: html/ und htmlauth/ liegen nebeneinander
-$sg_kandidaten[] = dirname(__DIR__) . '/htmlauth/sg_lib.php';
 
 $sg_lib = '';
 foreach ($sg_kandidaten as $sg_kand) {
@@ -132,6 +139,15 @@ if ($sg_selftest) {
     sg_ende(200, 'SELFTEST;OK=1;TOKEN=OK');
 }
 
+/* endpunkt_ein (0.9.30, E-E8): aus = der GANZE Endpunkt fuer Loxone (status, senden, zustand, sperren,
+ * entsperren); offen bleibt nur ?selftest=1 oben. Nach der Token-Pruefung, damit ein Fremder nicht
+ * erfaehrt, ob der Endpunkt an ist. */
+if (!sg_endpunkt_ein($cfg)) {
+    sg_log_gebremst('endpunkt_aus', 'Endpunkt: Aufruf abgewiesen (endpunkt_ein = 0) - Loxone ueber das MQTT-Gateway V2 '
+        . 'und die Befehlsbruecke anbinden, oder im Reiter Einbindung den HTTP-Endpunkt einschalten.');
+    sg_ende(403, 'SIGNAL;OK=0;GRUND=ENDPUNKT_AUS');
+}
+
 $erlaubte_aktionen = array('senden', 'zustand', 'status', 'sperren', 'entsperren');
 $aktion = isset($_GET['aktion']) ? sg_par('aktion') : 'status';
 if (!in_array($aktion, $erlaubte_aktionen, true)) {
@@ -143,180 +159,32 @@ if (!in_array($aktion, $erlaubte_aktionen, true)) {
  *
  * OK heisst seit dem Durchgang 01.10.2026: signal-cli antwortet UND der Bot
  * hat hoechstens vor SG_HERZ_GRENZE (180) Sekunden ein Lebenszeichen
- * abgelegt (Entscheidung 4: dreimal der 60-s-Takt). BOT sagt, ob ein Bot die
- * Sperre haelt, ALTER das Alter des Lebenszeichens (-1 = keines). Bis 0.9.25
- * stand OK=1, sobald signal-cli auf /check antwortete - auch ohne Bot, also
- * ohne dass ein einziger Befehl ankam (gemessen). */
+ * abgelegt. Seit 0.9.30 schreibt der Bot das Lebenszeichen nur bei nutzbarem
+ * Ereignisstrom - OK=1 heisst damit "Nachrichten kommen an". Die Zahlen kommen
+ * aus sg_status_werte() - derselben Quelle wie die Themen ueber das
+ * MQTT-Gateway V2; die Zeile ist byte-gleich zu 0.9.29. */
 if ($aktion === 'status') {
-    $z = sg_zustaende();
-    $sg_alter = sg_herz_alter();
-    $sg_frisch = $sg_alter >= 0 && $sg_alter <= SG_HERZ_GRENZE;
-    printf("SIGNAL;OK=%d;DAEMON=%d;KONTO=%d;ERLAUBTE=%d;BEFEHLE=%d;ZUSTAENDE=%d;GESPERRT=%d;OFFEN=%d;LETZTER=%d;ABGEWIESEN=%d;PINFEHL=%d;BOT=%d;ALTER=%d\n",
-        (sg_daemon_lebt() && $sg_frisch) ? 1 : 0,
-        sg_dienst_laeuft() ? 1 : 0,
-        (string) $cfg['konto'] !== '' ? 1 : 0,
-        count($cfg['erlaubt']),
-        count(array_filter($cfg['befehle'], function ($b) { return !empty($b['aktiv']) && $b['wort'] !== ''; })),
-        count($z),
-        !empty($cfg['gesperrt']) ? 1 : 0,
-        sg_offene_meldungen(),
-        sg_letzter_befehl(),
-        sg_zaehle_ereignisse('abgewiesen'),
-        sg_zaehle_ereignisse('PIN falsch'),
-        sg_bot_laeuft() ? 1 : 0,
-        $sg_alter);
+    echo sg_status_zeile(sg_status_werte($cfg, true)) . "\n";
     exit;
 }
 
-/* ---------------- sperren / entsperren ----------------
+/* ---------------- sperren / entsperren / zustand / senden ----------------
  *
- * Der Kill-Schalter fuer den Fall, dass ein Handy abhandenkommt. Ohne ihn
- * muesste man erst die LoxBerry-Oberflaeche oeffnen; so genuegt ein Taster
- * oder ein Baustein im Miniserver. */
-if ($aktion === 'sperren' || $aktion === 'entsperren') {
-    $neu = $aktion === 'sperren' ? 1 : 0;
-    /* Unter der Konfigurationssperre, mit frischem Lesen (C9): bis 0.9.25
-     * konnte ein gleichzeitiges Speichern in der Oberflaeche die Sperre still
-     * zuruecknehmen. */
-    $sg_geaendert = false;
-    list($sg_ok, ) = sg_config_aendern(function ($c) use ($neu, &$sg_geaendert) {
-        if ((int) $c['gesperrt'] === $neu) { return null; }
-        $c['gesperrt'] = $neu;
-        $sg_geaendert = true;
-        return $c;
-    });
-    if (!$sg_ok) {
-        sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
-    }
-    if ($sg_geaendert) {
-        sg_log($neu ? 'Bot ueber den Endpunkt GESPERRT.' : 'Bot ueber den Endpunkt entsperrt.');
-        sg_ereignis_merken('Loxone', $neu ? 'gesperrt' : 'entsperrt', '');
-    }
-    printf("SIGNAL;OK=1;AKTION=%s;GESPERRT=%d\n", $aktion, $neu);
-    exit;
-}
-
-/* ---------------- zustand ---------------- */
+ * Seit 0.9.30 EIN Ablauf fuer Endpunkt und Befehlsbruecke: sg_befehl_ausfuehren()
+ * (Quelle 'http' = wie bis 0.9.29: sofort senden, mit Bild sg_senden(); die
+ * Antworten sind byte-gleich). Ein gesetztes, aber unbrauchbares &an= (auch
+ * eine Liste an[]=) wird abgewiesen; ein LEERES &an= bleibt der Rundruf. */
 if ($aktion === 'zustand') {
-    if (empty($cfg['zustand_ein'])) {
-        sg_ende(403, 'SIGNAL;OK=0;GRUND=ZUSTAENDE_AUS');
-    }
-    $name = trim(sg_par('name'));
-    $wert = sg_par('wert');
-    $wert = trim(preg_replace('/[\x00-\x1F\x7F]/', '', $wert));
-    if ($name === '' || $wert === '') {
-        sg_ende(400, 'SIGNAL;OK=0;GRUND=NAME_ODER_WERT_FEHLT');
-    }
-    /* Der Name wird geprueft, nicht gesaeubert (C11, Nr. 19): bis 0.9.25 wurde
-     * aus "alarm anlage" still "alarmanlage" - ein Zustand, den "status alarm
-     * anlage" nie fand. */
-    if (!preg_match('/^[A-Za-z0-9_\-]{1,40}$/', $name)) {
-        sg_ende(400, 'SIGNAL;OK=0;GRUND=NAME_UNGUELTIG');
-    }
-    /* Ein zu langer Wert wird gekuerzt gespeichert, aber das wird GEMELDET
-     * (GEKUERZT=1) - bis 0.9.25 antwortete der Endpunkt OK=1 ohne Hinweis. */
-    $sg_gekuerzt = 0;
-    if (sg_laenge($wert) > 120) { $wert = sg_kuerzen($wert, 120); $sg_gekuerzt = 1; }
-    if (!sg_zustand_setzen($name, $wert)) {
-        sg_ende(500, 'SIGNAL;OK=0;GRUND=NICHT_GESPEICHERT');
-    }
-    printf("SIGNAL;OK=1;AKTION=zustand;NAME=%s%s\n", $name, $sg_gekuerzt ? ';GEKUERZT=1' : '');
-    exit;
-}
-
-/* ---------------- senden ---------------- */
-$text = sg_par('text');
-// Steuerzeichen raus, Zeilenumbruch als \n zugelassen: Loxone kann keinen
-// echten Umbruch in eine URL schreiben.
-$text = str_replace('\n', "\n", $text);
-$text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
-$text = trim($text);
-if ($text === '') {
-    sg_ende(400, 'SIGNAL;OK=0;GRUND=TEXT_FEHLT');
-}
-/* Gekuerzt wird weiter (eine Alarmmeldung soll hinausgehen), aber gemeldet (C11). */
-$sg_gekuerzt = 0;
-if (sg_laenge($text) > 2000) { $text = sg_kuerzen($text, 2000); $sg_gekuerzt = 1; }
-
-/* Ein gesetztes, aber unbrauchbares &an= wird ABGEWIESEN.
- *
- * Bis 0.9.11 fiel es hier durch preg_replace auf '' und landete im
- * else-Zweig: aus einem Tippfehler in der Loxone-Adresse ("&an=Papa") wurde
- * ein Rundruf an ALLE freigegebenen Nummern, und die Antwort lautete
- * OK=1;EMPFAENGER=4. Eine vertrauliche Meldung ging damit an den ganzen
- * Haushalt, ohne dass irgendetwas darauf hinwies.
- *
- * Ein LEERES &an= bleibt der ausdrueckliche Rundruf - dieser Fall steht so
- * in der Anleitung und in bestehenden Projektdateien. */
-$sg_an_roh = isset($_GET['an']) ? (is_string($_GET['an']) ? trim($_GET['an']) : 'ungueltig') : '';
-$an = preg_replace('/[^0-9+]/', '', $sg_an_roh);
-if ($sg_an_roh !== '' && !preg_match('/^\+[0-9]{6,20}$/', $an)) {
-    sg_log('Senden abgewiesen: "' . sg_maske($sg_an_roh) . '" ist keine gueltige Rufnummer');
-    sg_ende(400, 'SIGNAL;OK=0;GRUND=EMPFAENGER_UNGUELTIG');
-}
-if ($an !== '') {
-    // Auch beim Senden gilt die Weissliste. Sonst waere der Endpunkt ein
-    // offener Nachrichtenversand: wer das Token kennt, koennte ueber das
-    // Signal-Konto des Hauses an beliebige Nummern schreiben.
-    if (!sg_erlaubt($an)) {
-        sg_log('Senden abgewiesen: ' . sg_maske($an) . ' steht nicht auf der Weissliste');
-        sg_ende(403, 'SIGNAL;OK=0;GRUND=EMPFAENGER_NICHT_ERLAUBT');
-    }
-    $ziele = array($an);
-} elseif ((string) $cfg['gruppe'] !== '') {
-    /* Der Rundruf geht EINMAL in die eingestellte Gruppe (0.9.29, E13).
-     * Bis 0.9.28 ging er trotz Gruppen-Kennung einzeln an jede erlaubte
-     * Nummer - die Einstellung wirkte nie. Ein ausdrueckliches &an= bleibt
-     * eine Einzelmeldung (Zweig oben). */
-    $ziele = array(SG_GRUPPE_VOR . $cfg['gruppe']);
+    $sg_par = array('name' => sg_par('name'), 'wert' => sg_par('wert'));
+} elseif ($aktion === 'senden') {
+    $sg_par = array(
+        'text'     => sg_par('text'),
+        'an_roh'   => isset($_GET['an']) ? (is_string($_GET['an']) ? trim($_GET['an']) : 'ungueltig') : '',
+        'dringend' => (isset($_GET['dringend']) && sg_par('dringend') !== '0') ? 1 : 0,
+        'bild'     => isset($_GET['bild']) ? sg_par('bild') : '',
+    );
 } else {
-    $ziele = $cfg['erlaubt'];
+    $sg_par = array();
 }
-$sg_gruppe = ($ziele && sg_ist_gruppe($ziele[0])) ? 1 : 0;
-if (!$ziele) {
-    sg_ende(400, 'SIGNAL;OK=0;GRUND=KEIN_EMPFAENGER');
-}
-
-/* Dringend? Dann geht die Meldung durch die Nachtruhe hindurch und wird
- * wiederholt, bis jemand "quittiert" schreibt. */
-$dringend = isset($_GET['dringend']) && sg_par('dringend') !== '0' ? 1 : 0;
-
-/* Ein Anhang - etwa der Kamerabild-Schnappschuss zum Alarm.
- *
- * Seit dem Durchgang 01.10.2026 (C5) NUR ein Bild im eigenen Datenordner
- * (data/plugins/<ordner>/, auch in Unterordnern), verglichen MIT Trenner,
- * und nur mit Bildendung. Bis 0.9.25 hiess "darunter" ein Praefixvergleich
- * ohne Trenner: data/plugins/<ordner>.nativ/... ging als Anhang hinaus,
- * ebenso das Merkwort des Formularwaechters und jede Datei unter /tmp und
- * /var/tmp (gemessen). */
-$anhang = '';
-if (isset($_GET['bild']) && sg_par('bild') !== '') {
-    $echt = realpath(sg_par('bild'));
-    $ort = realpath(sg_datadir());
-    $drin = $ort && $echt && strpos($echt, rtrim($ort, '/\\') . DIRECTORY_SEPARATOR) === 0;
-    $bild = $echt && preg_match('/\.(jpe?g|png|gif|webp)$/i', $echt);
-    if (!$drin || !$bild || !is_file($echt)) {
-        sg_ende(400, 'SIGNAL;OK=0;GRUND=ANHANG_UNZULAESSIG');
-    }
-    $anhang = $echt;
-}
-
-$ok = 0;
-foreach ($ziele as $ziel) {
-    if ($anhang !== '') {
-        // Mit Anhang wird unmittelbar gesendet - eine Bilddatei in die
-        // Warteschlange zu legen hiesse, auf eine Datei zu warten, die es
-        // spaeter vielleicht nicht mehr gibt.
-        if (sg_senden($ziel, $text, $anhang)) { $ok++; }
-    } else {
-        $art = sg_melden($ziel, $text, $dringend);
-        if ($art !== 'fehler') { $ok++; }
-    }
-}
-sg_log('Meldung aus Loxone ' . ($sg_gruppe ? 'in die Gruppe' : 'an ' . $ok . ' von ' . count($ziele) . ' Empfaenger')
-     . ($dringend ? ' (dringend)' : '') . ($anhang !== '' ? ' (mit Anhang)' : ''));
-if ($ok === 0) {
-    sg_ende(502, 'SIGNAL;OK=0;GRUND=SENDEN_FEHLGESCHLAGEN');
-}
-printf("SIGNAL;OK=1;AKTION=senden;EMPFAENGER=%d;DRINGEND=%d%s%s\n", $ok, $dringend,
-       $sg_gruppe ? ';GRUPPE=1' : '', $sg_gekuerzt ? ';GEKUERZT=1' : '');
+list($sg_code, $sg_zeile) = sg_befehl_ausfuehren($aktion, $sg_par, 'http');
+sg_ende($sg_code, $sg_zeile);
