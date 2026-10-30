@@ -8,6 +8,15 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.31
+
+Pflegefassung der Nachtwelle (29.10.2026), ohne neue Funktion und ohne Änderung am Verhalten:
+
+* **Befehlsbrücke 1.0.2** (gemeinsame Stammfassung). Die Vorlage „SignalBot MQTT-Befehle“
+  (`VQ_signalbot_mqtt.xml`, Reiter Einbindung) baut das Plugin selbst; sie kommt jetzt ebenfalls mit
+  Windows-Zeilenenden (CRLF) wie die Ausfuhren der Loxone Config. Titel, Adresse und die sechs Befehle sind
+  unverändert, ein Neuimport ist nicht nötig.
+
 ## Neu in 0.9.30
 
 Gruppe 32 (Entscheidungen 1–4 des Hausherrn, Entwurf `entwurf_gruppe32_sg.txt`). Gemessen mit Attrappen (Broker,

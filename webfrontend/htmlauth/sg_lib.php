@@ -4141,7 +4141,9 @@ function sg_bruecke_vorlagenbefehle()
     );
 }
 
-/** Die Vorlage VQ_signalbot_mqtt.xml: eigener Ausgang am UDP-Eingang des MQTT-Gateways (Form bb_vorlage()). */
+/** Die Vorlage VQ_signalbot_mqtt.xml: eigener Ausgang am UDP-Eingang des MQTT-Gateways (Form bb_vorlage()).
+ * Seit 0.9.31 (Nachtwelle N1) CRLF wie bb_vorlage() der Bruecke 1.0.2 und die _Test.xml-Ausfuhren der
+ * Loxone Config (Regeln/07); Inhalt sonst byte-gleich zu 0.9.30. */
 function sg_bruecke_vorlage()
 {
     $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
@@ -4162,7 +4164,7 @@ function sg_bruecke_vorlage()
              . ($b['analog'] ? ' SourceValLow="0" DestValLow="0" SourceValHigh="10" DestValHigh="10"' : '') . ' HintText=""/>';
     }
     $z[] = '</VirtualOut>';
-    return array('VQ_signalbot_mqtt.xml', implode("\n", $z) . "\n");
+    return array('VQ_signalbot_mqtt.xml', implode("\r\n", $z) . "\r\n");
 }
 
 /**
