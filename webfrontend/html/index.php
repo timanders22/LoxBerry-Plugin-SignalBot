@@ -100,7 +100,9 @@ function sg_par($k)
     return (isset($_GET[$k]) && is_string($_GET[$k])) ? $_GET[$k] : '';
 }
 
-$sg_selftest = isset($_GET['selftest']) && sg_par('selftest') !== '0';
+/* 0.9.32 (Nachzug 01.11.2026, wie Renault NG 2.1.23): !empty statt isset - bis 0.9.31 galt auch ?selftest=0 und ?selftest= als Selbsttest,
+ * und eine Adresse mit diesem Anhang tat nie etwas anderes. */
+$sg_selftest = !empty($_GET['selftest']);
 
 /* ---------------- Nichts anlegen (C4) ----------------
  *
@@ -114,10 +116,11 @@ if (sg_config_lage() !== 'ok') {
     if ($sg_selftest) { sg_ende(503, 'SELFTEST;OK=0;ERR=NICHT_EINGERICHTET'); }
     sg_ende(503, 'SIGNAL;OK=0;GRUND=NICHT_EINGERICHTET');
 }
-$cfg = sg_config(false);
+/* bis 0.9.31 hiess dieses Feld $cfg: das LoxBerry-SDK ueberschreibt ein globales $cfg beim ersten Lesen von general.json (Ausfall MGiSmart 01.11.2026). */
+$sg_lauf_cfg = sg_config(false);
 
 /* ---------------- Token ---------------- */
-$soll = (string) $cfg['aktionstoken'];
+$soll = (string) $sg_lauf_cfg['aktionstoken'];
 $ist  = sg_par('token');
 
 /* Ein Token muss sich pruefen lassen, ohne dass etwas passiert.
@@ -142,7 +145,7 @@ if ($sg_selftest) {
 /* endpunkt_ein (0.9.30, E-E8): aus = der GANZE Endpunkt fuer Loxone (status, senden, zustand, sperren,
  * entsperren); offen bleibt nur ?selftest=1 oben. Nach der Token-Pruefung, damit ein Fremder nicht
  * erfaehrt, ob der Endpunkt an ist. */
-if (!sg_endpunkt_ein($cfg)) {
+if (!sg_endpunkt_ein($sg_lauf_cfg)) {
     sg_log_gebremst('endpunkt_aus', 'Endpunkt: Aufruf abgewiesen (endpunkt_ein = 0) - Loxone ueber das MQTT-Gateway V2 '
         . 'und die Befehlsbruecke anbinden, oder im Reiter Einbindung den HTTP-Endpunkt einschalten.');
     sg_ende(403, 'SIGNAL;OK=0;GRUND=ENDPUNKT_AUS');
@@ -164,7 +167,7 @@ if (!in_array($aktion, $erlaubte_aktionen, true)) {
  * aus sg_status_werte() - derselben Quelle wie die Themen ueber das
  * MQTT-Gateway V2; die Zeile ist byte-gleich zu 0.9.29. */
 if ($aktion === 'status') {
-    echo sg_status_zeile(sg_status_werte($cfg, true)) . "\n";
+    echo sg_status_zeile(sg_status_werte($sg_lauf_cfg, true)) . "\n";
     exit;
 }
 

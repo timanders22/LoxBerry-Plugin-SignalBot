@@ -30,6 +30,10 @@ LOG=REPLACELBPLOGDIR/signalbot_start.log
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ]; then
     : > "$LOG"
 fi
+# 0.9.32 (Nachzug 01.11.2026, Bauart Renault NG 2.1.23): ist die Fehlerdatei nicht schreibbar, braeche die
+# Umlenkung den Befehl ab, BEVOR er startet - bis 0.9.31 kein Lauf und keine Spur. Dann geht die Fehlerausgabe
+# nach /dev/null, und der Lauf findet statt.
+( : >>"$LOG" ) 2>/dev/null || LOG=/dev/null
 
 # ---- Waehrend einer Aktualisierung nichts starten (neu in 0.9.23) ----
 #

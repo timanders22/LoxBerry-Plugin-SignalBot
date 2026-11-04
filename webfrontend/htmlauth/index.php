@@ -184,6 +184,19 @@ if ($sg_post && (isset($_POST['vorlage']) || isset($_POST['vorlage_out']) || iss
  * Ausgegeben wird die volle Konfiguration - samt Aktionstoken - mit lesbarem
  * _-Kopf (U6). Bestuende sie das Zurueckspielen nicht, sagt es der Kopf
  * (_warnung, X-3) und die gelbe Warnung am Knopf; geliefert wird trotzdem. */
+/* Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+if ($sg_post && isset($_POST['ansage_test'])) {
+    list($sg_at, $sg_ag) = sg_ansage_test();
+    if ($sg_at) { $sg_meldungen[] = sg_e(sg_t('ANSAGEPLUGIN.M_TEST_OK')); } else { $sg_fehler[] = sg_e(sg_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $sg_ag); }
+    $sg_tab = 'tab-settings';
+}
+if ($sg_post && isset($_POST['ansage_speichern'])) {
+    list($sg_ao, $sg_af, $sg_ah) = sg_ansage_post($_POST);
+    if ($sg_af) { foreach ($sg_af as $sg_ax) { $sg_fehler[] = sg_e($sg_ax); } }
+    elseif ($sg_ao) { $sg_meldungen[] = sg_e(trim(sg_t('ANSAGEPLUGIN.M_OK') . ' ' . implode(' ', $sg_ah))); }
+    else { $sg_fehler[] = sg_e(sg_t('ANSAGEPLUGIN.M_FEHL')); }
+    $sg_tab = 'tab-settings';
+}
 if ($sg_post && isset($_POST['sg_sichern'])) {
     $sg_js = sg_sicherung_json(sg_config());
     if ($sg_js !== false) {
@@ -869,6 +882,7 @@ if (class_exists('LBWeb', false)) {
    alle Reiter untereinander, sobald das Skript nicht laeuft. */
 .sm-seite { display: none; padding-top: 4px; }
 .sm-seite.sm-active { display: block; }
+.sm-wrap .sm-breit { width: 100%; max-width: 640px; }
 .sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-warnung { border: 1px solid #f0c9a0; background: #fdf4ec; border-radius: 6px;
@@ -1300,6 +1314,7 @@ $sg_cmd_ver = "curl -s " . $sg_rpc_adr . " -H 'Content-Type: application/json' -
 </div>
 </form>
 
+<?= sg_ansage_form_html(sg_fmt() . '<input data-role="none" type="hidden" name="activetab" value="tab-settings">') ?>
 <h2><?= sg_t('EINST.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= sg_t('EINST.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= sg_t('EINST.SICH_WARNUNG') ?></div>

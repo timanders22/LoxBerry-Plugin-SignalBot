@@ -120,13 +120,14 @@ rewind($fh);
 fwrite($fh, (string) getmypid() . "\n");
 fflush($fh);
 
-$cfg = sg_config();
+/* bis 0.9.31 hiess dieses Feld $cfg: das LoxBerry-SDK ueberschreibt ein globales $cfg beim ersten Lesen von general.json (Ausfall MGiSmart 01.11.2026). */
+$sg_lauf_cfg = sg_config();
 $ende = ($modus === 'einmal') ? time() + 30 : 0;   // 0 = ohne Ende
 
 sg_log('Bot gestartet' . ($ende ? ' (Testlauf, 30 s)' : ''));
 /* Das Gateway-Abo (V1-Rueckfall) auf den aktuellen Praefix bringen (M9, sg_abo_datei). Seit 0.9.30 KEIN
  * Lebenszeichen beim Start: erst ein nutzbarer Ereignisstrom schreibt es (Entscheidung 1, eigener Fund). */
-sg_abo_datei($cfg['mqtt_topic'], true);
+sg_abo_datei($sg_lauf_cfg['mqtt_topic'], true);
 /* G4 (E-E11, 0.9.30): eine Klartext-PIN aus einer Fassung vor 0.9.12, deren Einstellungen seitdem nie
  * gespeichert wurden, einmal beim Start in einen Hash ueberfuehren. */
 $sg_pin_neu = false;
@@ -256,7 +257,7 @@ function sg_takt()
     $jetzt = time();
     $sg_nutzbar = !empty($GLOBALS['sg_strom_nutzbar']);
     /* Lebenszeichen nur bei nutzbarem Ereignisstrom (0.9.30, Entscheidung 1). */
-    if ($sg_nutzbar) { sg_herz_schreiben(); }
+    if ($sg_nutzbar) { sg_herz_schreiben(); sg_ansage_flanke('ausfall', false); }
     if ($jetzt - $sg_status_letzt >= 60) {
         $sg_status_letzt = $jetzt;
         /* Status ueber das MQTT-Gateway V2: voll nach dem Start und alle 30 min, sonst Aenderungen und das
@@ -351,6 +352,7 @@ while (true) {
     if ($ende && time() > $ende) { break; }
     if (!sg_lauschen($ende)) {
         $fehler_folge++;
+        sg_ansage_flanke('ausfall', true, '', 1800);     // nach 30 Minuten, nur der Ausfall; nie eine Nachricht
         // Mit wachsendem Abstand erneut versuchen, statt dagegen anzurennen.
         // Beim ersten Mal laut, danach nur noch alle zehn Versuche - sonst
         // laeuft das Protokoll voll, waehrend signal-cli startet.
