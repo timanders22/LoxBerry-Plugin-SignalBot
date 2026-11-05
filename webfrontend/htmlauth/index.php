@@ -173,6 +173,7 @@ if ($sg_post && (isset($_POST['vorlage']) || isset($_POST['vorlage_out']) || iss
     /* vorlage_bruecke (seit 0.9.30): die sechs Musterprojekt-Befehle am UDP-Eingang des MQTT-Gateways V2. */
     list($sg_vname, $sg_vinhalt) = isset($_POST['vorlage_bruecke']) ? sg_bruecke_vorlage()
         : (isset($_POST['vorlage_out']) ? sg_vorlage_out() : sg_vorlage());
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $sg_vname . '"');
     echo $sg_vinhalt;
@@ -200,6 +201,7 @@ if ($sg_post && isset($_POST['ansage_speichern'])) {
 if ($sg_post && isset($_POST['sg_sichern'])) {
     $sg_js = sg_sicherung_json(sg_config());
     if ($sg_js !== false) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="signalbot_einstellungen_'
                . date('Ymd_His') . '.json"');

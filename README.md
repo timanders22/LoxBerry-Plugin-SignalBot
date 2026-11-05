@@ -8,6 +8,10 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.33
+
+- Vor einem Download wird jeder offene Ausgabepuffer geleert: PHP-Warnungen oder Reste landen nicht mehr in der heruntergeladenen Datei.
+
 ## Neu in 0.9.32
 
 **Ab dieser Fassung sind die Sprachansagen ab Werk an, auch nach einem Update, wenn Sie die Ausgabeart nie gespeichert haben.** Eine gespeicherte Einstellung bleibt, wie sie ist, auch „aus“. **Ausschalten:** Reiter *Einstellungen*, Abschnitt *Sprachansagen*, Ausgabeart **„aus“** wählen und speichern; das bleibt auch nach jedem weiteren Update aus.
