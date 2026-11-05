@@ -43,20 +43,54 @@ ARGV5=$5
 #
 # Sie liegt NEBEN dem Datenordner, nicht darin: purge_installation loescht
 # data/plugins/<ordner>/ bei jedem Upgrade vollstaendig und naehme sie mit.
+# 05.11.2026: ein Ordnername mit "/" oder "." waere ein Pfad hinaus (dieselbe Formel wie MGiSmart und Govee).
+case "$ARGV3" in
+    ''|.|..|*/*) echo "<FAIL> Unbrauchbarer Ordnername '$ARGV3' - nichts angefasst."; exit 2 ;;
+esac
+# 05.11.2026: ohne Wurzel wird nichts gesichert; Rueckgabewert 2, sonst liefe der Purge weiter.
+if [ -z "$ARGV5" ] || [ ! -d "$ARGV5/config/plugins" ] || [ ! -d "$ARGV5/data/plugins" ] \
+   || [ ! -f "$ARGV5/config/system/general.json" ]; then
+    echo "<FAIL> Kein LoxBerry-Wurzelverzeichnis erkannt ('$ARGV5') - nichts gesichert, das Update wird abgebrochen."
+    exit 2
+fi
 MARKE="$ARGV5/data/plugins/$ARGV3.upgrade_laeuft"
 mkdir -p "$ARGV5/data/plugins" 2>/dev/null
 date +%s > "$MARKE" 2>/dev/null
 if [ -s "$MARKE" ]; then
     echo "<OK> Der Wecker startet den Bot bis zum Ende der Installation nicht."
 else
-    echo "<WARNING> Die Marke $MARKE liess sich nicht anlegen - der Wecker"
-    echo "<WARNING> kann den Bot waehrend der Installation starten."
+    # 05.11.2026: ohne Marke haelt die Installation das Update fuer eine Neuinstallation und legt die Einstellungen beiseite; bis hierher nur eine Warnung.
+    rm -f "$MARKE" 2>/dev/null
+    echo "<FAIL> Die Marke $MARKE liess sich nicht anlegen - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt unveraendert installiert."
+    exit 2
 fi
+# ---------- Update-Schutz (05.11.2026, Bauart Govee 0.9.34) ----------
+# plugininstall.pl bricht nur bei Rueckgabewert >1 vor purge_installation ab. Die Kopie entsteht als <Ziel>.neu.<pid>, traegt 0600,
+# BEVOR Inhalt hineinkommt, wird mit cmp verglichen und erst dann per mv an ihren Platz gestellt: eine heile Sicherung bleibt heil.
+ZS_FEHL=""
+zs_hinlegen() {   # $1 Quelle, $2 Ziel
+    [ -d "$2" ] && return 1
+    zs_neu="$2.neu.$$"
+    rm -f "$zs_neu" 2>/dev/null
+    if { : > "$zs_neu"; } 2>/dev/null && chmod 600 "$zs_neu" 2>/dev/null \
+       && cp "$1" "$zs_neu" 2>/dev/null && cmp -s "$1" "$zs_neu" \
+       && mv -f "$zs_neu" "$2" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$zs_neu" 2>/dev/null
+    return 1
+}
+zs_schluss() {   # Fehlschlag gesammelt: Marke weg, Abbruch vor purge_installation
+    [ -n "$ZS_FEHL" ] || return 0
+    echo "<FAIL> Nicht gesichert:$ZS_FEHL - die Aktualisierung wird abgebrochen, damit der Purge die Originale nicht loescht."
+    echo "<FAIL> Die bisherige Fassung bleibt installiert. Bitte Platz und Rechte unter config/plugins und data/plugins pruefen."
+    rm -f "$MARKE" 2>/dev/null
+    exit 2
+}
 
 # Ordnername ohne Pfadtrenner, sonst griffe rm/cp daneben.
-case "$ARGV3" in
-    ''|*/*|*..*) echo "<WARNING> Unzulaessiger Ordnername '$ARGV3' - kein Bestand angelegt."; exit 0 ;;
-esac
+# (Die Pruefung des Ordnernamens steht seit 05.11.2026 vor der Marke.)
 
 # ---- Befehlsbruecke anhalten (seit 0.9.30; Bauart Ferien/ACTi preupgrade) ----
 #
@@ -88,14 +122,17 @@ rm -rf "${BESTAND:?}" 2>/dev/null
 if mkdir -m 0700 "$BESTAND" 2>/dev/null; then
     SG_N=0
     for SG_D in ereignisse.json ausgang.json letzter.json; do
-        if [ -f "$DATEN/$SG_D" ] && cp "$DATEN/$SG_D" "$BESTAND/$SG_D" 2>/dev/null; then
-            chmod 600 "$BESTAND/$SG_D" 2>/dev/null
+        [ -f "$DATEN/$SG_D" ] || continue
+        if zs_hinlegen "$DATEN/$SG_D" "$BESTAND/$SG_D"; then
             SG_N=$((SG_N + 1))
+        else
+            ZS_FEHL="$ZS_FEHL $SG_D"
         fi
     done
     echo "<OK> Ereignisprotokoll und Warteschlange fuer das Update gesichert ($SG_N Dateien)."
 else
     echo "<WARNING> Der Bestand $BESTAND liess sich nicht anlegen - Ereignisprotokoll und Warteschlange gehen beim Update verloren."
+    [ -d "$DATEN" ] && ZS_FEHL="$ZS_FEHL Bestand"
 fi
 
 # ---- Zweitschrift anlegen, falls sie fehlt (I4) ----
@@ -133,7 +170,7 @@ if [ -f "$KONF" ] && command -v php >/dev/null 2>&1; then
         angelegt) echo "<OK> Die Zweitschrift fehlte oder war unbrauchbar - sie wurde aus der Konfiguration angelegt." ;;
         zweitschrift_da) echo "<OK> Zweitschrift der Konfiguration liegt bereit." ;;
         konfiguration_unbrauchbar) echo "<INFO> Konfiguration ohne gueltiges Token - die Zweitschrift bleibt, wie sie ist." ;;
-        *) echo "<WARNING> Die Zweitschrift liess sich nicht anlegen ($ZWEIT)." ;;
+        *) echo "<WARNING> Die Zweitschrift liess sich nicht anlegen ($ZWEIT)."; ZS_FEHL="$ZS_FEHL signalbot.json" ;;
     esac
 fi
 
@@ -142,4 +179,5 @@ fi
 # Ereignisstrom haengen, damit keine Nachricht verlorengeht. Die Marke
 # sorgt nur dafuer, dass in dieser Zeit kein ZWEITER dazukommt.
 
+zs_schluss
 exit 0
