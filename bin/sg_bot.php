@@ -98,6 +98,13 @@ if ($modus === 'test') {
     exit(0);
 }
 
+/* ---- 0.9.37 (Regeln/05): fehlende Vorgaben einmal in signalbot.json schreiben ----
+ * VOR der Sperre des Bots und vor dem ersten Lesen der Konfiguration in diesem Prozess: der Wecker (cron.01min)
+ * ruft diese Datei jede Minute, und ein Aufruf bei laufendem Bot endet an der Sperre. So holt der erste Weckruf
+ * nach einer Aktualisierung das Vervollstaendigen nach, auch wenn postinstall.sh den Bot noch mit Marke gestartet
+ * hat (dann ruht die Funktion). Schreibt nur, wenn etwas fehlt, unter der Sperre der Konfiguration. */
+sg_config_vervollstaendigen();
+
 /* ---- Nur ein Lauf gleichzeitig ---- */
 $sperre = sg_tmpdir() . '/bot.lock';
 /* 'ce' (G12, 0.9.30): close-on-exec - ein Kindprozess des Bots (sudo -n systemctl restart der Selbstheilung)

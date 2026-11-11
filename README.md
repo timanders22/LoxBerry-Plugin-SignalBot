@@ -8,6 +8,14 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.37
+
+- **Konfiguration wird vervollständigt:** Fehlen in `signalbot.json` Einstellungen, die eine neuere Fassung mitbringt, trägt der Bot sie jetzt einmal mit ihrer Vorgabe in die Datei ein, beim Start von `bin/sg_bot.php`. Der Wecker startet diese Datei jede Minute; läuft der Bot schon, endet der Aufruf gleich danach. Bisher ergänzte das Plugin fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular. Das Protokoll nennt die ergänzten Namen in einer Zeile, nie die Werte.
+- Geschrieben werden die Werte, die in der Datei stehen, plus die fehlenden Vorgaben, unter der Sperre der Konfiguration, mit Rechten 0600 und samt Zweitschrift. Einstellungen, die das Plugin nicht kennt, bleiben stehen; geschrieben wird nur, wenn etwas fehlt. Fehlt in einer eingerichteten Datei `endpunkt_ein`, wird wie beim Lesen 1 eingetragen, der HTTP-Endpunkt bleibt also an; am Verhalten ändert sich nichts.
+- Nicht angefasst werden eine fehlende, leere oder beschädigte Datei und eine Datei ohne gültiges Aktionstoken; das bleibt Sache der Selbstheilung. Solange die Marke einer Aktualisierung liegt, geschieht nichts; der erste Weckruf nach dem Ende der Installation holt es nach. Das Aktionstoken selbst wird nie eingetragen.
+- Gemessen ist das im Prüfstand unter PHP 7.4 und 8.4 auf dem Arbeitsrechner. Nicht gemessen ist es an einem LoxBerry und nicht an einem echten Start des Bots; die Aufrufstelle ist nur im Quelltext geprüft.
+- Leere Objekte (`{}`) in der Datei bleiben beim Vervollständigen erhalten, auch verschachtelte und solche unter unbekannten Schlüsseln; sie werden dabei nicht zu leeren Listen (`[]`).
+
 ## Neu in 0.9.36
 
 - Gemeinsames Sprachmodul 1.4.3: Als LoxBerry-Wurzel aus `LBHOMEDIR` gilt für die Sprachausgabe nur noch ein Ordner mit `config/plugins`, `data/plugins` und `config/system/general.json`; bis 1.4.2 genügte `config/system`, und ein Prüfstand oder Rest mit diesem Ordner wurde wie ein LoxBerry gelesen. Auf einem LoxBerry ändert sich nichts.

@@ -941,6 +941,113 @@ function sg_config_write($cfg)
     return $ok;
 }
 
+/** Leere Objekte des Rohtextes ($o, json_decode ohne true) im Feld $a wieder als Objekt fuehren (11.11.2026, Muster
+ *  bw_json_leere_objekte() aus Bewaesserung 0.9.56), damit json_encode() sie als {} und nicht als [] schreibt - oben,
+ *  verschachtelt und unter fremden Schluesseln. Nur fuer sg_config_vervollstaendigen(); das Speichern im Formular
+ *  bleibt, wie es ist. */
+function sg_json_leere_objekte($a, $o)
+{
+    if (!is_array($a)) { return $a; }
+    if (is_object($o)) {
+        if (!get_object_vars($o) && $a === array()) { return new stdClass(); }
+        foreach ($a as $k => $v) {
+            $ks = (string) $k;
+            if (is_array($v) && property_exists($o, $ks)) { $a[$k] = sg_json_leere_objekte($v, $o->$ks); }
+        }
+    } elseif (is_array($o)) {
+        foreach ($a as $k => $v) {
+            if (is_array($v) && array_key_exists($k, $o)) { $a[$k] = sg_json_leere_objekte($v, $o[$k]); }
+        }
+    }
+    return $a;
+}
+
+/**
+ * Fehlende Einstellungen EINMAL mit ihrer Vorgabe in signalbot.json schreiben (0.9.37; Regeln/05, Bauform Docker NG
+ * 1.3.7).
+ *
+ * Bis 0.9.36 ergaenzte sg_config() fehlende Schluessel nur im Speicher; in die Datei kamen sie erst beim naechsten
+ * Speichern im Formular. Aufgerufen von bin/sg_bot.php bei jedem Start - der Wecker cron.01min startet es jede
+ * Minute, und es endet sofort, wenn der Bot schon laeuft -, vor der Sperre des Bots und vor dem ersten Lesen der
+ * Konfiguration. Bei einer Aktualisierung startet postinstall.sh den Bot noch mit Marke (dann geschieht hier
+ * nichts); der erste Weckruf nach dem Ende der Installation holt es nach.
+ *
+ *  - nur mit LoxBerry-Wurzel und nicht, solange die Upgrade-Marke liegt (sg_upgrade_marke(), wie die Selbstheilung
+ *    in sg_config(): ohne Altersvergleich);
+ *  - nur eine Datei, deren Lage sg_config_lage() 'ok' nennt: ein JSON-Objekt mit gueltigem Aktionstoken (das
+ *    Merkwort). Eine fehlende, leere, {}- oder beschaedigte Datei und eine ohne gueltiges Token sind Sache von
+ *    sg_config() (Heilung, Token); aktionstoken selbst wird nie ergaenzt;
+ *  - geschrieben werden die WERTE AUS DER DATEI, so wie sie dort stehen, plus die fehlenden Vorgaben - nicht das,
+ *    was sg_config() daraus macht (Grenzen, Haken als 0/1, zwanzig Befehlszeilen, Listen gefiltert). Fuer
+ *    endpunkt_ein gilt die Lese-Regel aus sg_config(), nicht die Vorgabe: eine eingerichtete Datei (ein Schluessel
+ *    ausser aktionstoken und dem _-Kopf) ohne den Schluessel bekommt 1. Am Verhalten aendert das Eintragen nichts;
+ *  - nur Schluessel aus sg_vorgaben(); das Speichern im Formular schreibt dieselben (es speichert sg_config()),
+ *    die Ansageschluessel eingeschlossen (ansage_token_herkunft dort ebenso mit [], wenn er fehlt);
+ *  - unter der Sperre der Konfiguration (sg_config_sperre(), wie sg_config_aendern()), frisch gelesen; fremde
+ *    Schluessel bleiben stehen; geschrieben wird nur, wenn etwas fehlt; Weg, Rechte (0600) und Zweitschrift wie
+ *    beim Speichern (sg_config_write()); eine Protokollzeile mit den Namen, nie mit Werten.
+ *
+ * Rueckgabe: array('stand' => ohne_wurzel|ruht|ohne_datei|ohne_merkwort|vollstaendig|ergaenzt|fehler,
+ *                  'schluessel' => Namen der eingetragenen bzw. fehlenden Schluessel)
+ */
+function sg_config_vervollstaendigen()
+{
+    $p = sg_paths();
+    if ($p['home'] === '') {
+        return array('stand' => 'ohne_wurzel', 'schluessel' => array());
+    }
+    if (sg_upgrade_marke()) {
+        return array('stand' => 'ruht', 'schluessel' => array());
+    }
+    clearstatcache(true, $p['config']);
+    if (!is_file($p['config'])) {
+        return array('stand' => 'ohne_datei', 'schluessel' => array());
+    }
+    if (sg_config_lage() !== 'ok') {
+        return array('stand' => 'ohne_merkwort', 'schluessel' => array());
+    }
+    if (!sg_config_sperre(true)) {
+        sg_log_gebremst('vervollstaendigen', 'Konfiguration nicht vervollstaendigt: Sperre nicht zu bekommen.');
+        return array('stand' => 'fehler', 'schluessel' => array());
+    }
+    /* Unter der Sperre frisch lesen - ein Speichern der Oberflaeche dazwischen gilt. */
+    $roh = trim((string) @file_get_contents($p['config']));
+    $datei = ($roh !== '' && $roh[0] === '{') ? json_decode($roh, true) : null;
+    if (!is_array($datei) || sg_config_lage() !== 'ok') {
+        sg_config_sperre(false);
+        return array('stand' => 'ohne_merkwort', 'schluessel' => array());
+    }
+    // Ein leeres Objekt der Datei ({}) bliebe nach json_decode(..., true) ein leeres Feld und kaeme beim Schreiben
+    // als [] zurueck - die leeren Objekte des Rohtextes bleiben Objekte (11.11.2026).
+    $datei = sg_json_leere_objekte($datei, json_decode($roh));
+    $eingerichtet = false;
+    foreach (array_keys($datei) as $k) {
+        if ($k !== 'aktionstoken' && !(is_string($k) && $k !== '' && $k[0] === '_')) { $eingerichtet = true; break; }
+    }
+    $fehlend = array();
+    foreach (sg_vorgaben() as $k => $w) {
+        if ($k === 'aktionstoken' || array_key_exists($k, $datei)) {
+            continue;
+        }
+        $datei[$k] = ($k === 'endpunkt_ein' && $eingerichtet) ? 1 : $w;
+        $fehlend[] = $k;
+    }
+    if (!$fehlend) {
+        sg_config_sperre(false);
+        return array('stand' => 'vollstaendig', 'schluessel' => array());
+    }
+    $ok = sg_config_write($datei);
+    sg_config_sperre(false);
+    if (!$ok) {
+        sg_log_gebremst('vervollstaendigen', 'Die Konfiguration liess sich nicht vervollstaendigen - ' . $p['config']
+            . ' liess sich nicht schreiben (fehlend: ' . implode(', ', $fehlend) . ').');
+        return array('stand' => 'fehler', 'schluessel' => $fehlend);
+    }
+    sg_log('Konfiguration vervollstaendigt: ' . count($fehlend) . ' fehlende Einstellung(en) mit der Vorgabe '
+        . 'eingetragen (' . implode(', ', $fehlend) . ').');
+    return array('stand' => 'ergaenzt', 'schluessel' => $fehlend);
+}
+
 function sg_token($laenge = 32)
 {
     $zeichen = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
