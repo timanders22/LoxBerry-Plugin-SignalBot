@@ -1891,6 +1891,28 @@ $sg_ep_ein = sg_endpunkt_ein($sg_cfg);
 <?= sg_t('LOX.SGEGEN_2') ?>
 </div>
 </details>
+
+<?php /* 0.9.38 (Nachtpruefung 12.11.2026): die Schnittstelle fuer ANDERE Plugins an einer Stelle - bisher stand
+ * sie verstreut (Reiter Einstellungen, Hinweis unter Schritt 5, Quelltext von bin/befehle_zuordnung.php und
+ * sg_befehl_senden_mqtt()). Nur Anzeige, kein neues Verhalten; Praefix, Haken und Endpunkt aus der geltenden
+ * Konfiguration. */
+$sg_sp_frei = (isset($sg_cfg['plugin_absender']) && is_array($sg_cfg['plugin_absender'])) ? $sg_cfg['plugin_absender'] : array();
+$sg_sp_an = function ($w) { return sg_e(sg_t(!empty($w) ? 'LOX.SPLUGIN_AN' : 'LOX.SPLUGIN_AUS')); };
+?>
+<div class="sm-step"><b><?= sg_e(sg_t('LOX.SPLUGIN_T')) ?></b><br>
+<?= sg_t('LOX.SPLUGIN') ?>
+<br><br><?= sg_t('LOX.SPLUGIN_MQTT') ?>
+<div class="sm-pre"><?= sg_e((string) $sg_cfg['mqtt_topic']) ?>/befehl/plugin/&lt;ordner&gt;</div>
+<?= sg_t('LOX.SPLUGIN_NUTZLAST') ?>
+<div class="sm-pre"><?= sg_e('{"text": "Test", "dringend": 0}') ?></div>
+<?= sprintf(sg_t('LOX.SPLUGIN_LAGE'), $sg_sp_an($sg_cfg['mqtt_ein']), $sg_sp_an($sg_cfg['befehle_mqtt_ein']),
+             $sg_sp_frei ? '<span class="sm-mono">' . sg_e(implode(', ', $sg_sp_frei)) . '</span>' : sg_e(sg_t('LOX.SPLUGIN_KEINE'))) ?>
+<br><br><?= sg_t('LOX.SPLUGIN_QUITTUNG') ?>
+<br><br><?= sg_t('LOX.SPLUGIN_GRENZEN') ?>
+<br><br><?= sprintf(sg_t('LOX.SPLUGIN_HTTP'), $sg_sp_an(sg_endpunkt_ein($sg_cfg))) ?>
+<div class="sm-pre"><?= sg_e(sg_endpunkt('senden')) ?>&amp;text=Test</div>
+<?= sg_t('LOX.SPLUGIN_HTTP_ANTWORT') ?>
+</div>
 </div>
 
 <!-- ================= Reiter: Test ================= -->

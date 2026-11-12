@@ -8,6 +8,13 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.38
+
+- **Schnittstelle für andere Plugins beschrieben:** Im Reiter *Einbindung in Loxone* steht unten der neue Abschnitt *Für andere Plugins: Meldungen in den Chat schicken*, dazu unten in dieser Datei der Abschnitt *Für andere Plugins*. Beschrieben sind beide Wege, auf denen andere Plugins heute Meldungen schicken – MQTT über die Befehlsbrücke ohne Token (so Renault NG und Skoda Connect) und der HTTP-Endpunkt mit Token (so Intercom und Pumpenwacht) –, mit Thema, Nutzlast, Quittung, Antworten, Grenzen und den Haken, die dafür hier gesetzt sein müssen; der Abschnitt zeigt den geltenden Präfix und den Stand dieser Haken. Am Verhalten ändert sich nichts: Themen, Felder und Antworten sind dieselben wie seit 0.9.30.
+- **Berichtigt: ein Hilfeabschnitt fehlte.** Der Hilfetext „Zwei Wege zum Bot“ (eigene Nummer als verknüpftes Gerät oder eigene Nummer für den Bot) stand seit 0.9.30 in den Sprachdateien, aber nicht in der Hilfeseite – angezeigt wurde er nie. Jetzt steht er dort, dazu ein Verweis auf den neuen Abschnitt.
+- **Berichtigt: zwei Meldungen in Umschrift.** Die Meldungen beim Laden und Auspacken der nativen Bibliothek schrieben „liess“ statt „ließ“.
+- Gemessen auf dem Arbeitsrechner: die Oberfläche unter PHP 7.4 und 8.4 gerendert (ohne Konfiguration, mit `{}` und mit der Konfiguration der Vorfassung), die Hilfeseite gegen beide Sprachdateien gezählt. Nicht gemessen an einem LoxBerry.
+
 ## Neu in 0.9.37
 
 - **Konfiguration wird vervollständigt:** Fehlen in `signalbot.json` Einstellungen, die eine neuere Fassung mitbringt, trägt der Bot sie jetzt einmal mit ihrer Vorgabe in die Datei ein, beim Start von `bin/sg_bot.php`. Der Wecker startet diese Datei jede Minute; läuft der Bot schon, endet der Aufruf gleich danach. Bisher ergänzte das Plugin fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular. Das Protokoll nennt die ergänzten Namen in einer Zeile, nie die Werte.
@@ -543,6 +550,53 @@ Einlesen (virtuelle Eingänge „Signal Bot“, virtuelle Ausgänge „Signal Bo
 **Baustein-Listen** der zwei Seiten zum Nachbauen. Fertig verbunden stehen die Bausteine auf den Seiten
 „SignalBot“ und „SignalBot Befehle und Meldungen“ im [LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt) –
 die ganze Projektdatei mit allen Plugin-Seiten und Vorlagen.
+
+## Für andere Plugins
+
+Andere LoxBerry-Plugins schicken Meldungen auf einem von zwei Wegen. Beide gibt es seit 0.9.30; Themen, Felder und
+Antworten behalten ihre Bedeutung, eine Erweiterung kommt unter neuem Namen daneben. Was ein Plugin schickt, wird nie
+als Chat-Befehl ausgeführt. Ohne *dringend* wartet eine Meldung in der Nachtruhe (falls eingestellt) bis zu deren Ende.
+Den geltenden Präfix und den Stand der Haken zeigt der Reiter *Einbindung in Loxone*, Abschnitt *Für andere Plugins*.
+
+**Weg 1 – MQTT, ohne Token (empfohlen).** Das sendende Plugin veröffentlicht auf
+
+```
+<präfix>/befehl/plugin/<ordner>
+```
+
+`<präfix>` ist der Präfix dieses Plugins (ab Werk `signalbot`), `<ordner>` der Ordnername des sendenden Plugins
+(`[a-z0-9_]`, höchstens 40 Zeichen); im Chat steht er in eckigen Klammern vor der Meldung. Nutzlast: Klartext oder
+JSON `{"text": "...", "dringend": 0|1, "bild": "<pfad>"}`, Pflicht ist nur `text`; `bild` liegt im Datenordner des
+sendenden Plugins (`data/plugins/<ordner>/`, jpg, png, gif oder webp, höchstens 5 MB). **Nie retained senden** – eine
+zurückbehaltene Meldung wird ohne Quittung verworfen.
+
+Voraussetzungen hier: Reiter *MQTT* „Befehle per MQTT an Loxone senden“ und „Befehle über MQTT annehmen“ an, Reiter
+*Einstellungen* unter „Meldungen anderer Plugins annehmen von“ den Ordner des sendenden Plugins angehakt.
+
+Quittung auf `<präfix>/befehl/plugin/<ordner>/quittung`, nie retained: `angenommen` (eingereiht, der Bot stellt binnen
+etwa 10 s zu) oder `abgelehnt: <Grund>`, etwa `ABSENDER_NICHT_FREIGEGEBEN`, `NUTZLAST_UNGUELTIG`, `BILD_UNZULAESSIG`,
+`BILD_ZU_GROSS`, `TEXT_FEHLT`, `GEBREMST`, `wiederholt (vor n s)`, `ausgeschaltet`. Ist die Annahme aus, kommt
+`abgelehnt: ausgeschaltet` oder gar keine Quittung.
+
+Grenzen: höchstens 4000 Byte Nutzlast (im Chat höchstens 2000 Zeichen, sonst gekürzt); dieselbe Nutzlast desselben
+Plugins binnen 60 s wird als `wiederholt` abgelehnt; höchstens 20 Meldungen je Minute über alle Plugins zusammen; Ziel
+ist die eingestellte Gruppe, sonst alle erlaubten Absender – nie eine einzelne Nummer.
+
+**Weg 2 – HTTP-Endpunkt mit Token.**
+
+```
+http://<loxberry>/plugins/<ordner dieses plugins>/index.php?token=<Aktionstoken>&aktion=senden&text=<Text, URL-kodiert>
+```
+
+Wahlweise `&an=+49...` (genau eine Nummer der Weißliste), `&dringend=1`, `&bild=<pfad im Datenordner dieses Plugins>`.
+Das Aktionstoken wird im sendenden Plugin eingetragen und wie ein Kennwort behandelt. Der Weg wirkt nur mit dem Haken
+„HTTP-Endpunkt für Loxone annehmen“ (Reiter *Einbindung in Loxone*, „Bestehende Anlagen“); er gilt für jeden Aufruf,
+auch den eines Plugins, und ist bei einer Neuinstallation ab Werk aus, nach einem Update an. Antwort, erste Zeile:
+`SIGNAL;OK=1;AKTION=senden;EMPFAENGER=<n>;DRINGEND=<0|1>` mit HTTP 200 (dahinter wahlweise `;GRUPPE=1`,
+`;GEKUERZT=1`), sonst `SIGNAL;OK=0;GRUND=<Grund>` mit HTTP 400, 403, 502 oder 503, etwa `TOKEN`, `ENDPUNKT_AUS`,
+`TEXT_FEHLT`, `KEIN_EMPFAENGER`, `EMPFAENGER_NICHT_ERLAUBT`, `SENDEN_FEHLGESCHLAGEN`, `NICHT_EINGERICHTET`. Ob Adresse
+und Token stimmen, beantwortet `&selftest=1` ohne Wirkung mit `SELFTEST;OK=1;TOKEN=OK`, auch bei ausgeschaltetem
+Endpunkt.
 
 ## Eingebaute Woerter
 
