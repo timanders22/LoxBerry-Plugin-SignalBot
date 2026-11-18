@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+require_once __DIR__ . '/sicherung.php';        // gemeinsames Sicherungsmodul (0.9.39), Abschrift der Stammfassung
 /**
  * Signal Bot fuer LoxBerry - gemeinsame Bibliothek
  *
@@ -3191,26 +3192,8 @@ function sg_t($schluessel)
 }
 
 
-/**
- * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
- *
- * Eine halb gueltige Datei ueberschreibt GAR NICHTS. Unbekannte und fehlende
- * Schluessel sind eine Beanstandung (seit 0.9.12 bzw. 07.09.2026).
- *
- * Seit dem Durchgang 01.10.2026 (C3, Bauart E, Klasse 12) wird jeder WERT
- * mit derselben Pruefung wie die Formulare geprueft (sg_config_maengel):
- * Typ, Muster, Bereich, Befehlszeilen. Bis 0.9.25 ging hier jeder Wert durch,
- * und erst sg_config() bog ihn beim Lesen zurecht: ein Token als Liste wurde
- * zu einem neuen Token, eine Weissliste als Text zu einer leeren, "gesperrt":
- * "nein" sperrte den Bot, "rpc_url":"javascript:..." stand als Link im
- * Reiter Test - alles mit "22 Werte uebernommen" quittiert (gemessen).
- *
- * Schluessel mit "_" vorn sind der lesbare Kopf (_plugin, _stand, _hinweis,
- * _warnung; Kernschicht 9) und werden uebersprungen (U6; bis 0.9.25
- * "Unbekannte Einstellung in der Datei: _hinweis").
- *
- * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
- */
+/* 0.9.39: Einstellungen sichern und zurueckspielen laufen ueber das gemeinsame Sicherungsmodul
+ * (sg_sicherung_beschreibung()); der Kommentar zur frueheren eigenen Lesefunktion ist mit ihr entfallen. */
 /** Die Schluessel der Sprachansagen in der Hauptkonfiguration. */
 function sg_ansage_schluessel()
 {
@@ -3247,47 +3230,11 @@ function sg_ansage_wert($k, $w)
     return false;
 }
 
-/** Fuer die Sicherung: nie ein Sprechtoken, nie der Herkunftsvermerk. Ausgabeart, Ziele, Regeln und Haken reisen mit. */
-function sg_ansage_fuer_sicherung(array $c)
-{
-    unset($c['ansage_token_herkunft'], $c['ansage_aus_datei']);
-    if (isset($c['tts']) && is_array($c['tts'])) { $c['tts'] = ansage_sicherung_bereinigen($c['tts']); }
-    return $c;
-}
-
-/**
- * Vor dem Zurueckspielen. Eine Datei mit Sprechtoken wird abgewiesen (der Block wird unbrauchbar gemacht, die Wertpruefung nennt ihn). Die geltenden Token und der Vermerk bleiben.
- * Fehlt ein Schluessel (Sicherung einer aelteren Fassung), gilt der geltende Wert: Ein bewusstes AUS geht beim Zurueckspielen nicht verloren.
- */
-function sg_ansage_sicherung_vor($roh)
-{
-    $d = json_decode((string) $roh, true);
-    if (!is_array($d)) { return $roh; }
-    $inhalt = false;
-    foreach (array_keys($d) as $k) { if ((string) $k !== '' && ((string) $k)[0] !== '_') { $inhalt = true; } }
-    if (!$inhalt) { return $roh; }
-    $j = sg_ansage_cfg();
-    unset($d['ansage_token_herkunft'], $d['ansage_aus_datei']);
-    $jt = isset($j['tts']) && is_array($j['tts']) ? $j['tts'] : array();
-    if (array_key_exists('tts', $d)) {
-        $g = '';
-        $p = is_array($d['tts']) ? ansage_wert_pruefen($d['tts'], $g, sg_ansage_modi()) : null;
-        if (ansage_sicherung_mangel($d['tts']) || $p === null) {
-            $d['tts'] = 'ABGEWIESEN';
-        } else {
-            list($tv) = ansage_vervollstaendigen($p, 'aus');
-            $d['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
-        }
-    } else {
-        $d['tts'] = sg_tts($j);
-    }
-    foreach (array_diff(sg_ansage_schluessel(), array('tts', 'ansage_token_herkunft', 'ansage_aus_datei')) as $k) {
-        if (!array_key_exists($k, $d) && array_key_exists($k, $j)) { $d[$k] = $j[$k]; }
-    }
-    $d['ansage_token_herkunft'] = isset($j['ansage_token_herkunft']) && is_array($j['ansage_token_herkunft']) ? $j['ansage_token_herkunft'] : array();
-    $d['ansage_aus_datei'] = 1;
-    return (string) json_encode($d);
-}
+/* 0.9.39: sg_ansage_fuer_sicherung() und sg_ansage_sicherung_vor() sind in die Beschreibung fuer das gemeinsame
+ * Sicherungsmodul gewandert (Bauart Audioserver-NG 0.9.12): nie ein Sprechtoken und nie der Herkunftsvermerk in der
+ * Datei ('sichern' und 'nie_aus_datei' in sg_sicherung_beschreibung()), der Block tts vor der Pruefung in
+ * sg_sicherung_vorbehandeln(), fehlende Ansage-Schluessel behalten den geltenden Wert ('fehlt' => 'behalten'),
+ * Vermerk und Herkunft setzt sg_sicherung_vorbereiten() aus dem geltenden Stand. */
 
 /**
  * Die Hauptkonfiguration. Liegt eine ansage.json aus einer Probe vom 01.11., wird sie EINMAL uebernommen (Vermerk ansage_aus_datei) und bleibt liegen.
@@ -3666,87 +3613,143 @@ function sg_ansage_flanke($anlass, $gestoert, $name = '', $frist = 0, $jetzt = n
     return sg_ansage_legen(array($ein));
 }
 
-function sg_sicherung_lesen($roh)
+/**
+ * 0.9.39: Die Beschreibung dieser Linie fuer das gemeinsame Sicherungsmodul (sicherung.php; Auftrag des Hausherrn
+ * 18.11.2026, Bauform Audioserver-NG 0.9.12 ff.). Lesen, Pruefen, Kennzeichen, Haken und Meldungen kommen aus dem
+ * Modul; bis 0.9.38 stand hier eine eigene Schleife (sg_sicherung_lesen(), sg_sicherung_json()).
+ *
+ * Kennzeichen: 0.9.25 bis 0.9.38 schrieben _plugin = "Signal Bot (<Ordner>)" (gemessen 18.11.2026 am Code jeder
+ * Fassung im Arbeitsordner). Das traegt Leerzeichen und Klammern, ist keine Namensform, die das Modul als Kennzeichen
+ * annimmt, und haengt am Ordner der Anlage. Neu ist deshalb der Name des Repositorys, LoxBerry-Plugin-SignalBot; die
+ * bisherige Form gilt ueber 'kennzeichen_frueher_muster' als frueheres Kennzeichen derselben Linie, mit jedem Ordner.
+ * 0.9.18 bis 0.9.24 schrieben sg_config() ohne jeden Kopf; eine solche Datei weist das Modul ab (Regel 1, Entscheidung
+ * des Hausherrn 12.11.2026). Bis 0.9.38 pruefte diese Linie das Kennzeichen gar nicht.
+ *
+ * Inhalt: alle Schluessel von sg_vorgaben() samt Aktionstoken, PIN-Hash und Rufnummern. Nie darin: die Sprechtoken im
+ * Block tts ('sichern' => ansage_sicherung_bereinigen) und die Vermerke ansage_token_herkunft, ansage_aus_datei
+ * ('nie_aus_datei'). Die PIN im Klartext (pin) steht wie bis 0.9.38 nur leer darin: gebaut wird aus sg_pin_migrieren()
+ * (sg_sicherung_datei()).
+ *
+ * PIN: pin_hash, pin_versuche und pin_sperre sind Einstellungen wie die uebrigen und reisen mit (jede Fassung mit Kopf
+ * schrieb alle drei, gemessen); geprueft mit sg_config_maengel(). pin ist ein Altschluessel aus der Zeit vor 0.9.12:
+ * eine Klartext-PIN aus einer Datei wird vor dem Speichern gehasht (sg_sicherung_vorbereiten()). Regel 3 des Moduls
+ * gilt auch hier: ein leerer pin_hash in der Datei loescht keine gesetzte PIN mehr (bis 0.9.38: "PIN entfernt").
+ *
+ * Fehlen darf, was eine Fassung mit Kopf noch nicht schrieb: sg_sicherung_spaet() (seit 0.9.30) und die
+ * Ansage-Schluessel tts, ansage_regeln, ansage_haken (seit 0.9.32); dann bleibt der geltende Wert, wie bis 0.9.38.
+ *
+ * Listen: befehle (je Zeile die Felder von sg_befehl_vorgabe(); ohne Zuordnungsschluessel, denn das Wort ist in jeder
+ * leeren Zeile leer) und gaeste (Zuordnung ueber nummer: Pflicht, Form +Ziffern, ohne Doppel, sg_gaeste_maengel()).
+ * erlaubt, plugin_absender und haus_bereiche sind Listen von Texten ohne Unterschluessel.
+ *
+ * Pruefung: die Ansage-Schluessel einzeln (sg_ansage_wert()), alles uebrige im Zusammenhang mit sg_config_maengel()
+ * ('quer') - dieselbe Pruefung wie in den Formularen und bis 0.9.38 beim Zurueckspielen (Befehl mit PIN nur bei
+ * gesetzter PIN, Gast nicht zugleich erlaubt, Nachtruhe als Paar).
+ */
+function sg_sicherung_beschreibung()
 {
-    $roh = sg_ansage_sicherung_vor($roh);     // Token und Vermerk bleiben die geltenden
-    $mangel = array();
-    $hinweise = array();
-    $daten = json_decode((string) $roh, true);
-    if (!is_array($daten) || ($daten !== array() && array_keys($daten) === range(0, count($daten) - 1))) {
-        return array(null, array(sg_t('EINST.SICH_KEIN_JSON')), 0, array());
+    $p = sg_paths();
+    $tts = array_merge(array_keys(ansage_werk_block()), ansage_geheim());
+    $tts_knoten = in_array('ziele', $tts, true)
+        ? array('ziele' => sicherung_liste(array('art', 'wo', 'laut', 'sprache', 'ein'))) : array();
+    $haken = sg_ansage_vorgaben();
+    $schluessel = array(
+        'befehle' => sicherung_liste(array_keys(sg_befehl_vorgabe())),
+        'gaeste' => sicherung_liste(array('nummer', 'name', 'bis', 'befehle', 'angelegt'), 'nummer'),
+        'tts' => sicherung_block($tts, $tts_knoten) + array('fehlt' => 'behalten', 'sichern' => 'ansage_sicherung_bereinigen'),
+        'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())) + array('fehlt' => 'behalten'),
+        'ansage_haken' => sicherung_block(array_keys($haken['ansage_haken'])) + array('fehlt' => 'behalten'),
+    );
+    foreach (sg_sicherung_spaet() as $s) {
+        $schluessel[$s] = (isset($schluessel[$s]) ? $schluessel[$s] : array()) + array('fehlt' => 'behalten');
     }
-    $neu = sg_vorgaben();
-    $bekannt = array_keys($neu);
-    $anzahl = 0;
-    $gesehen = array();
-    foreach ($daten as $k => $w) {
-        if (is_string($k) && $k !== '' && $k[0] === '_') { continue; }
-        $sg_aw = sg_ansage_wert($k, $w);     // Sprachansagen: eigene Pruefung
-        if ($sg_aw !== null) {
-            if ($sg_aw) { $neu[$k] = $w; $gesehen[] = $k; $anzahl++; } else { $mangel[] = sg_t('ANSAGEPLUGIN.M_FEHL'); }
-            continue;
-        }
-        if (!in_array($k, $bekannt, true)) {
-            $mangel[] = sprintf(sg_t('EINST.SICH_FREMD'),
-                                 htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
-            continue;
-        }
-        $neu[$k] = $w;
-        $gesehen[] = $k;
-        $anzahl++;
-    }
-    if ($anzahl === 0) {
-        $mangel[] = sg_t('EINST.SICH_LEER');
-    }
-    $fehlend = array_values(array_diff($bekannt, $gesehen));
-    $spaet = array_values(array_intersect($fehlend, sg_sicherung_spaet()));
-    $fehlend = array_values(array_diff($fehlend, $spaet));
-    if ($fehlend) {
-        $mangel[] = sprintf(sg_t('EINST.SICH_FEHLEND'), count($fehlend),
-            htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
-    }
-    if (!$mangel && $spaet) {
-        $gilt = sg_config();
-        foreach ($spaet as $k) { $neu[$k] = $gilt[$k]; }
-        $hinweise[] = sprintf(sg_t('EINST.SICH_SPAET'), htmlspecialchars(implode(', ', $spaet), ENT_QUOTES, 'UTF-8'));
-    }
-    if (!$mangel) {
-        foreach (sg_config_maengel($neu) as $feld => $text) {
-            $mangel[] = '<span class="sm-mono">' . sg_e($feld) . '</span>: ' . $text;
-        }
-    }
-    if (!$mangel) {
-        $hatte_pin = sg_pin_gesetzt(sg_config());
-        list($neu, $mig) = sg_pin_migrieren($neu);
-        if ($mig) { $hinweise[] = sg_t('EINST.SICH_PIN_GEHASHT'); }
-        if ($hatte_pin && !sg_pin_gesetzt($neu)) { $hinweise[] = sg_t('EINST.SICH_PIN_ENTFERNT'); }
-    }
-    return array($mangel ? null : $neu, $mangel, $anzahl, $hinweise);
+    return array(
+        'kennzeichen' => 'LoxBerry-Plugin-SignalBot',
+        'kennzeichen_frueher_muster' => '/^Signal Bot \([A-Za-z0-9_.\-]{1,64}\)\z/',
+        'hinweis' => sg_klartext('EINST.SICH_KOPF_HINWEIS'),
+        'home' => (string) $p['home'],
+        'ordner' => (string) $p['plugin'],
+        'plugin_cfg' => dirname(dirname(__DIR__)) . '/plugin.cfg',
+        'vorgaben' => sg_vorgaben(),
+        'schluessel' => $schluessel,
+        'nie_aus_datei' => array('ansage_token_herkunft', 'ansage_aus_datei'),
+        'pruefen' => function ($k, $w) {
+            $aw = sg_ansage_wert($k, $w);
+            if ($aw !== null) { return $aw ? '' : sg_t('ANSAGEPLUGIN.M_FEHL') . ' (' . sg_e($k) . ')'; }
+            return '';     // alles uebrige im Zusammenhang ('quer')
+        },
+        'quer' => function ($neu) {
+            $aus = array();
+            foreach (sg_config_maengel($neu) as $feld => $text) {
+                $aus[] = array((string) $feld, '<span class="sm-mono">' . sg_e($feld) . '</span>: ' . $text);
+            }
+            return $aus;
+        },
+        'vorbehandeln' => 'sg_sicherung_vorbehandeln',
+        'jetzt' => function () { return sg_config(); },
+        'vorbereiten' => function ($neu) { $h = array(); return sg_sicherung_vorbereiten($neu, '', $h); },
+        'speichern' => function ($neu) {
+            list($ok, ) = sg_config_aendern(function ($alt) use ($neu) { return $neu; });
+            return $ok;
+        },
+        'zweitschrift' => function () { $q = sg_paths(); return array($q['config'], $q['sicherung']); },
+        'log' => 'sg_log',
+        't' => 'sg_t',
+    );
 }
 
 /**
- * Die Sicherungsdatei: die Konfiguration mit lesbarem _-Kopf (U6). Genau diese
- * Datei nimmt sg_sicherung_lesen() wieder an. Bestuende sie das Zurueckspielen
- * nicht (X-3), steht es im Kopf (_warnung, nur Namen) - geliefert wird trotzdem.
+ * 0.9.39: Der Block tts vor der Pruefung - was bis 0.9.38 sg_ansage_sicherung_vor() an der rohen Datei tat, jetzt
+ * nach dem Verwerfen unbekannter Unterschluessel (Bauform asn_sicherung_vorbehandeln()): ein Block mit Sprechtoken
+ * oder mit einem unzulaessigen Wert wird unbrauchbar gemacht (die Wertpruefung nennt ihn), sonst vervollstaendigt,
+ * und die geltenden Sprechtoken bleiben. Fehlt der Block, behaelt das Modul den geltenden ('fehlt' => 'behalten').
  */
-function sg_sicherung_json($cfg)
+function sg_sicherung_vorbehandeln($bereit)
 {
-    $aus = array(
-        '_plugin'  => 'Signal Bot (' . sg_paths()['plugin'] . ')',
-        '_stand'   => date('Y-m-d H:i:s'),
-        '_hinweis' => sg_klartext('EINST.SICH_KOPF_HINWEIS'),
-    );
-    list($cfg, ) = sg_pin_migrieren($cfg);
-    $m = sg_sicherung_eigene_maengel($cfg);
-    if ($m) {
-        $aus['_warnung'] = sprintf(sg_klartext('EINST.SICH_KOPF_WARNUNG'), implode(', ', $m));
+    if (!array_key_exists('tts', $bereit)) { return $bereit; }
+    $j = sg_ansage_cfg();
+    $jt = isset($j['tts']) && is_array($j['tts']) ? $j['tts'] : array();
+    $g = '';
+    $p = is_array($bereit['tts']) ? ansage_wert_pruefen($bereit['tts'], $g, sg_ansage_modi()) : null;
+    if (!is_array($bereit['tts']) || ansage_sicherung_mangel($bereit['tts']) || $p === null) {
+        $bereit['tts'] = 'ABGEWIESEN';
+    } else {
+        list($tv) = ansage_vervollstaendigen($p, 'aus');
+        $bereit['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
     }
-    $sg_ohne = sg_ansage_fuer_sicherung($cfg);     // nie ein Sprechtoken
-    foreach (array_keys(sg_vorgaben()) as $k) {
-        if (array_key_exists($k, $sg_ohne)) { $aus[$k] = $sg_ohne[$k]; }
+    return $bereit;
+}
+
+/**
+ * 0.9.39: Vor dem Speichern (Rueckruf 'vorbereiten'), wie bis 0.9.38 nach dem Lesen: die Herkunft der Sprechtoken
+ * aus dem geltenden Stand, der Vermerk ansage_aus_datei = 1, und eine Klartext-PIN wird gehasht (sg_pin_migrieren();
+ * ein vorhandener Hash gewinnt, der Klartext faellt in jedem Fall weg). $roh: der Text der Datei - der Hinweis
+ * "PIN stand im Klartext" kommt nur, wenn die Datei selbst eine Klartext-PIN trug (nach Regel 3 kann eine leere
+ * PIN der Datei den geltenden Altbestand behalten; dann ist die Datei nicht der Grund).
+ */
+function sg_sicherung_vorbereiten(array $neu, $roh, array &$hinweise)
+{
+    $j = sg_ansage_cfg();
+    $neu['ansage_token_herkunft'] = isset($j['ansage_token_herkunft']) && is_array($j['ansage_token_herkunft'])
+        ? $j['ansage_token_herkunft'] : array();
+    $neu['ansage_aus_datei'] = 1;
+    list($neu, $mig) = sg_pin_migrieren($neu);
+    $d = json_decode((string) $roh, true);
+    if ($mig && is_array($d) && isset($d['pin']) && (is_string($d['pin']) || is_int($d['pin'])) && (string) $d['pin'] !== '') {
+        $hinweise[] = sg_t('EINST.SICH_PIN_GEHASHT');
     }
-    $aus['pin'] = '';
-    return json_encode($aus, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $neu;
+}
+
+/**
+ * 0.9.39: Die Sicherungsdatei, gebaut vom gemeinsamen Modul (Kopf mit _plugin, _fassung, _stand, _hinweis; bestuende
+ * sie das Zurueckspielen nicht, sagt es _warnung, nur mit Namen - X-3 wie bisher). Aus der Konfiguration nach
+ * sg_pin_migrieren(): nie eine Klartext-PIN. '' wenn sie sich nicht bilden laesst.
+ */
+function sg_sicherung_datei()
+{
+    list($cfg, ) = sg_pin_migrieren(sg_config());
+    return sicherung_json(sicherung_bauen(sg_sicherung_beschreibung(), $cfg));
 }
 
 /**

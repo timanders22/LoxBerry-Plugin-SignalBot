@@ -8,6 +8,23 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.39
+
+- **Verhalten geändert – Einstellungen sichern und zurückspielen über das gemeinsame Sicherungsmodul 1.2.11:** Sichern und Zurückspielen verhalten sich jetzt wie in den übrigen Plugins dieser Reihe.
+  - „Einstellungen zurückspielen“ wirkt nur noch mit gesetztem Haken „Ja, die geltenden Einstellungen durch die Sicherung ersetzen“ direkt vor dem Knopf. Ohne Haken wird die Datei nicht gelesen und nichts geändert.
+  - Die Sicherung trägt im Kopf das Kennzeichen `LoxBerry-Plugin-SignalBot` und die Fassung. Eine Datei mit fremdem Kennzeichen wird als Ganzes abgewiesen; bis 0.9.38 wurde das Kennzeichen gar nicht geprüft.
+  - Sicherungen von 0.9.25 bis 0.9.38 (Kennzeichen „Signal Bot (…)“) werden weiter angenommen. Einstellungen, die eine ältere Sicherung noch nicht kannte, behalten wie bisher ihren geltenden Wert, und die Meldung nennt sie.
+  - Sicherungen von 0.9.18 bis 0.9.24 trugen keinen Kopf und werden jetzt abgewiesen; sie sind von einer fremden Datei nicht sicher zu unterscheiden. Bis 0.9.38 wurden sie angenommen.
+  - Eine unbekannte Einstellung in einer eigenen Sicherung wird verworfen und mit ihrem Namen genannt; die übrigen Einstellungen werden zurückgespielt. Bis 0.9.38 wurde die ganze Datei abgewiesen.
+  - Ein leerer Wert in der Sicherung überschreibt keinen gesetzten mehr; er bleibt stehen und wird genannt. Das gilt auch für die PIN: Eine Sicherung ohne PIN löscht eine gesetzte PIN nicht mehr (bis 0.9.38 hieß es dann „PIN entfernt“). Ebenso bleiben verknüpftes Konto, Gruppen-Kennung und Nachtruhe stehen, wenn sie in der Sicherung leer sind.
+  - Einträge der geltenden Einstellungen, die diese Fassung nicht kennt (etwa aus einer Bearbeitung von Hand), fallen beim Zurückspielen weg und werden mit ihrem Namen genannt, nie mit ihrem Wert.
+  - Eine Sicherungsdatei, die ein Editor mit einer unsichtbaren Markierung am Anfang (UTF-8-BOM) gespeichert hat, wird gelesen wie ohne sie.
+  - Nach dem Zurückspielen sagt die Meldung, dass der Bot nicht neu gestartet wurde; er liest die Einstellungen bei jeder Nachricht und jeder neuen Verbindung zu signal-cli neu. Abo-Datei und Befehlsbrücke folgen wie bisher sofort.
+  - Wie bisher: Jeder Wert wird mit derselben Prüfung wie in den Formularen geprüft, eine halb gültige Datei ändert nichts, das Sprechtoken steht nie in der Sicherung, eine PIN im Klartext aus einer alten Sicherung wird als Hash gespeichert.
+- **Knopf „Dokumentation“:** `plugin.cfg` nennt jetzt `WEBSITE=` mit diesem Repository; LoxBerry übernimmt die Adresse bei der Installation und zeigt sie in der Plugin-Verwaltung als Knopf.
+- Gemessen mit dem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4, der über einen Webserver die echten Knöpfe drückt und die Sicherungen aller Vorfassungen mit Kopf zurückspielt. Am Gerät nicht gemessen.
+- **Sicherungsmodul 1.2.11:** Wandelt ein Plugin beim Zurückspielen eine Sicherung aus einer Textdatei um, sagt die Meldung das jetzt mit einem gemeinsamen Satz, und Mängel darin werden in allen Plugins mit denselben Bezeichnungen genannt. Dieses Plugin wandelt keine Textdateien um; an seinem Verhalten ändert sich dadurch nichts. Gemessen mit dem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4. Am Gerät nicht gemessen.
+
 ## Neu in 0.9.38
 
 - **Schnittstelle für andere Plugins beschrieben:** Im Reiter *Einbindung in Loxone* steht unten der neue Abschnitt *Für andere Plugins: Meldungen in den Chat schicken*, dazu unten in dieser Datei der Abschnitt *Für andere Plugins*. Beschrieben sind beide Wege, auf denen andere Plugins heute Meldungen schicken – MQTT über die Befehlsbrücke ohne Token (so Renault NG und Skoda Connect) und der HTTP-Endpunkt mit Token (so Intercom und Pumpenwacht) –, mit Thema, Nutzlast, Quittung, Antworten, Grenzen und den Haken, die dafür hier gesetzt sein müssen; der Abschnitt zeigt den geltenden Präfix und den Stand dieser Haken. Am Verhalten ändert sich nichts: Themen, Felder und Antworten sind dieselben wie seit 0.9.30.

@@ -199,8 +199,8 @@ if ($sg_post && isset($_POST['ansage_speichern'])) {
     $sg_tab = 'tab-settings';
 }
 if ($sg_post && isset($_POST['sg_sichern'])) {
-    $sg_js = sg_sicherung_json(sg_config());
-    if ($sg_js !== false) {
+    $sg_js = sg_sicherung_datei();     // 0.9.39: gebaut vom gemeinsamen Sicherungsmodul
+    if ($sg_js !== '') {
         while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="signalbot_einstellungen_'
@@ -711,33 +711,38 @@ if ($sg_post && isset($_POST['gaeste_speichern'])) {
 
 /* ---------------- Einstellungen zurueckspielen ----------------
  *
- * is_uploaded_file() ZUERST, dann die Groessengrenze, dann JEDER Wert mit
- * derselben Pruefung wie die Formulare (C3). Eine halb gueltige Datei
- * aendert nichts. */
+ * 0.9.39: das gemeinsame Sicherungsmodul (sicherung.php, Beschreibung sg_sicherung_beschreibung(); Auftrag des
+ * Hausherrn 18.11.2026). Den Eingang prueft sicherung_eingang() - in jeder Linie gleich: zuerst der Haken zurueck_ok
+ * (ohne ihn wird nichts gelesen und nichts geaendert), dann is_uploaded_file() und die Groessengrenze des Moduls.
+ * Danach liest sicherung_zurueckspielen() die Datei, prueft das Kennzeichen und JEDEN Wert (sg_config_maengel(), wie
+ * die Formulare), verwirft Unbekanntes mit Namen, laesst bei einem leeren Wert den bisherigen stehen, aendert bei einer
+ * Beanstandung GAR NICHTS (alle Beanstandungen, nicht nur die erste), speichert samt Zweitschrift und misst sie nach.
+ * Danach wie bis 0.9.38: Abo-Datei und Befehlsbruecke nach den zurueckgespielten Haken, eine Klartext-PIN wird
+ * gehasht. */
 if ($sg_post && isset($_POST['sg_zurueck'])) {
-    if (!isset($_FILES['sg_sicherung']) || !is_array($_FILES['sg_sicherung'])
-        || !isset($_FILES['sg_sicherung']['tmp_name']) || !is_string($_FILES['sg_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['sg_sicherung']['tmp_name'])) {
-        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_KEINE_DATEI')));
+    list($sg_roh, $sg_ab) = sicherung_eingang(sg_sicherung_beschreibung(), $_POST, $_FILES, 'sg_sicherung');
+    if ($sg_ab !== null) {
+        $sg_sm = sicherung_meldungen(sg_sicherung_beschreibung(), $sg_ab);
+        sg_umleiten('tab-settings', array(), $sg_sm['fehler']);
     }
-    if ((int) $_FILES['sg_sicherung']['size'] > 262144) {
-        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_ZU_GROSS')));
-    }
-    list($sg_neu, $sg_mangel, $sg_n, $sg_shinw) = array_pad(sg_sicherung_lesen(
-        (string) @file_get_contents($_FILES['sg_sicherung']['tmp_name'])), 4, array());
-    if ($sg_neu === null) {
-        /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird nichts. */
-        sg_umleiten('tab-settings', array(), array_merge(array(sg_t('EINST.SICH_ABGELEHNT')), $sg_mangel));
-    }
-    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_neu) { return $sg_neu; });
-    if (!$sg_ok) {
-        sg_umleiten('tab-settings', array(), array(sg_t('EINST.SICH_SCHREIBFEHLER')));
-    }
-    sg_abo_datei($sg_neu['mqtt_topic'], true);
-    sg_log('Einstellungen aus einer Sicherung zurueckgespielt (' . (int) $sg_n . ' Werte).');
-    /* Seit 0.9.30: die Bruecke nach den zurueckgespielten Haken schalten. */
-    list($sg_bm, $sg_bf) = sg_bruecke_meldungen(sg_bruecke_schalten($sg_neu));
-    sg_umleiten('tab-settings', array_merge(array(sprintf(sg_t('EINST.SICH_UEBERNOMMEN'), $sg_n)), $sg_shinw, $sg_bm), $sg_bf);
+    $sg_b = sg_sicherung_beschreibung();
+    $sg_pinh = array();
+    $sg_bf = array();
+    $sg_b['vorbereiten'] = function ($neu) use ($sg_roh, &$sg_pinh) {
+        return sg_sicherung_vorbereiten($neu, $sg_roh, $sg_pinh);
+    };
+    /* Den Dienst nachziehen UND sagen, was mit ihm geschah (Regeln/05): der Bot liest die Einstellungen bei jeder
+     * Nachricht und jeder neuen Verbindung zu signal-cli neu und wird nicht neu gestartet; die Abo-Datei und die
+     * Befehlsbruecke folgen sofort (wie bis 0.9.38). */
+    $sg_b['nachziehen'] = function ($neu) use (&$sg_bf) {
+        sg_abo_datei($neu['mqtt_topic'], true);
+        list($bm, $bf) = sg_bruecke_meldungen(sg_bruecke_schalten($neu));
+        $sg_bf = $bf;
+        return array_merge(array(sg_t('EINST.SICH_DIENST')), $bm);
+    };
+    $sg_r = sicherung_zurueckspielen($sg_b, $sg_roh);
+    $sg_sm = sicherung_meldungen($sg_b, $sg_r);
+    sg_umleiten('tab-settings', array_merge($sg_sm['hinweise'], $sg_pinh), array_merge($sg_sm['fehler'], $sg_bf));
 }
 
 /* Ein POST, den kein Handler kennt, endet ebenfalls mit einer Umleitung. */
@@ -1342,6 +1347,7 @@ if ($sg_sich_mangel) { ?>
     <?php echo sg_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="file" name="sg_sicherung" accept=".json">
+    <?= sicherung_haken_zeile(sg_sicherung_beschreibung()) ?>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="sg_zurueck" value="1"><?= sg_t('EINST.K_ZURUECK') ?></button>
   </form>
 </div>
