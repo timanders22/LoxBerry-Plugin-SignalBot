@@ -24,6 +24,20 @@
 # Nie als root (G11, Haertung seit 0.9.30): der Bot und der Haus-Leser legten ihre
 # Dateien in /tmp/<ordner> sonst als root an, und der Lauf als loxberry kaeme nicht
 # mehr an sie heran. LoxBerry ruft diese Datei als loxberry.
+# Upgrade-Marke (Regeln/06, Entscheidung des Hausherrn 18.11.2026, Frage 60; Bauart Renault-NG 2.1.37):
+# waehrend einer Aktualisierung ruht dieser Takt. preupgrade.sh legt die Marke neben dem Datenordner
+# mit der Unixzeit an, postinstall.sh oder postupgrade.sh entfernt sie. Ist sie juenger als 3600 s,
+# endet der Takt hier still, vor jedem Schreiben. Eine Marke, die 3600 s oder aelter ist, in der Zukunft
+# liegt oder keine Unixzeit enthaelt, gilt nicht - eine abgebrochene Aktualisierung legt den Takt nicht
+# fuer immer still. Liefert die Uhr keine Zahl, gilt die Marke (geschlossen ausfallen).
+UPGM_MARKE="REPLACELBPDATADIR.upgrade_laeuft"
+if [ -f "$UPGM_MARKE" ]; then
+    upgm_jetzt=$(date +%s 2>/dev/null); upgm_seit=$(cat "$UPGM_MARKE" 2>/dev/null)
+    case "$upgm_seit" in ''|*[!0-9]*) upgm_seit=0 ;; esac
+    case "$upgm_jetzt" in ''|*[!0-9]*|0) exit 0 ;; esac
+    if [ "$upgm_seit" -le "$upgm_jetzt" ] && [ $((upgm_jetzt - upgm_seit)) -lt 3600 ]; then exit 0; fi
+fi
+
 [ "$(id -u 2>/dev/null)" = 0 ] && exit 0
 LOG=REPLACELBPLOGDIR/signalbot_start.log
 # Nicht unbegrenzt wachsen lassen; hier steht nur, was schiefgeht.
@@ -35,53 +49,6 @@ fi
 # nach /dev/null, und der Lauf findet statt.
 ( : >>"$LOG" ) 2>/dev/null || LOG=/dev/null
 
-# ---- Waehrend einer Aktualisierung nichts starten (neu in 0.9.23) ----
-#
-# Zwischen der neu abgelegten cron-Datei und postinstall.sh liegt am Geraet
-# fast eine Minute (Regeln/06, an der Einspeisebremse gemessen). Dieser
-# Aufruf hier startete in dieser Luecke bedingungslos - und
-# purge_installation hatte config/plugins/<ordner>/ gerade geloescht.
-#
-# In WSL Ubuntu nachgestellt am 18.09.2026 (Pruefung-SignalBot-0.9.23,
-# Faelle G1 und G2): der Bot lief an (1 Prozess) und legte
-# config/plugins/<ordner>/signalbot.json neu an. Lag die Zweitschrift neben
-# dem Ordner, heilte er daraus - Token und Weissliste blieben. Fehlte sie,
-# schrieb er eine Vorgabe mit NEUEM Aktionstoken und LEERER Weissliste und
-# zog die Zweitschrift darauf nach:
-#
-#     Token in der Konfiguration: sb4UYa45RHxE86xquWMza2shMzCOE02L
-#     Weissliste                : (leer)
-#
-# Damit waeren alle Adressen im Miniserver tot, die das alte Token tragen.
-#
-# preupgrade.sh legt die Marke als Erstes an, postroot.sh entfernt sie als
-# Letztes. Nur eine Marke, die hoechstens eine Stunde alt ist, zaehlt. Aelter,
-# aus der Zukunft oder unlesbar: eine abgebrochene Installation hat sie
-# liegen lassen, und der Bot darf nicht fuer immer stillstehen.
-MARKE=REPLACELBPDATADIR.upgrade_laeuft
-if [ -f "$MARKE" ]; then
-    SEIT=$(cat "$MARKE" 2>/dev/null)
-    case "$SEIT" in
-        ''|*[!0-9]*) SEIT=0 ;;
-    esac
-    # Die Uhr wird gemessen, nicht angenommen. Liefert die Zeitausgabe nichts
-    # - unter Last kann ein fork scheitern -, dann rechnete die Schale mit
-    # einer leeren Zeichenkette, das Alter wuerde unbrauchbar und die
-    # Bedingung fiele durch: der Wecker startete den Bot MITTEN in der
-    # Aktualisierung. Ein Schutz faellt geschlossen aus (Regeln/01): ohne Uhr
-    # wird nicht gestartet, die Marke gilt.
-    JETZT=$(date +%s 2>/dev/null)
-    case "$JETZT" in
-        ''|*[!0-9]*) JETZT="" ;;
-    esac
-    if [ -z "$JETZT" ]; then
-        exit 0
-    fi
-    ALTER=$(( JETZT - SEIT ))
-    if [ "$ALTER" -ge 0 ] && [ "$ALTER" -lt 3600 ]; then
-        exit 0
-    fi
-fi
 
 /usr/bin/php REPLACELBPBINDIR/sg_bot.php >> "$LOG" 2>&1 &
 
