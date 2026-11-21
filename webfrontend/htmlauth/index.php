@@ -828,7 +828,8 @@ if ($sg_uri) {
 
 
 if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader(sg_t('ALLG.TITEL'), 'https://github.com/AsamK/signal-cli/wiki', 'help.html');
+    require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+    LBWeb::lbheader(plugin_kopftitel(sg_t('ALLG.TITEL'), __DIR__), 'https://github.com/AsamK/signal-cli/wiki', 'help.html');
 }
 
 ?>
