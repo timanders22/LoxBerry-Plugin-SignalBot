@@ -8,6 +8,11 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.43
+
+- Gemeinsames Sprachmodul 1.5.0 (Entscheidung des Hausherrn 22.11.2026): Die Nachtruhe der Ansagen kann an Nicht-Schultagen (Samstag, Sonntag, Feiertage, Ferien) später enden. Neues Feld „Nachtruhe an Nicht-Schultagen bis“ bei „Wann gesprochen wird“, ab Werk leer: Dann gilt die Zeit, die im Plugin Ferien und Feiertage eingestellt ist (MQTT-Thema `haus/ansage/nachtruhe_frei_bis`); ohne sie endet die Nachtruhe wie an Schultagen. Ob heute ein Schultag ist, sagt `haus/kalender/heute/frei` (nur bei `haus/kalender/datum` = heute); ohne diese Aussage zählen nur Samstag und Sonntag. Dringende Ansagen übergehen die Nachtruhe wie bisher. Ohne Vorgabe und ohne eigene Zeit ändert sich nichts.
+- Reiter Test: neue Zeile zum Ende der Nachtruhe an Nicht-Schultagen (Quelle der Zeit, Art des heutigen Tages).
+
 ## Neu in 0.9.42
 
 - **Berichtigt – unverändertes Speichern des HTTP-Endpunkts:** Im Reiter *Einbindung in Loxone* schrieb ein Speichern ohne Änderung bis 0.9.41 trotzdem „Endpunkt aus“ (bzw. „Endpunkt an“) ins Ereignisprotokoll und „ausgeschaltet“ (bzw. „eingeschaltet“) ins Protokoll. Jetzt entstehen Ereignis und Protokollzeile nur, wenn der Haken wirklich umgestellt wird, mit dem Wortlaut des neuen Zustands; die Meldung oben nennt wie bisher den Zustand. Gemessen auf dem Arbeitsrechner (LoxBerry-Attrappe, PHP 7.4 und 8.4); am Gerät nicht gemessen.
