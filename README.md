@@ -8,6 +8,10 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.42
+
+- **Berichtigt – unverändertes Speichern des HTTP-Endpunkts:** Im Reiter *Einbindung in Loxone* schrieb ein Speichern ohne Änderung bis 0.9.41 trotzdem „Endpunkt aus“ (bzw. „Endpunkt an“) ins Ereignisprotokoll und „ausgeschaltet“ (bzw. „eingeschaltet“) ins Protokoll. Jetzt entstehen Ereignis und Protokollzeile nur, wenn der Haken wirklich umgestellt wird, mit dem Wortlaut des neuen Zustands; die Meldung oben nennt wie bisher den Zustand. Gemessen auf dem Arbeitsrechner (LoxBerry-Attrappe, PHP 7.4 und 8.4); am Gerät nicht gemessen.
+
 ## Neu in 0.9.41
 
 - Die Kopfzeile zeigt jetzt die installierte Fassung, einheitlich in allen Plugins.

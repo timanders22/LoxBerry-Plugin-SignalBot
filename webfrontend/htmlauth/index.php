@@ -588,12 +588,24 @@ if ($sg_post && isset($_POST['befehle_speichern'])) {
  * Reiter Einbindung, Abschnitt "Bestehende Anlagen". Eigenes Formular, eigener Handler. */
 if ($sg_post && isset($_POST['save_endpunkt'])) {
     $sg_ein = isset($_POST['endpunkt_ein']) ? 1 : 0;
-    list($sg_ok, ) = sg_config_aendern(function ($c) use ($sg_ein) { $c['endpunkt_ein'] = $sg_ein; return $c; });
+    /* 0.9.42 (Auftrag des Hausherrn 22.11.2026, Wirkungstest-Altbefund 4b): Protokollzeile und Ereignis nur bei
+     * einer echten Aenderung, mit dem Wortlaut des neuen Zustands. Bis 0.9.41 schrieb jedes Speichern "Endpunkt
+     * aus" bzw. "ausgeschaltet", auch unveraendert. Unveraendert wird nichts geschrieben; die Meldung nennt den
+     * Zustand wie bisher. */
+    $sg_vorher = null;
+    list($sg_ok, ) = sg_config_aendern(function ($c) use ($sg_ein, &$sg_vorher) {
+        $sg_vorher = sg_endpunkt_ein($c) ? 1 : 0;
+        if ($sg_vorher === $sg_ein) { return null; }
+        $c['endpunkt_ein'] = $sg_ein;
+        return $c;
+    });
     if (!$sg_ok) {
         sg_umleiten('tab-loxone', array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
     }
-    sg_log('HTTP-Endpunkt fuer Loxone ' . ($sg_ein ? 'eingeschaltet' : 'ausgeschaltet') . ' (Oberflaeche).');
-    sg_ereignis_merken('Oberflaeche', $sg_ein ? 'Endpunkt an' : 'Endpunkt aus', '');
+    if ($sg_vorher !== $sg_ein) {
+        sg_log('HTTP-Endpunkt fuer Loxone ' . ($sg_ein ? 'eingeschaltet' : 'ausgeschaltet') . ' (Oberflaeche).');
+        sg_ereignis_merken('Oberflaeche', $sg_ein ? 'Endpunkt an' : 'Endpunkt aus', '');
+    }
     sg_umleiten('tab-loxone', array(sg_t($sg_ein ? 'LOX.M_ENDPUNKT_AN' : 'LOX.M_ENDPUNKT_AUS')), array());
 }
 
