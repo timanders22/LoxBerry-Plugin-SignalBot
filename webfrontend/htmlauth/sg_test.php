@@ -189,6 +189,9 @@ function sg_pruefungen($mit_netz = false)
 
     /* ---- MQTT ----
        Ausgeschaltet ist eine Entscheidung, kein Fehler: grau (U11, Regeln/04). */
+    // 0.9.44: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $sg_hb = sg_pruef_praefix_haus($cfg);
+    $z[] = sg_pruefzeile($sg_hb[0], sg_e(sg_t('HAUSBEREICH.F_TEST')), $sg_hb[1]);
     $m = sg_mqtt_zustand();
     if (empty($cfg['mqtt_ein'])) {
         $z[] = sg_pruefzeile(-1, sg_t('TEST.F_MQTT'), sg_t('TEST.A_MQTT_AUS'));
@@ -270,6 +273,9 @@ function sg_pruefungen($mit_netz = false)
         : sg_t('TEST.A_SCHLANGE_LEER'));
     list($sg_hl, $sg_ht) = sg_haus_lage($cfg);
     $z[] = sg_pruefzeile($sg_hl === null ? -1 : ($sg_hl === 1 ? 1 : ($sg_hl === -1 ? -1 : 0)), sg_t('TEST.F_HAUS'), $sg_ht);
+    /* 0.9.44: der Meldungs-Leser unter haus/meldung (Statusmeldungen aller Plugins) */
+    list($sg_ml, $sg_mt) = sg_meldung_lage($cfg);
+    $z[] = sg_pruefzeile($sg_ml === null ? -1 : ($sg_ml === 1 ? 1 : ($sg_ml === -1 ? -1 : 0)), sg_t('TEST.F_MELDUNG_HAUS'), $sg_mt);
     $sg_verdeckt = array();
     foreach (sg_haus_woerter($cfg) as $sg_hw) { if (sg_zustand_da($sg_hw)) { $sg_verdeckt[] = $sg_hw; } }
     if ($sg_verdeckt) {
@@ -393,6 +399,10 @@ function sg_pruefungen($mit_netz = false)
     } else {
         $z[] = sg_pruefzeile(0, sg_t('TEST.F_CONFIG'), sg_t('TEST.A_CONFIG_' . strtoupper($lage)));
     }
+    /* 0.9.44 (Entscheidung des Hausherrn 24.11.2026): ein formwidriges Token gilt weiter - hier gemeldet, nie geaendert. */
+    if ($lage === 'ok' && sg_token_formwidrig()) {
+        $z[] = sg_pruefzeile(-1, sg_t('TEST.F_TOKEN_FORM'), sg_t('TEST.A_TOKEN_FORM'));
+    }
 
     /* ---- Stimmt die Themenliste mit dem Sendecode ueberein? (Pflichtzeile)
        Die Themenliste im Reiter MQTT kommt aus sg_mqtt_themen(); gesendet wird
@@ -438,6 +448,12 @@ function sg_pruefungen($mit_netz = false)
         }
     }
 
+    /* 0.9.44: Lade-Beanstandungen (Regeln/05, Sicherungsmodul 1.3.0) - rot, solange ein gespeicherter Wert beim Laden
+     * nicht so gilt, wie er gespeichert ist. */
+    $sg_lb = sg_sicherung_beschreibung();
+    $sg_la = sg_lade_beanstandungen($cfg);
+    $z[] = sg_pruefzeile($sg_la ? 0 : 1, sg_e(sicherung_t('K_LADE_FRAGE', $sg_lb)),
+        $sg_la ? implode('<br>', sicherung_lade_saetze($sg_lb, $sg_la)) : sg_e(sicherung_t('K_LADE_KEINE', $sg_lb)));
     return $z;
 }
 

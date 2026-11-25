@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
 require_once __DIR__ . '/sicherung.php';        // gemeinsames Sicherungsmodul (0.9.39), Abschrift der Stammfassung
+require_once __DIR__ . '/haus_bereiche.php';     // gemeinsame Bereiche unter haus/ (seit 0.9.44, Regeln/07)
 /**
  * Signal Bot fuer LoxBerry - gemeinsame Bibliothek
  *
@@ -345,6 +346,9 @@ function sg_vorgaben()
         'endpunkt_ein'           => 0,        // HTTP-Endpunkt fuer Loxone (Bestand: Lese-Regel -> 1; E-E8)
         'plugin_absender'        => array(),  // Vorschlag 1: freigegebene Absender-Plugins (Ordnernamen)
         'haus_status_ein'        => 0,        // Vorschlag 3: Haus-Werte im Chat
+        /* 0.9.44 (Statusmeldungen aller Plugins, Entscheidung des Hausherrn 23.11.2026 "haus/meldung"): Meldungen
+         * unter haus/meldung/<ordner> annehmen (Begleitprozess bin/sg_meldung.php); ab Werk und nach einem Update aus. */
+        'meldung_haus_ein'       => 0,
         'haus_bereiche'          => array('strom', 'speicher', 'kalender', 'abfuhr', 'usv', 'abfahrt'),
         'gaeste'                 => array(),  // Vorschlag 4: befristete Absender
     );
@@ -434,7 +438,7 @@ function sg_feldname($k)
         'mqtt_topic' => 'EINST.L_MQTT_TOPIC', 'aktionstoken' => 'TEST.F_TOKEN', 'befehle' => 'BEF.H_TITEL',
         'befehle_mqtt_ein' => 'BEFEHL.L_ANNEHMEN', 'befehle_entsperren_ein' => 'BEFEHL.L_ENTSPERREN',
         'endpunkt_ein' => 'LOX.L_ENDPUNKT', 'plugin_absender' => 'EINST.L_PLUGINS',
-        'haus_status_ein' => 'EINST.L_HAUS', 'notiz_ein' => 'EINST.L_NOTIZ', 'haus_bereiche' => 'EINST.L_HAUS_BEREICHE', 'gaeste' => 'GAST.H_TITEL',
+        'haus_status_ein' => 'EINST.L_HAUS', 'meldung_haus_ein' => 'EINST.L_MELDUNG_HAUS', 'notiz_ein' => 'EINST.L_NOTIZ', 'haus_bereiche' => 'EINST.L_HAUS_BEREICHE', 'gaeste' => 'GAST.H_TITEL',
     );
     return isset($karte[$k]) ? sg_t($karte[$k]) : (string) $k;
 }
@@ -494,7 +498,7 @@ function sg_config_maengel($c)
         }
     }
     foreach (array('stille', 'zustand_ein', 'gesperrt', 'audit', 'herzschlag', 'mqtt_ein',
-                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein') as $sk) {
+                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein', 'meldung_haus_ein') as $sk) {
         if (!sg_ist_schalter($hol($sk))) {
             $setze($sk, sprintf(sg_t('EINST.FEHLER_SCHALTER'), sg_e(sg_feldname($sk))));
         }
@@ -506,7 +510,7 @@ function sg_config_maengel($c)
         $setze('plugin_absender', sg_t('EINST.FEHLER_PLUGINS'));
     } else {
         foreach ($pa as $x) {
-            if (!is_string($x) || !preg_match('/^[a-z0-9_]{1,40}$/', $x)) { $setze('plugin_absender', sg_t('EINST.FEHLER_PLUGINS')); }
+            if (!sg_absender_ok($x)) { $setze('plugin_absender', sg_t('EINST.FEHLER_PLUGINS')); }
         }
     }
     $hb = $hol('haus_bereiche');
@@ -635,9 +639,20 @@ function sg_config_lage()
     if ($roh === '' || $roh === '{}') { return 'leer'; }
     $d = json_decode($roh, true);
     if (!is_array($d)) { return 'kaputt'; }
-    if (!isset($d['aktionstoken']) || !is_string($d['aktionstoken'])
-        || !preg_match('/^[A-Za-z0-9]{24,}$/', $d['aktionstoken'])) { return 'token'; }
+    /* 0.9.44 (Entscheidung des Hausherrn 24.11.2026 "formwidriges Token gilt weiter", Lade-Beanstandungen Punkt 2/11): nur ein
+     * FEHLENDES oder leeres Token sperrt den Endpunkt. Bis 0.9.43 auch eines, das nicht ^[A-Za-z0-9]{24,}$ entsprach - der
+     * Endpunkt antwortete dann 503 NICHT_EINGERICHTET, selbst auf das richtige Token. Ein formwidriges nennt der Reiter Test
+     * (sg_token_formwidrig()). */
+    if (!isset($d['aktionstoken']) || !is_string($d['aktionstoken']) || $d['aktionstoken'] === '') { return 'token'; }
     return 'ok';
+}
+
+/** 0.9.44: traegt die Datei ein Token, das nicht die uebliche Form ^[A-Za-z0-9]{24,}$ hat? Es gilt weiter und wird gemeldet. */
+function sg_token_formwidrig()
+{
+    $d = sg_lade_roh();
+    return is_array($d) && isset($d['aktionstoken']) && is_string($d['aktionstoken']) && $d['aktionstoken'] !== ''
+        && !preg_match('/^[A-Za-z0-9]{24,}$/', $d['aktionstoken']);
 }
 
 /** Wann die Konfiguration zuletzt aus der Zweitschrift geheilt wurde (0 = nie). */
@@ -727,6 +742,11 @@ function sg_config($anlegen = true)
         if ($anlegen && $roh !== '') { sg_log_gebremst('config_unlesbar', 'Konfiguration nicht lesbar - es wird nichts geschrieben.'); }
         $cfg = array();
     }
+    /* 0.9.44 (Lade-Beanstandungen, Regeln/05): ein vorhandenes Aktionstoken wird nie ersetzt - auch ein formwidriges
+     * nicht (es wird gemeldet, sg_lade_beanstandungen()); ein neues entsteht nur, wenn der Schluessel fehlt. Bis 0.9.44
+     * wuerfelte jedes Lesen der Oberflaeche ein neues Token, sobald das gespeicherte nicht ^[A-Za-z0-9]{24,}$ traf, und
+     * schrieb die ganze normierte Konfiguration zurueck (gemessen 24.11.2026, lade_pruefstand.py). */
+    $sg_token_da = array_key_exists('aktionstoken', $cfg);
     /* Lese-Regel endpunkt_ein (0.9.30, N8, E-E8): eine eingerichtete Anlage (Datei mit
      * Schluesseln ausser aktionstoken und dem _-Kopf) ohne den Schluessel behaelt ihren
      * HTTP-Endpunkt (1); keine Datei oder {} ist eine Neuinstallation (Vorgabe 0). Ohne
@@ -738,6 +758,12 @@ function sg_config($anlegen = true)
                 break;
             }
         }
+    }
+    /* 0.9.44 (Entscheidung des Hausherrn 24.11.2026 "A: Bestand einschalten"): fehlt meldung_haus_ein, ist er an, wenn
+     * unter plugin_absender schon ein Plugin freigegeben ist (bisher meldete Zigbee2MqttNG so); sonst aus. Eine
+     * Neuinstallation (keine Datei, {}) hat keine Freigabe und bleibt aus. Gespeichert bleibt gespeichert. */
+    if (!array_key_exists('meldung_haus_ein', $cfg)) {
+        $cfg['meldung_haus_ein'] = sg_meldung_bestand($cfg);
     }
     $cfg = array_merge(sg_vorgaben(), $cfg);
 
@@ -752,7 +778,7 @@ function sg_config($anlegen = true)
         $cfg[$sg_k] = max($sg_gr[0], min($sg_gr[1], is_scalar($cfg[$sg_k]) ? (int) $cfg[$sg_k] : $sg_gr[0]));
     }
     foreach (array('gesperrt', 'audit', 'herzschlag', 'stille', 'mqtt_ein', 'zustand_ein',
-                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein') as $sg_k) {
+                   'befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'haus_status_ein', 'notiz_ein', 'meldung_haus_ein') as $sg_k) {
         $cfg[$sg_k] = empty($cfg[$sg_k]) ? 0 : 1;
     }
     foreach (array('konto', 'pin', 'pin_hash', 'gruppe', 'mqtt_topic', 'aktionstoken', 'nacht_von', 'nacht_bis') as $sg_k) {
@@ -801,7 +827,7 @@ function sg_config($anlegen = true)
     $cfg['befehle'] = array_slice(array_values($cfg['befehle']), 0, SG_BEFEHLE);
     /* Seit 0.9.30: Listen als Listen erzwingen (Vorschlag 1, 3, 4). */
     $cfg['plugin_absender'] = is_array($cfg['plugin_absender']) ? array_values(array_unique(array_filter($cfg['plugin_absender'],
-        function ($x) { return is_string($x) && preg_match('/^[a-z0-9_]{1,40}$/', $x); }))) : array();
+        function ($x) { return sg_absender_ok($x); }))) : array();
     $cfg['haus_bereiche'] = is_array($cfg['haus_bereiche'])
         ? array_values(array_intersect(array_keys(sg_haus_bereiche_alle()), $cfg['haus_bereiche'])) : sg_haus_bereiche_werk();
     $sg_gl = array();
@@ -811,7 +837,7 @@ function sg_config($anlegen = true)
     }
     $cfg['gaeste'] = $sg_gl;
 
-    if ($anlegen && $lesbar && !preg_match('/^[A-Za-z0-9]{24,}$/', $cfg['aktionstoken'])) {
+    if ($anlegen && $lesbar && !$sg_token_da) {
         $cfg['aktionstoken'] = sg_token();
         sg_config_write($cfg);
     }
@@ -856,7 +882,7 @@ function sg_config_sperre($nehmen)
  * oder null fuer "nichts schreiben". Rueckgabe: array(geschrieben/ok, Konfiguration).
  * Ohne Sperre wird nicht geschrieben (faellt geschlossen aus).
  */
-function sg_config_aendern($aendern)
+function sg_config_aendern($aendern, $lade_behalten = true)
 {
     if (!sg_config_sperre(true)) {
         sg_log_gebremst('config_sperre', 'Konfiguration: Sperre nicht zu bekommen - nichts geschrieben.');
@@ -866,7 +892,7 @@ function sg_config_aendern($aendern)
     $neu = $aendern($cfg);
     $ok = true;
     if (is_array($neu)) {
-        $ok = sg_config_write($neu);
+        $ok = sg_config_write($neu, $lade_behalten);
         if ($ok) { $cfg = $neu; }
     }
     sg_config_sperre(false);
@@ -920,10 +946,15 @@ function sg_write_atomic($datei, $inhalt, $rechte = 0600)
     return true;
 }
 
-function sg_config_write($cfg)
+function sg_config_write($cfg, $lade_behalten = true)
 {
     $p = sg_paths();
     @mkdir($p['configdir'], 0775, true);
+    /* 0.9.44 (Lade-Beanstandungen, Regeln/05, Entscheidung des Hausherrn "Dateiwert behalten"): ein beim Laden
+     * beanstandetes Feld, das der neue Stand nicht geaendert hat, behaelt seinen gespeicherten Wert - jeder Speicherweg
+     * liest sg_config(), aendert einen Teil und schreibt hier ganz zurueck. Nicht beim Zurueckspielen und nicht beim
+     * Knopf "Angezeigte Werte uebernehmen" ($lade_behalten = false). */
+    if ($lade_behalten) { $cfg = sg_lade_behalten($cfg); }
     $js = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
     // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
@@ -940,6 +971,64 @@ function sg_config_write($cfg)
     }
     sg_config_sperre(false);
     return $ok;
+}
+
+/* ==================================================================
+ * Lade-Beanstandungen (0.9.44; Regeln/05, Sicherungsmodul 1.3.0)
+ *
+ * sg_config() bringt eine von Hand verbogene Datei fuer den Betrieb auf brauchbare Werte (Grenzen, Auswahl, Listen
+ * gefiltert). Das bleibt so - aber jede solche Ersetzung wird gemeldet (Reiter Test rot, Seite gelb, einmal ins
+ * Protokoll) und nie in die Datei zurueckgeschrieben. Gefunden wird sie vom Modul an den ROHEN Dateiwerten, mit
+ * denselben Regeln wie beim Zurueckspielen (sg_config_maengel() ueber 'quer') und am Vergleich mit dem verwendeten
+ * Stand. Bis 0.9.44 still: eine ungueltige stufe 'pin' wurde 'sofort' (PIN-Schutz weg), die Weissliste gekuerzt.
+ * ================================================================== */
+
+/** Die rohen Werte der Konfigurationsdatei (ohne jede Normierung), null = keine lesbare Datei. Schreibt nichts. */
+function sg_lade_roh()
+{
+    $p = sg_paths();
+    clearstatcache(true, $p['config']);
+    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
+    $d = ($roh !== '' && $roh[0] === '{') ? json_decode($roh, true) : null;
+    return is_array($d) ? $d : null;
+}
+
+/** Die Lade-Beanstandungen: rohe Dateiwerte gegen den verwendeten Stand ($cfg, sonst sg_config(false)). */
+function sg_lade_beanstandungen($cfg = null)
+{
+    $d = sg_lade_roh();
+    if ($d === null) { return array(); }
+    return sicherung_lade_beanstandungen(sg_sicherung_beschreibung(), $d, is_array($cfg) ? $cfg : sg_config(false));
+}
+
+/** Vor dem Schreiben: jedes beanstandete Feld, das $cfg nicht geaendert hat, bekommt seinen Dateiwert zurueck. */
+function sg_lade_behalten(array $cfg)
+{
+    $d = sg_lade_roh();
+    if ($d === null) { return $cfg; }
+    $v = sg_config(false);
+    list($cfg, ) = sicherung_lade_behalten($cfg, $d, $v, sicherung_lade_beanstandungen(sg_sicherung_beschreibung(), $d, $v));
+    return $cfg;
+}
+
+/** Beim Start des Bots (bin/sg_bot.php, jede Minute geweckt): fehlende Einstellungen eintragen, dann die
+ *  Lade-Beanstandungen einmal melden. Eine Funktion, damit der Pruefstand genau das aufruft, was der Dienst tut. */
+function sg_dienst_pflege()
+{
+    $r = sg_config_vervollstaendigen();
+    sg_lade_melden(sg_lade_beanstandungen());     // Kennung D
+    return $r;
+}
+
+/** Einmal je Aenderung ins Protokoll (nur Namen und Gruende, nie Werte). */
+function sg_lade_melden(array $beanst)
+{
+    $p = sg_paths();
+    if ($p['tmp'] === '') { return; }
+    @mkdir($p['tmp'], 0775, true);
+    if (sicherung_lade_melden_faellig($beanst, $p['tmp'] . '/lade_beanstandungen.merk')) {
+        sg_log(sicherung_lade_protokollzeile($beanst));
+    }
 }
 
 /** Leere Objekte des Rohtextes ($o, json_decode ohne true) im Feld $a wieder als Objekt fuehren (11.11.2026, Muster
@@ -991,6 +1080,23 @@ function sg_json_leere_objekte($a, $o)
  * Rueckgabe: array('stand' => ohne_wurzel|ruht|ohne_datei|ohne_merkwort|vollstaendig|ergaenzt|fehler,
  *                  'schluessel' => Namen der eingetragenen bzw. fehlenden Schluessel)
  */
+/** 0.9.44 (Lade-Beanstandungen): traegt die Datei ein Aktionstoken (einen nicht leeren Text)? Das ist das Merkwort fuer
+ *  das Vervollstaendigen - auch ein formwidriges Token, denn es bleibt seit 0.9.44 stehen (gemeldet). Bis 0.9.43 hiess
+ *  das sg_config_lage() === 'ok', und eine Datei mit formwidrigem Token wurde nie vervollstaendigt. */
+function sg_config_merkwort_da()
+{
+    $d = sg_lade_roh();
+    return is_array($d) && isset($d['aktionstoken']) && is_string($d['aktionstoken']) && $d['aktionstoken'] !== '';
+}
+
+/** 0.9.44 (Entscheidung des Hausherrn 24.11.2026 "A: Bestand einschalten"): der Wert fuer einen fehlenden Schalter
+ *  meldung_haus_ein - 1, wenn unter plugin_absender schon mindestens ein Plugin freigegeben ist, sonst 0. */
+function sg_meldung_bestand($cfg)
+{
+    return (is_array($cfg) && isset($cfg['plugin_absender']) && is_array($cfg['plugin_absender'])
+            && count($cfg['plugin_absender']) > 0) ? 1 : 0;
+}
+
 function sg_config_vervollstaendigen()
 {
     $p = sg_paths();
@@ -1004,7 +1110,7 @@ function sg_config_vervollstaendigen()
     if (!is_file($p['config'])) {
         return array('stand' => 'ohne_datei', 'schluessel' => array());
     }
-    if (sg_config_lage() !== 'ok') {
+    if (!sg_config_merkwort_da()) {
         return array('stand' => 'ohne_merkwort', 'schluessel' => array());
     }
     if (!sg_config_sperre(true)) {
@@ -1014,7 +1120,7 @@ function sg_config_vervollstaendigen()
     /* Unter der Sperre frisch lesen - ein Speichern der Oberflaeche dazwischen gilt. */
     $roh = trim((string) @file_get_contents($p['config']));
     $datei = ($roh !== '' && $roh[0] === '{') ? json_decode($roh, true) : null;
-    if (!is_array($datei) || sg_config_lage() !== 'ok') {
+    if (!is_array($datei) || !sg_config_merkwort_da()) {
         sg_config_sperre(false);
         return array('stand' => 'ohne_merkwort', 'schluessel' => array());
     }
@@ -1030,7 +1136,8 @@ function sg_config_vervollstaendigen()
         if ($k === 'aktionstoken' || array_key_exists($k, $datei)) {
             continue;
         }
-        $datei[$k] = ($k === 'endpunkt_ein' && $eingerichtet) ? 1 : $w;
+        $datei[$k] = ($k === 'endpunkt_ein' && $eingerichtet) ? 1
+            : (($k === 'meldung_haus_ein') ? sg_meldung_bestand($datei) : $w);     // 0.9.44: Bestand einschalten
         $fehlend[] = $k;
     }
     if (!$fehlend) {
@@ -3673,6 +3780,8 @@ function sg_sicherung_beschreibung()
         'vorgaben' => sg_vorgaben(),
         'schluessel' => $schluessel,
         'nie_aus_datei' => array('ansage_token_herkunft', 'ansage_aus_datei'),
+        /* 0.9.44: nie mit Wert in den Lade-Beanstandungen (Modul 1.3.0) - PIN, PIN-Hash und die Sprechtoken. */
+        'geheim' => array_merge(array('pin', 'pin_hash'), array_map(function ($n) { return 'tts.' . $n; }, ansage_geheim())),
         'pruefen' => function ($k, $w) {
             $aw = sg_ansage_wert($k, $w);
             if ($aw !== null) { return $aw ? '' : sg_t('ANSAGEPLUGIN.M_FEHL') . ' (' . sg_e($k) . ')'; }
@@ -3680,6 +3789,11 @@ function sg_sicherung_beschreibung()
         },
         'quer' => function ($neu) {
             $aus = array();
+            /* 0.9.44: kein Praefix auf einem gemeinsamen Bereich unter haus/ (Regeln/07) - wie im Formular. */
+            if (isset($neu['mqtt_topic']) && is_string($neu['mqtt_topic']) && hb_bereich($neu['mqtt_topic']) !== '') {
+                $aus[] = array('mqtt_topic', '<span class="sm-mono">mqtt_topic</span>: '
+                    . sg_e(sprintf(sg_t('HAUSBEREICH.SICH_W'), hb_bereich($neu['mqtt_topic']))));
+            }
             foreach (sg_config_maengel($neu) as $feld => $text) {
                 $aus[] = array((string) $feld, '<span class="sm-mono">' . sg_e($feld) . '</span>: ' . $text);
             }
@@ -3689,7 +3803,8 @@ function sg_sicherung_beschreibung()
         'jetzt' => function () { return sg_config(); },
         'vorbereiten' => function ($neu) { $h = array(); return sg_sicherung_vorbereiten($neu, '', $h); },
         'speichern' => function ($neu) {
-            list($ok, ) = sg_config_aendern(function ($alt) use ($neu) { return $neu; });
+            // 0.9.44: die Werte einer Sicherung sind ausdruecklich - kein "Dateiwert behalten" (Regeln/05)
+            list($ok, ) = sg_config_aendern(function ($alt) use ($neu) { return $neu; }, false);
             return $ok;
         },
         'zweitschrift' => function () { $q = sg_paths(); return array($q['config'], $q['sicherung']); },
@@ -4182,6 +4297,7 @@ function sg_status_zaehler_weiter()
 function sg_mqtt_status(array $cfg, $ok, $voll)
 {
     if (empty($cfg['mqtt_ein'])) { return 0; }
+    sg_praefix_haus_melden($cfg);   // 0.9.44: Praefix im gemeinsamen Bereich? melden, nicht anhalten
     $w = sg_status_werte($cfg, true);
     $w['ok'] = $ok ? 1 : 0;
     $w['ts'] = time();
@@ -4457,7 +4573,7 @@ function sg_befehl_senden_mqtt(array $cfg, $aktion, array $par)
 function sg_plugin_nachricht(array $cfg, $absender, $roh)
 {
     $frei = isset($cfg['plugin_absender']) && is_array($cfg['plugin_absender']) ? $cfg['plugin_absender'] : array();
-    if (!preg_match('/^[a-z0-9_]{1,40}$/', (string) $absender) || !in_array($absender, $frei, true)) {
+    if (!sg_absender_ok($absender) || !in_array($absender, $frei, true)) {
         return array(array(), 'ABSENDER_NICHT_FREIGEGEBEN');
     }
     $par = array('absender' => $absender, 'text' => $roh, 'dringend' => 0);
@@ -4496,7 +4612,7 @@ function sg_anhang_ordner()
 function sg_plugin_bild($absender, $pfad)
 {
     $p = sg_paths();
-    if ($p['home'] === '' || !preg_match('/^[a-z0-9_]{1,40}$/', (string) $absender)) { return array('', 'BILD_UNZULAESSIG'); }
+    if ($p['home'] === '' || !sg_absender_ok($absender)) { return array('', 'BILD_UNZULAESSIG'); }
     $basis = realpath($p['home'] . '/data/plugins/' . $absender);
     $echt = realpath((string) $pfad);
     if (!$basis || !$echt || strpos($echt, rtrim($basis, '/\\') . DIRECTORY_SEPARATOR) !== 0) { return array('', 'BILD_UNZULAESSIG'); }
@@ -4746,7 +4862,8 @@ function sg_bruecke_vorlage()
 /**
  * Vorschlag 1: die Ordnernamen der installierten Plugins (data/system/plugindatabase.json, nur gelesen; duldsam:
  * {"plugins": {md5: {...}}}, eine Liste oder die Eintraege ohne "plugins"). Ohne den eigenen Ordner. Nur Namen
- * aus [a-z0-9_]{1,40} - so steht ein Absender im Thema plugin/<ordner>.
+ * nach sg_absender_ok() (seit 0.9.44 auch mit Bindestrich, etwa chromecast-4lox-ng: der Weg haus/meldung/<ordner>
+ * nimmt sie an; der alte Weg plugin/<ordner> ueber die Befehlsbruecke kennt weiter nur [a-z0-9_]).
  */
 function sg_plugins_installiert()
 {
@@ -4759,7 +4876,7 @@ function sg_plugins_installiert()
     foreach ($liste as $e) {
         if (!is_array($e) || !isset($e['folder']) || !is_string($e['folder'])) { continue; }
         $f = $e['folder'];
-        if ($f !== $p['plugin'] && preg_match('/^[a-z0-9_]{1,40}$/', $f)) { $aus[] = $f; }
+        if ($f !== $p['plugin'] && sg_absender_ok($f)) { $aus[] = $f; }
     }
     $aus = array_values(array_unique($aus));
     sort($aus);
@@ -4799,7 +4916,7 @@ function sg_pin_migrieren(array $c)
 function sg_sicherung_spaet()
 {
     return array('befehle_mqtt_ein', 'befehle_entsperren_ein', 'endpunkt_ein', 'plugin_absender',
-                 'haus_status_ein', 'haus_bereiche', 'gaeste', 'notiz_ein');
+                 'haus_status_ein', 'haus_bereiche', 'gaeste', 'notiz_ein', 'meldung_haus_ein');
 }
 
 /** Ein Gast-Eintrag in der gespeicherten Form - oder null. */
@@ -5555,4 +5672,245 @@ function sg_konto_weg($cfg, $lebt)
     $n = sg_notiz_stand();
     if ($n['ts'] > 0) { return 'A'; }
     return 'unbekannt';
+}
+
+/**
+ * 0.9.44 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): Zeile im Reiter Test -
+ * faellt das gespeicherte Themen-Praefix auf einen gemeinsamen Bereich unter haus/? Speichern und Zurueckspielen
+ * weisen ein solches Praefix ab; ein schon gespeichertes bleibt in Betrieb und ist hier rot, grau bei ausgeschaltetem MQTT.
+ * Liste und Pruefung aus dem gemeinsamen Modul haus_bereiche.php. Rueckgabe array(stand, html).
+ */
+function sg_pruef_praefix_haus($cfg)
+{
+    $p = (isset($cfg['mqtt_topic']) && (string) $cfg['mqtt_topic'] !== '' ? (string) $cfg['mqtt_topic'] : 'signalbot');
+    $b = hb_bereich($p);
+    if ($b !== '') {
+        if (!(!empty($cfg['mqtt_ein']))) {
+            return array(-1, sprintf(sg_t('HAUSBEREICH.A_AUS'), sg_e($p), sg_e($b)));
+        }
+        return array(0, sprintf(sg_t('HAUSBEREICH.A_NEIN'), sg_e($p), sg_e($b)));
+    }
+    return array(1, sprintf(sg_t('HAUSBEREICH.A_JA'), sg_e($p)));
+}
+
+/**
+ * 0.9.44: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich faellt; der
+ * Versand bleibt, wie er ist. Gemerkt in praefix_haus_gemeldet.txt im Datenordner. Rueckgabe der Bereich oder ''.
+ */
+function sg_praefix_haus_melden($cfg, $merk = null)
+{
+    $p = (isset($cfg['mqtt_topic']) && (string) $cfg['mqtt_topic'] !== '' ? (string) $cfg['mqtt_topic'] : 'signalbot');
+    if ($merk === null) {
+        $merk = sg_paths()['datadir'] . '/praefix_haus_gemeldet.txt';
+    }
+    $b = hb_melden_faellig($p, $merk);
+    if ($b !== '') {
+        sg_log(hb_logtext($p, $b));
+    }
+    return $b;
+}
+
+/* ==================================================================
+ * Seit 0.9.44: Statusmeldungen der Plugins unter haus/meldung/<ordner>
+ * (Auftrag des Hausherrn 23.11.2026, Entscheidung "haus/meldung (Empfehlung)")
+ * ================================================================== */
+
+/**
+ * Ein Absender-Ordner: Kleinbuchstaben, Ziffern, '_' und (seit 0.9.44) '-', 1 bis 40 Zeichen, nicht mit '-' oder '_'
+ * beginnend. Bis 0.9.43 nur [a-z0-9_] - Plugins mit Bindestrich im Ordner (chromecast-4lox-ng, smartmeter-classic)
+ * liessen sich nicht freigeben. Der alte Weg plugin/<ordner> ueber die Befehlsbruecke kennt weiter nur [a-z0-9_].
+ */
+function sg_absender_ok($x)
+{
+    return is_string($x) && preg_match('/^[a-z0-9][a-z0-9_-]{0,39}\z/', $x) === 1;
+}
+
+if (!defined('SG_MELDUNG_WURZEL')) { define('SG_MELDUNG_WURZEL', 'haus/meldung'); }
+if (!defined('SG_MELDUNG_MAX')) { define('SG_MELDUNG_MAX', 4000); }
+if (!defined('SG_MELDUNG_WIEDERHOLT')) { define('SG_MELDUNG_WIEDERHOLT', 60); }
+
+/** Laeuft der Begleitprozess bin/sg_meldung.php (haelt er seine Sperre)? */
+function sg_meldung_laeuft()
+{
+    $f = sg_paths()['tmp'] . '/meldung.lock';
+    if (!is_file($f)) { return false; }
+    $fh = @fopen($f, 'r');
+    if (!$fh) { return false; }
+    $laeuft = !flock($fh, LOCK_EX | LOCK_NB);
+    if (!$laeuft) { flock($fh, LOCK_UN); }
+    fclose($fh);
+    return $laeuft;
+}
+
+/** Das Abbild des Begleitprozesses (tmp/meldung_lage.json): verbunden seit, letzte Meldung (Zeit, Absender, Ergebnis). */
+function sg_meldung_abbild()
+{
+    $f = sg_paths()['tmp'] . '/meldung_lage.json';
+    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+    return is_array($d) ? $d : array();
+}
+
+/**
+ * Lage fuer den Reiter Test: array(1|0|-1|null, Text). null = Haken aus; 0 = Haken an, Begleitprozess steht;
+ * -1 = verbunden, aber kein freigegebener Absender; 1 = verbunden.
+ */
+function sg_meldung_lage(array $cfg)
+{
+    if (empty($cfg['meldung_haus_ein'])) { return array(null, sg_t('MELD.L_AUS')); }
+    if (!sg_meldung_laeuft()) { return array(0, sg_t('MELD.L_STEHT')); }
+    $a = sg_meldung_abbild();
+    $seit = isset($a['verbunden']) ? (int) $a['verbunden'] : 0;
+    $txt = sprintf(sg_t('MELD.L_VERBUNDEN'), SG_MELDUNG_WURZEL . '/+', $seit > 0 ? date('d.m. H:i', $seit) : '-');
+    if (isset($a['letzte']['zeit'], $a['letzte']['absender'], $a['letzte']['ergebnis'])) {
+        $txt .= ' ' . sprintf(sg_t('MELD.L_LETZTE'), date('d.m. H:i', (int) $a['letzte']['zeit']), sg_e((string) $a['letzte']['absender']),
+                              sg_e((string) $a['letzte']['ergebnis']));
+    }
+    $frei = isset($cfg['plugin_absender']) && is_array($cfg['plugin_absender']) ? $cfg['plugin_absender'] : array();
+    if (!$frei) { return array(-1, $txt . ' ' . sg_t('MELD.L_KEIN_ABSENDER')); }
+    return array(1, $txt);
+}
+
+/** Eine Quittung auf derselben Verbindung senden (QoS 0, nie retained). */
+function sg_meldung_quittieren($s, $thema, $text)
+{
+    $rumpf = pack('n', strlen($thema . '/quittung')) . $thema . '/quittung' . $text;
+    return sg_broker_schreiben($s, chr(0x30) . sg_broker_laenge(strlen($rumpf)) . $rumpf);
+}
+
+/**
+ * Eine Nachricht unter haus/meldung/<ordner> behandeln: array(Quittung|null, Ergebniswort). null = keine Quittung
+ * (retained: eine zurueckbehaltene Meldung wird verworfen, wie auf dem alten Weg). Pruefreihenfolge: retained ->
+ * Ordnername -> Groesse -> Wiederholung (dieselbe Nutzlast desselben Absenders binnen 60 s) -> sg_befehl_senden_mqtt()
+ * (Freigabe, Nutzlast, Bremse, Ziele, Nachtruhe - derselbe Weg wie plugin/<ordner>).
+ */
+function sg_meldung_behandeln(array $cfg, $thema, $nutzlast, $retain, array &$gesehen, $jetzt)
+{
+    if ($retain) { return array(null, 'retained'); }
+    $teile = explode('/', $thema);
+    if (count($teile) !== 3 || $teile[0] . '/' . $teile[1] !== SG_MELDUNG_WURZEL) { return array(null, 'fremd'); }
+    $absender = $teile[2];
+    if (!sg_absender_ok($absender)) { return array('abgelehnt: ABSENDER_NICHT_FREIGEGEBEN', 'ABSENDER_NICHT_FREIGEGEBEN'); }
+    if (strlen($nutzlast) > SG_MELDUNG_MAX) { return array('abgelehnt: NUTZLAST_UNGUELTIG', 'NUTZLAST_UNGUELTIG'); }
+    foreach ($gesehen as $sch => $t) { if ($jetzt - $t >= SG_MELDUNG_WIEDERHOLT) { unset($gesehen[$sch]); } }
+    $sch = $absender . '|' . md5($nutzlast);
+    if (isset($gesehen[$sch])) {
+        return array('abgelehnt: wiederholt (vor ' . max(0, $jetzt - $gesehen[$sch]) . ' s)', 'wiederholt');
+    }
+    $gesehen[$sch] = $jetzt;
+    list($code, $zeile) = sg_befehl_senden_mqtt($cfg, 'plugin', array('absender' => $absender, 'roh' => $nutzlast));
+    if ((int) $code === 200) { return array('angenommen', 'angenommen'); }
+    $g = preg_match('/GRUND=([A-Za-z0-9_]+)/', (string) $zeile, $m) ? $m[1] : 'ABGELEHNT';
+    return array('abgelehnt: ' . $g, $g);
+}
+
+/**
+ * Der Begleitprozess bin/sg_meldung.php: Dauerverbindung zum Broker des LoxBerry (Client-ID sgmeld<pid>, saubere
+ * Sitzung, Keepalive 60 s), abonniert haus/meldung/+ (eine Ebene: die Quittungen unter .../quittung sieht er nicht),
+ * behandelt jede Nachricht mit sg_meldung_behandeln() und quittiert auf derselben Verbindung. Schreibt hoechstens alle
+ * 2 s tmp/meldung_lage.json (ohne Text). Rueckzug 5/10/.../60 s bei Verbindungsverlust, gebremste Protokollzeile.
+ * Endet, sobald der Haken aus ist (Blick je 60 s) oder die Upgrade-Marke liegt. $ende > 0 nur fuer Proben.
+ */
+function sg_meldung_lauf($ende = 0)
+{
+    $datei = sg_tmpdir() . '/meldung_lage.json';
+    $folge = 0;
+    $gelaufen = false;
+    $gesehen = array();
+    while (true) {
+        if ($ende && time() >= $ende) { return 0; }
+        $cfg = sg_config();
+        if (empty($cfg['meldung_haus_ein'])) { if ($gelaufen) { sg_log('Meldungs-Leser beendet (Haken aus).'); } return 0; }
+        if (sg_upgrade_marke()) { if ($gelaufen) { sg_log('Meldungs-Leser beendet (Aktualisierung laeuft).'); } return 0; }
+        if (!$gelaufen) { sg_log('Meldungs-Leser gestartet (' . SG_MELDUNG_WURZEL . '/+).'); }
+        $gelaufen = true;
+        $v = sg_broker_verbinden('sgmeld', 60);
+        $ok = false;
+        if ($v['s'] !== null) {
+            stream_set_timeout($v['s'], SG_BROKER_FRIST);
+            $ok = sg_broker_abonnieren($v['s'], array(SG_MELDUNG_WURZEL . '/+'), 1);
+            if (!$ok) { $v['grund'] = 'der Broker nimmt das Abo nicht an'; sg_broker_trennen($v['s']); }
+        }
+        if (!$ok) {
+            $folge++;
+            if ($folge === 1 || $folge % 10 === 0) {
+                sg_log_gebremst('meld_zu', 'Meldungs-Leser: Broker ' . ($v['ziel'] !== '' ? $v['ziel'] : '(unbekannt)')
+                    . ' nicht nutzbar - ' . $v['grund'] . ' (Versuch ' . $folge . ').', 600);
+            }
+            $pause = min(60, 5 * $folge);
+            for ($i = 0; $i < $pause; $i++) {
+                if ($ende && time() >= $ende) { return 0; }
+                sleep(1);
+            }
+            continue;
+        }
+        if ($folge > 0) { sg_log('Meldungs-Leser: Broker wieder erreichbar.'); }
+        $folge = 0;
+        $s = $v['s'];
+        stream_set_timeout($s, 1);
+        $abbild = sg_meldung_abbild();
+        $abbild['verbunden'] = time();
+        $letzt_paket = time();
+        $letzt_ping = time();
+        $letzt_blick = time();
+        $letzt_schreiben = 0;
+        $schmutzig = true;
+        while (true) {
+            $jetzt = time();
+            if ($ende && $jetzt >= $ende) { break; }
+            $r = array($s); $wx = null; $ex = null;
+            $n = @stream_select($r, $wx, $ex, 1);
+            if ($n === false) { break; }
+            if ($n > 0) {
+                $pk = sg_broker_paket($s);
+                if ($pk === null) {
+                    $meta = stream_get_meta_data($s);
+                    if (!empty($meta['eof']) || feof($s)) { sg_log_gebremst('meld_abbruch', 'Meldungs-Leser: Verbindung zum Broker abgebrochen - neu verbinden.', 600); break; }
+                } else {
+                    $letzt_paket = time();
+                    $pub = sg_broker_publish_lesen($pk);
+                    if ($pub !== null) {
+                        list($thema, $nutzlast, $retain) = $pub;
+                        $cfg = sg_config();
+                        list($q, $wort) = sg_meldung_behandeln($cfg, $thema, $nutzlast, $retain, $gesehen, time());
+                        if ($q !== null) {
+                            if (!sg_meldung_quittieren($s, $thema, $q)) { break; }
+                            $abbild['letzte'] = array('zeit' => time(), 'absender' => (string) substr($thema, strlen(SG_MELDUNG_WURZEL) + 1, 40),
+                                                      'ergebnis' => $wort);
+                            if ($wort !== 'angenommen') {
+                                sg_log_gebremst('meld_ab_' . md5($thema . $wort), 'Meldungs-Leser: Meldung unter ' . $thema . ' abgelehnt: ' . $wort . '.', 3600);
+                            }
+                            $schmutzig = true;
+                        }
+                    }
+                }
+            }
+            $jetzt = time();
+            if ($jetzt - $letzt_ping >= 30) {
+                if (!sg_broker_schreiben($s, chr(0xC0) . chr(0))) { break; }
+                $letzt_ping = $jetzt;
+            }
+            if ($jetzt - $letzt_paket > 90) {
+                sg_log_gebremst('meld_still', 'Meldungs-Leser: 90 s keine Antwort des Brokers - neu verbinden.', 600);
+                break;
+            }
+            if ($schmutzig && $jetzt - $letzt_schreiben >= 2) {
+                $js = json_encode($abbild, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                if ($js !== false && sg_write_atomic($datei, $js, 0600)) { $schmutzig = false; $letzt_schreiben = $jetzt; }
+            }
+            if ($jetzt - $letzt_blick >= 60) {
+                $letzt_blick = $jetzt;
+                $cfg = sg_config();
+                if (sg_upgrade_marke() || empty($cfg['meldung_haus_ein'])) { break; }
+            }
+        }
+        if ($schmutzig) {
+            $js = json_encode($abbild, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($js !== false) { sg_write_atomic($datei, $js, 0600); }
+        }
+        sg_broker_trennen($s);
+        if ($ende && time() >= $ende) { return 0; }
+        $cfg = sg_config();
+        if (empty($cfg['meldung_haus_ein'])) { sg_log('Meldungs-Leser beendet (Haken aus).'); return 0; }
+        sleep(2);
+    }
 }

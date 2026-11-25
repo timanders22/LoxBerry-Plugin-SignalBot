@@ -67,3 +67,9 @@ fi
 # Chat abfragen' endet er sofort und still; laeuft er schon, endet der Aufruf an seiner
 # Sperre. Eigener Prozess, nicht Kind des Bots.
 /usr/bin/php REPLACELBPBINDIR/sg_haus.php >> "$LOG" 2>&1 &
+
+# ---- Meldungs-Leser (seit 0.9.44, Statusmeldungen aller Plugins unter haus/meldung) ----
+#
+# Ohne den Haken 'Meldungen unter haus/meldung annehmen' endet er sofort und still;
+# laeuft er schon, endet der Aufruf an seiner Sperre. Eigener Prozess, nicht Kind des Bots.
+/usr/bin/php REPLACELBPBINDIR/sg_meldung.php >> "$LOG" 2>&1 &

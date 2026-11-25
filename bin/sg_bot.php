@@ -103,7 +103,7 @@ if ($modus === 'test') {
  * ruft diese Datei jede Minute, und ein Aufruf bei laufendem Bot endet an der Sperre. So holt der erste Weckruf
  * nach einer Aktualisierung das Vervollstaendigen nach, auch wenn postinstall.sh den Bot noch mit Marke gestartet
  * hat (dann ruht die Funktion). Schreibt nur, wenn etwas fehlt, unter der Sperre der Konfiguration. */
-sg_config_vervollstaendigen();
+sg_dienst_pflege();     // 0.9.44: vervollstaendigen und Lade-Beanstandungen einmal melden (Regeln/05)
 
 /* ---- Nur ein Lauf gleichzeitig ---- */
 $sperre = sg_tmpdir() . '/bot.lock';

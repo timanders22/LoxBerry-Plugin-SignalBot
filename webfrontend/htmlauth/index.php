@@ -331,11 +331,11 @@ if ($sg_post && isset($_POST['speichern'])) {
     $sg_formfelder = array('rpc_url', 'erlaubt', 'stille', 'bremse', 'pin_versuche', 'pin_sperre',
                            'zustand_ein', 'audit', 'herzschlag', 'gruppe', 'nacht_von', 'nacht_bis',
                            'quittung_takt', 'quittung_max', 'pin_loeschen', 'plugin_absender', 'haus_status_ein',
-                           'haus_bereiche', 'notiz_ein');
+                           'haus_bereiche', 'notiz_ein', 'meldung_haus_ein');
     $sg_eigene = array('rpc_url', 'konto', 'erlaubt', 'pin', 'bremse', 'pin_versuche', 'pin_sperre',
                        'gruppe', 'nacht_von', 'nacht_bis', 'quittung_takt', 'quittung_max',
                        'stille', 'zustand_ein', 'audit', 'herzschlag', 'plugin_absender', 'haus_status_ein',
-                       'haus_bereiche', 'notiz_ein');
+                       'haus_bereiche', 'notiz_ein', 'meldung_haus_ein');
     $sg_falsch = array();   // Formularfeld => Meldung
     $sg_werte = array();    // Schluessel => Wert
 
@@ -395,7 +395,7 @@ if ($sg_post && isset($_POST['speichern'])) {
     $sg_werte['nacht_bis'] = trim(sg_post_text('nacht_bis'));
     /* mqtt_ein und mqtt_topic wohnen im Reiter MQTT und haben dort ein eigenes
      * Formular; sie werden hier nicht angefasst. */
-    foreach (array('stille', 'zustand_ein', 'audit', 'herzschlag', 'haus_status_ein', 'notiz_ein') as $sg_hk) {
+    foreach (array('stille', 'zustand_ein', 'audit', 'herzschlag', 'haus_status_ein', 'notiz_ein', 'meldung_haus_ein') as $sg_hk) {
         $sg_werte[$sg_hk] = isset($_POST[$sg_hk]) ? 1 : 0;
     }
     /* Seit 0.9.30: freigegebene Absender-Plugins (Vorschlag 1) und Haus-Bereiche (Vorschlag 3) - Haekchenlisten,
@@ -465,6 +465,14 @@ if ($sg_post && isset($_POST['save_mqtt'])) {
     $sg_mtopic = trim(sg_post_text('mqtt_topic'));
     if (!sg_thema_gueltig($sg_mtopic, 64)) {
         $sg_falsch['mqtt_topic'] = sg_t('EINST.FEHLER_TOPIC');
+    }
+    /* 0.9.44 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): kein Praefix auf einem
+     * gemeinsamen Bereich unter haus/ - nur hier und beim Zurueckspielen, nicht in der Pruefung beim Lesen der
+     * Konfiguration: ein schon gespeichertes bleibt in Betrieb, der Reiter Test meldet es. */
+    if (!isset($sg_falsch['mqtt_topic']) && hb_bereich($sg_mtopic) !== ''
+        && $sg_mtopic !== (string) sg_config()['mqtt_topic']) {   // nur NEUE Eingaben: ein schon gespeichertes Praefix sperrt das Speichern
+        // des Reiters nicht (Regeln/07; Bauart Einspeisebremse 0.9.25)
+        $sg_falsch['mqtt_topic'] = sprintf(sg_e(sg_t('HAUSBEREICH.FEHLER')), sg_e($sg_mtopic), sg_e(hb_bereich($sg_mtopic)));
     }
     $sg_mein = isset($_POST['mqtt_ein']) ? 1 : 0;
     /* Seit 0.9.30: die Befehlsbruecke (zwei Haken, ab Werk aus; E-E6). */
@@ -757,6 +765,28 @@ if ($sg_post && isset($_POST['sg_zurueck'])) {
     sg_umleiten('tab-settings', array_merge($sg_sm['hinweise'], $sg_pinh), array_merge($sg_sm['fehler'], $sg_bf));
 }
 
+/* ================= Lade-Beanstandungen: angezeigte Werte uebernehmen (0.9.44) =================
+ * Nur mit gesetztem Haken (Entscheidung des Hausherrn 24.11.2026, "Haken im gelben Kasten"); ohne ihn bleibt die Datei
+ * byte-gleich. Unter der Sperre frisch gelesen; geschrieben ohne "Dateiwert behalten". */
+if ($sg_post && sicherung_lade_eingang($_POST) !== '') {
+    $sg_lb = sg_sicherung_beschreibung();
+    if (sicherung_lade_eingang($_POST) !== 'ja') {
+        sg_umleiten($sg_tab, array(), array(sg_e(sicherung_t('K_LADE_HAKEN_FEHLT', $sg_lb))));
+    }
+    $sg_un = array();
+    list($sg_ok, ) = sg_config_aendern(function ($alt) use ($sg_lb, &$sg_un) {
+        $d = sg_lade_roh();
+        if ($d === null) { return null; }
+        list($neu, $sg_un) = sicherung_lade_uebernehmen_stand($d, $alt, sicherung_lade_beanstandungen($sg_lb, $d, $alt));
+        return $sg_un ? $neu : null;
+    }, false);
+    if (!$sg_ok) {
+        sg_umleiten($sg_tab, array(), array(sprintf(sg_t('EINST.FEHLER_SPEICHERN'), sg_e(sg_paths()['config']))));
+    }
+    if ($sg_un) { sg_log('Lade-Beanstandungen: angezeigte Werte uebernommen: ' . implode(', ', array_map('sicherung_name', $sg_un))); }
+    sg_umleiten($sg_tab, array(sprintf(sicherung_t('K_LADE_UEBERNOMMEN', $sg_lb), sg_e(implode(', ', $sg_un)))), array());
+}
+
 /* Ein POST, den kein Handler kennt, endet ebenfalls mit einer Umleitung. */
 if ($sg_post) {
     sg_umleiten($sg_tab, array(), array(sg_t('TEST.M_UNBEKANNT')));
@@ -777,6 +807,9 @@ $sg_eingaben = (isset($sg_flash['eingaben']) && is_array($sg_flash['eingaben'])
     && is_array($sg_flash['eingaben']['werte']) && is_array($sg_flash['eingaben']['falsch']))
     ? $sg_flash['eingaben'] : null;
 $sg_trockentext = (isset($sg_flash['trockentext']) && is_string($sg_flash['trockentext'])) ? $sg_flash['trockentext'] : 'hilfe';
+/* 0.9.44: Lade-Beanstandungen (Regeln/05) - fuer den gelben Kasten; einmal je Aenderung ins Protokoll. */
+$sg_lade = sg_lade_beanstandungen();
+sg_lade_melden($sg_lade);
 
 /* ---------------- X-2: Werte und Markierung nach einer Beanstandung ---------------- */
 /** Ist dieses Formular das beanstandete? */
@@ -964,6 +997,8 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-fehler"><ul style="margin:0;padding-left:18px;">
 <?php foreach ($sg_fehler as $sg_f) { ?><li><?= $sg_f ?></li><?php } ?></ul></div>
 <?php } ?>
+<?= sicherung_lade_kasten(sg_sicherung_beschreibung(), $sg_lade,
+        sg_fmt() . '<input data-role="none" type="hidden" name="activetab" value="' . sg_e($sg_tab) . '">') ?>
 
 <?php /* Kopf (Entscheidung Nr. 43, seit 0.9.27): Statusuebersicht ueber den
    Reitern, immer sichtbar. Bis 0.9.26 standen dieselben vier Werte als Kacheln
@@ -1260,6 +1295,16 @@ $sg_cmd_ver = "curl -s " . $sg_rpc_adr . " -H 'Content-Type: application/json' -
     <span class="sm-mono"><?= sg_e($sg_pl) ?></span>
   </label>
 <?php } ?>
+</div>
+<?php /* 0.9.44 (Statusmeldungen aller Plugins, Entscheidung des Hausherrn 23.11.2026 "haus/meldung"): Meldungen unter
+         haus/meldung/<ordner> annehmen - Begleitprozess bin/sg_meldung.php; ab Werk und nach einem Update aus. Die
+         Freigabe je Ordner oben gilt fuer beide Wege. */ ?>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="meldung_haus_ein" value="1" <?= sg_fh('settings', 'meldung_haus_ein', !empty($sg_cfg['meldung_haus_ein'])) ? 'checked' : '' ?>>
+    <?= sg_e(sg_t('EINST.L_MELDUNG_HAUS')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sg_t('EINST.H_MELDUNG_HAUS_TEXT') ?></div>
 </div>
 
 <?php /* Seit 0.9.30 (Vorschlag 3, E-E15/E-E16): Haus-Werte im Chat ("status strom" ...). Liest ueber den Broker des

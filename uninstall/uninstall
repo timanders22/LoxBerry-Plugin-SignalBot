@@ -47,6 +47,7 @@ if [ "$SG_OK" = 1 ] && [ -n "$ARGV5" ]; then
     BBPHP="$ARGV5/bin/plugins/$ARGV3/befehlsbruecke.php"
     BBDIR="$ARGV5/data/plugins/$ARGV3/befehle"
     HAUS="$ARGV5/bin/plugins/$ARGV3/sg_haus.php"
+    MELD="$ARGV5/bin/plugins/$ARGV3/sg_meldung.php"
     if [ -f "$BBSH" ]; then
         timeout 40 bash "$BBSH" stop
     fi
@@ -58,7 +59,7 @@ if [ "$SG_OK" = 1 ] && [ -n "$ARGV5" ]; then
             kill -9 "${d#/proc/}" 2>/dev/null
             BB_REST=$((BB_REST + 1))
         fi
-        if [ "${#a[@]}" -eq 2 ] && [ "${a[1]}" = "$HAUS" ] && [[ "${a[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+        if [ "${#a[@]}" -eq 2 ] && { [ "${a[1]}" = "$HAUS" ] || [ "${a[1]}" = "$MELD" ]; } && [[ "${a[0]}" =~ (^|/)php[0-9.]*$ ]]; then
             kill "${d#/proc/}" 2>/dev/null
             SG_HN=$((SG_HN + 1))
         fi

@@ -180,14 +180,16 @@ fi
 # Lauf aus der alten Fassung wird hier argumentweise gesucht und beendet: argv[0]
 # ein php, argv[1] GENAU der eigene Pfad, kein argv[2] (wie sg_ist_dienst).
 HAUS="$ARGV5/bin/plugins/$ARGV3/sg_haus.php"
+# 0.9.44: ebenso den Meldungs-Leser (haus/meldung)
+MELD="$ARGV5/bin/plugins/$ARGV3/sg_meldung.php"
 SG_HN=0
 for sg_d in /proc/[0-9]*; do
     mapfile -d '' -t sg_av 2>/dev/null < "$sg_d/cmdline" || continue
-    if [ "${#sg_av[@]}" -eq 2 ] && [ "${sg_av[1]}" = "$HAUS" ] && [[ "${sg_av[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+    if [ "${#sg_av[@]}" -eq 2 ] && { [ "${sg_av[1]}" = "$HAUS" ] || [ "${sg_av[1]}" = "$MELD" ]; } && [[ "${sg_av[0]}" =~ (^|/)php[0-9.]*$ ]]; then
         kill "${sg_d#/proc/}" 2>/dev/null && SG_HN=$((SG_HN + 1))
     fi
 done
-[ "$SG_HN" -gt 0 ] && echo "<OK> Haus-Leser der alten Fassung beendet ($SG_HN)."
+[ "$SG_HN" -gt 0 ] && echo "<OK> Haus- oder Meldungs-Leser der alten Fassung beendet ($SG_HN)."
 
 # ---- endpunkt_ein fuer den Bestand (seit 0.9.30, E-E8, N8) ----
 #

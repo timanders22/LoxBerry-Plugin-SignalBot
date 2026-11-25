@@ -8,6 +8,26 @@ Alles laeuft auf dem eigenen Geraet: signal-cli haengt sich als Zweitgeraet an
 ein bestehendes Signal-Konto, die Nachrichten sind Ende-zu-Ende verschluesselt,
 ein Cloud-Dienst ist nicht beteiligt.
 
+## Neu in 0.9.44
+
+- **Themen-Präfix auf einem gemeinsamen Bereich (Entscheidung des Hausherrn 23.11.2026 „Nur gemeinsame Bereiche“):** Ein MQTT-Präfix, das einer der gemeinsamen Bereiche unter `haus/` ist oder darin beginnt (`haus/<bereich>` bzw. `haus/<bereich>/…` für abfahrt, abfuhr, alarm, ansage, anwesenheit, energie, fahrzeug, kalender, klima, pv, raumklima, sonne, speicher, strompreis, szene, tag, tuer, usv, wetter), weisen Speichern im Reiter *MQTT* und das Zurückspielen einer Sicherung jetzt mit Namen ab: Dort liefern die Plugins einander Zustände ohne eigenes Präfix. `haus` allein und andere Präfixe unter `haus/` (etwa `haus/fenster`) bleiben erlaubt; Groß und Klein zählen wie bei MQTT. Ist ein solches Präfix schon gespeichert, ändert sich am Betrieb nichts – das Plugin sendet weiter darunter, nennt es einmal im Protokoll, und der Reiter *Test* zeigt die Zeile „Liegt das Themen-Präfix außerhalb der gemeinsamen Bereiche unter haus/?“ rot. Liste und Texte kommen aus dem gemeinsamen Modul `haus_bereiche.php`.
+- **Gespeicherte Einstellungen, die beim Laden nicht gelten (Entscheidung des Hausherrn 23./24.11.2026, Regeln/05 „Lade-Beanstandungen“):** Trägt die Datei `signalbot.json` einen ungültigen Wert (von Hand bearbeitet oder aus einer alten Fassung), verwendet der Bot für den Betrieb weiter einen sicheren Wert, sagt es aber jetzt: ein gelber Kasten über den Reitern nennt jedes Feld mit gespeichertem und verwendetem Wert, der Reiter *Test* zeigt die Zeile „Gelten die gespeicherten Einstellungen beim Laden so, wie sie gespeichert sind?“ rot, und das Protokoll nennt die Namen einmal je Änderung. Bis 0.9.43 geschah das still: Eine ungültige Stufe eines Befehls wurde „sofort“ (der PIN-Schutz fiel weg), die Liste der erlaubten Rufnummern wurde gekürzt, ein Aktionstoken außerhalb des Musters wurde durch ein neues ersetzt, und die bereinigten Werte wurden in die Datei zurückgeschrieben. Jetzt bleibt die Datei, wie sie ist: Speichern behält bei einem genannten Feld, das Sie nicht ändern, den gespeicherten Wert; die angezeigten Werte übernimmt nur der Knopf „Angezeigte Werte übernehmen“ mit gesetztem Haken. Ein vorhandenes Aktionstoken wird nie mehr ersetzt (ein neues entsteht nur, wenn es fehlt), und die Datei wird auch mit einem formwidrigen Token vervollständigt. Token und PIN erscheinen in keiner Meldung mit ihrem Wert, das Protokoll nennt keinen Wert. Gemeinsames Sicherungsmodul 1.3.0.
+- **Statusmeldungen der anderen Plugins unter `haus/meldung` (Auftrag des Hausherrn 23.11.2026):** Neuer Haken
+  „Meldungen unter haus/meldung annehmen“ im Reiter *Einstellungen*, ab Werk aus. Nach einem Update ist er an, wenn unter
+  „Meldungen anderer Plugins annehmen von“ schon ein Plugin freigegeben ist (Entscheidung des Hausherrn 24.11.2026), sonst aus. Ist er an, hält
+  ein eigener Begleitprozess (`bin/sg_meldung.php`, vom Wecker gestartet wie der Haus-Leser) das Abo `haus/meldung/+`.
+  Plugins mit eingeschalteten „Meldungen an SignalBot“ (gemeinsames Modul `meldung.php`) schicken dorthin JSON
+  `{"text", "dringend", "anlass", "zeit"}`, nie retained. Angenommen wird nur von Ordnern, die unter „Meldungen anderer
+  Plugins annehmen von“ angehakt sind; danach gilt derselbe Weg wie für `<präfix>/befehl/plugin/<ordner>` (Bremse,
+  Ziele, Nachtruhe, Ordner in eckigen Klammern). Quittung auf `haus/meldung/<ordner>/quittung`, nie retained:
+  `angenommen` oder `abgelehnt: <Grund>`; dieselbe Nutzlast desselben Absenders binnen 60 s wird als `wiederholt`
+  abgelehnt, eine zurückbehaltene Meldung ohne Quittung verworfen. Der Reiter *Test* zeigt, ob der Leser verbunden ist
+  und was zuletzt ankam. Der alte Weg über die Befehlsbrücke bleibt unverändert.
+- **Ordnernamen mit Bindestrich:** „Meldungen anderer Plugins annehmen von“ listet und nimmt jetzt auch Plugins wie
+  `chromecast-4lox-ng` und `smartmeter-classic` an (bisher nur `a-z`, `0-9`, `_`). Über die Befehlsbrücke
+  (`plugin/<ordner>`) erreichen sie SignalBot weiter nicht, unter `haus/meldung/<ordner>` schon.
+- **Formwidriges Aktionstoken gilt weiter (Entscheidung des Hausherrn 24.11.2026):** Ein gespeichertes Aktionstoken, das nicht aus mindestens 24 Buchstaben und Ziffern besteht, sperrte bisher den Endpunkt für Loxone (503 `NICHT_EINGERICHTET`, auch auf das richtige Token). Jetzt sperrt nur ein fehlendes oder leeres Token; ein formwidriges gilt weiter, bleibt unverändert und steht als Hinweis im Reiter *Test*.
+
 ## Neu in 0.9.43
 
 - Gemeinsames Sprachmodul 1.5.0 (Entscheidung des Hausherrn 22.11.2026): Die Nachtruhe der Ansagen kann an Nicht-Schultagen (Samstag, Sonntag, Feiertage, Ferien) später enden. Neues Feld „Nachtruhe an Nicht-Schultagen bis“ bei „Wann gesprochen wird“, ab Werk leer: Dann gilt die Zeit, die im Plugin Ferien und Feiertage eingestellt ist (MQTT-Thema `haus/ansage/nachtruhe_frei_bis`); ohne sie endet die Nachtruhe wie an Schultagen. Ob heute ein Schultag ist, sagt `haus/kalender/heute/frei` (nur bei `haus/kalender/datum` = heute); ohne diese Aussage zählen nur Samstag und Sonntag. Dringende Ansagen übergehen die Nachtruhe wie bisher. Ohne Vorgabe und ohne eigene Zeit ändert sich nichts.
