@@ -8,6 +8,10 @@
 # Rueckgabewert 0 = in Ordnung, 1 = Warnung, aber weiter, 2 = Installation
 # abbrechen. Dieses Skript endet immer mit 0: es soll eine Aktualisierung
 # nie verhindern.
+# [upgrade_daten] Argumente des Installers festhalten - unten sichert der gemeinsame Baustein
+# [upgrade_daten] upgrade_daten.sh (neben diesem Skript) den ganzen Datenordner.
+UPGD_ORDNER="$3"; UPGD_WURZEL="$5"
+
 ARGV3=$3
 ARGV5=$5
 # Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset). Das
@@ -180,4 +184,17 @@ fi
 # sorgt nur dafuer, dass in dieser Zeit kein ZWEITER dazukommt.
 
 zs_schluss
+# befehle/ ueberlebt das Update bewusst nicht: die Befehlsbruecke legt den Ordner samt Optionsdatei beim
+# Start neu an (Regeln/06, Entscheidung des Hausherrn 15.11.2026). Alles andere im Datenordner traegt der
+# Baustein unten ueber das Update.
+UPGD_OHNE="befehle"
+# [upgrade_daten] Gemeinsamer Baustein (Werkzeuge/gemeinsam/upgrade_daten.sh): den ganzen Datenordner
+# [upgrade_daten] neben den Ordner sichern; misslingt das, bricht die Aktualisierung mit Rueckgabe 2 ab.
+if [ -f "$(dirname "$0")/upgrade_daten.sh" ] && . "$(dirname "$0")/upgrade_daten.sh"; then
+    upgrade_daten_sichern "$UPGD_ORDNER" "$UPGD_WURZEL" || exit 2
+else
+    echo "<FAIL> Der Baustein upgrade_daten.sh fehlt neben $(basename "$0") - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt installiert."
+    exit 2
+fi
 exit 0
